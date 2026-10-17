@@ -1,6 +1,6 @@
 // ------------ Steam Integration ------------
-// For games that also exist on Steam. Detects whether an install came from Steam, finds steam.exe,
-// and launches, updates or uninstalls the game through it.
+// For games that also exist on Steam. Detects whether an install came from Steam, finds steam.exe, and launches or
+// uninstalls the game through it. Peebify installs, updates and repairs the Steam copy's files like any other install.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -16,7 +16,6 @@ use super::process_utils::CREATE_NO_WINDOW;
 pub fn app_id(profile: &Value) -> Option<&str> {
     profile.get("steamAppId")?.as_str()
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SteamSignal {
     Marker(PathBuf),
@@ -169,10 +168,6 @@ pub async fn launch(steam_exe: &Path, app_id: &str, args: &[String]) -> Result<C
     let mut argv = vec!["-applaunch".to_string(), app_id.to_string()];
     argv.extend_from_slice(args);
     spawn(steam_exe, &argv)
-}
-
-pub async fn request_update(steam_exe: &Path, app_id: &str) -> Result<Child, String> {
-    spawn(steam_exe, &[format!("steam://run/{app_id}")])
 }
 
 pub async fn request_uninstall(steam_exe: &Path, app_id: &str) -> Result<Child, String> {

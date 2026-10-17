@@ -1,22 +1,26 @@
 // ------------ Launcher News ------------
 // Turns each game's news source into one common shape (notices, news and a slideshow) for the home screen.
-// A few games have their own adapter below; HoYoPlay and Hypergryph are fetched elsewhere, and the rest fall back to the launcher's api.json.
+// Most games have their own adapter below; Hypergryph, DNA and Yostar keep theirs beside their downloaders, and the
+// rest fall back to the launcher's api.json.
 
 use serde_json::{json, Value};
 
-use super::bd2;
-use super::bluepoch;
-use super::http;
+use super::game_profiles::profile_str;
+use super::{bluepoch, http};
 
 pub(crate) const MAX_ITEMS: usize = 12;
 pub const MAX_SLIDES: usize = 5;
 
-pub fn as_i64(v: Option<&Value>) -> i64 {
+pub fn int_of(v: Option<&Value>) -> Option<i64> {
     match v {
-        Some(Value::Number(n)) => n.as_i64().unwrap_or(0),
-        Some(Value::String(s)) => s.parse().unwrap_or(0),
-        _ => 0,
+        Some(Value::Number(n)) => n.as_i64(),
+        Some(Value::String(s)) => s.parse().ok(),
+        _ => None,
     }
+}
+
+pub fn as_i64(v: Option<&Value>) -> i64 {
+    int_of(v).unwrap_or(0)
 }
 
 pub fn as_str(v: Option<&Value>) -> &str {
@@ -515,9 +519,9 @@ fn bd2_collect_slideshow(media: &Value) -> Vec<Value> {
 }
 
 pub async fn get_bd2_news(profile: &Value) -> Result<Value, String> {
-    let api = bd2::news_api(profile).trim_end_matches('/').to_string();
-    let site = bd2::news_site(profile).to_string();
-    let locale = bd2::news_locale(profile).to_string();
+    let api = profile_str(profile, "bdNewsApiUrl").trim_end_matches('/').to_string();
+    let site = profile_str(profile, "bdNewsUrl").to_string();
+    let locale = profile_str(profile, "bdNewsLocale").to_string();
 
     let page_url = format!("{api}/notices?locale={locale}&page=0&limit={BD2_PAGE_SIZE}");
     let events_url = format!(
@@ -719,27 +723,438 @@ mod bd2_tests {
     }
 }
 
+// ------------ HoYoPlay News ------------
+// The Hoyoverse launcher's web API gives each Hoyoverse game's news and banners.
+mod hoyoplay {
+    use serde_json::Value;
+
+    use super::super::{http, sophon};
+    use super::{article, envelope, short_date, slide, MAX_ITEMS, MAX_SLIDES};
+
+    pub async fn get_game_content(game_id: &str) -> Result<Value, String> {
+        http::get_json(&sophon::build_url("getGameContent", &[("game_id", game_id)])).await
+    }
+
+    pub fn to_peebify_news(content_response: &Value) -> Value {
+        let content = &content_response["data"]["content"];
+        let empty: Vec<Value> = Vec::new();
+        let posts = content["posts"].as_array().unwrap_or(&empty);
+        let banners = content["banners"].as_array().unwrap_or(&empty);
+
+        let as_item = |p: &Value| {
+            article(
+                p.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                p.get("link").and_then(|v| v.as_str()).unwrap_or(""),
+                short_date(p.get("date").and_then(|v| v.as_str()).unwrap_or("")),
+            )
+        };
+
+        let titled = |p: &&Value| !p["title"].as_str().unwrap_or("").trim().is_empty();
+        let notice: Vec<Value> = posts
+            .iter()
+            .filter(|p| p["type"].as_str() == Some("POST_TYPE_ANNOUNCE"))
+            .filter(titled)
+            .take(MAX_ITEMS)
+            .map(as_item)
+            .collect();
+        let news: Vec<Value> = posts
+            .iter()
+            .filter(|p| p["type"].as_str() != Some("POST_TYPE_ANNOUNCE"))
+            .filter(titled)
+            .take(MAX_ITEMS)
+            .map(as_item)
+            .collect();
+        let slideshow: Vec<Value> = banners
+            .iter()
+            .filter_map(|b| {
+                let url = b["image"]["url"].as_str().unwrap_or("");
+                (!url.is_empty())
+                    .then(|| slide(url, b["image"]["link"].as_str().unwrap_or("")))
+            })
+            .take(MAX_SLIDES)
+            .collect();
+
+        envelope(notice, news, slideshow)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use serde_json::json;
+
+        #[test]
+        fn news_drops_blank_posts_and_imageless_banners_and_is_capped() {
+            let mut posts: Vec<Value> = (0..20)
+                .map(|i| json!({ "type": "POST_TYPE_INFO", "title": format!("news {i}"), "link": "https://j", "date": "09/18" }))
+                .collect();
+            posts.push(json!({ "type": "POST_TYPE_ANNOUNCE", "title": "  ", "link": "https://j", "date": "09/18" }));
+            posts.push(json!({ "type": "POST_TYPE_ANNOUNCE", "title": "Maintenance", "link": "https://j", "date": "09/18" }));
+            let banners: Vec<Value> = (0..8)
+                .map(|i| {
+                    let url = if i == 0 { String::new() } else { format!("https://img/{i}") };
+                    json!({ "image": { "url": url, "link": "https://b" } })
+                })
+                .collect();
+            let out = to_peebify_news(&json!({ "data": { "content": { "posts": posts, "banners": banners } } }));
+            let notices = out["guidance"]["notice"]["contents"].as_array().unwrap();
+            assert_eq!(notices.len(), 1);
+            assert_eq!(notices[0]["content"], "Maintenance");
+            assert_eq!(
+                out["guidance"]["news"]["contents"].as_array().unwrap().len(),
+                super::MAX_ITEMS
+            );
+            let slides = out["slideshow"].as_array().unwrap();
+            assert_eq!(slides.len(), super::MAX_SLIDES);
+            assert_eq!(slides[0]["url"], "https://img/1");
+            assert_eq!(slides[0]["jumpUrl"], "https://b");
+        }
+    }
+}
+
+// ------------ Nexon Forum News ------------
+// Reads a game's Nexon community forum (Blue Archive) for the home screen. The forum page is rendered in the browser
+// from a small JSON API: one call lists a board's threads, one call describes the community and carries its banner
+// carousel.
+mod nexon_forum {
+    use serde_json::Value;
+
+    use super::super::game_profiles::profile_str;
+    use super::super::http;
+    use super::{article, as_i64, as_str, envelope, local_month_day, slide, MAX_ITEMS, MAX_SLIDES};
+
+    fn profile_boards(profile: &Value, key: &str) -> Vec<String> {
+        let mut boards: Vec<String> = Vec::new();
+        for entry in profile.get(key).and_then(Value::as_array).into_iter().flatten() {
+            let id = match entry {
+                Value::String(text) => text.trim().to_string(),
+                Value::Number(number) => number.to_string(),
+                _ => continue,
+            };
+            if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) && !boards.contains(&id) {
+                boards.push(id);
+            }
+        }
+        boards
+    }
+
+    fn is_plain_token(text: &str) -> bool {
+        !text.is_empty() && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    }
+
+    fn thread_url(base: &str, alias: &str, board: &str, thread: &str) -> String {
+        format!("{base}/{alias}/board_view?board={board}&thread={thread}")
+    }
+
+    fn threads_url(base: &str, alias: &str, board: &str) -> String {
+        format!(
+            "{base}/api/v1/board/{board}/threads?alias={alias}&pageNo=1&blockStartKey=&blockStartNo=&paginationType=PAGING\
+             &pageSize={MAX_ITEMS}&blockSize=5&hideType=WEB&headlineId=&searchKeywordType=THREAD_TITLE_AND_CONTENT&keywords="
+        )
+    }
+
+    fn community_url(base: &str, alias: &str, country: &str) -> String {
+        format!("{base}/api/v1/community/{alias}?alias={alias}&countryCode={country}")
+    }
+
+    fn error_of(body: &Value) -> Option<String> {
+        let code = body.get("errorCode").and_then(Value::as_i64)?;
+        let message = body.get("error").and_then(Value::as_str).unwrap_or("no message");
+        Some(format!("Nexon forum answered error {code}: {message}"))
+    }
+
+    fn visible_threads(body: &Value) -> Vec<&Value> {
+        body.get("threads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|thread| {
+                let hidden = thread.get("isDelete").and_then(Value::as_bool).unwrap_or(false)
+                    || thread.get("isWebHide").and_then(Value::as_bool).unwrap_or(false);
+                let live = thread.get("release").and_then(Value::as_str).map_or(true, |r| r == "ON");
+                !hidden && live && !as_str(thread.get("title")).trim().is_empty()
+            })
+            .collect()
+    }
+
+    fn rows_from(body: &Value, base: &str, alias: &str, board: &str) -> Vec<(i64, i64, Value)> {
+        visible_threads(body)
+            .into_iter()
+            .map(|thread| {
+                let id = as_str(thread.get("threadId"));
+                let at = as_i64(thread.get("createDate"));
+                (
+                    at,
+                    as_i64(thread.get("threadId")),
+                    article(
+                        as_str(thread.get("title")).trim(),
+                        thread_url(base, alias, board, id),
+                        local_month_day(at),
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    fn merge_rows(mut rows: Vec<(i64, i64, Value)>) -> Vec<Value> {
+        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut seen: Vec<i64> = Vec::new();
+        let mut merged = Vec::new();
+        for (_, id, row) in rows {
+            if id != 0 && seen.contains(&id) {
+                continue;
+            }
+            seen.push(id);
+            merged.push(row);
+            if merged.len() == MAX_ITEMS {
+                break;
+            }
+        }
+        merged
+    }
+
+    fn slides_from(community: &Value, base: &str, alias: &str) -> Vec<Value> {
+        let banners = community
+            .pointer("/communityHome/webPlace/pcBanners")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        let home = format!("{base}/{alias}");
+        let mut seen: Vec<&str> = Vec::new();
+        let mut slides = Vec::new();
+        for banner in banners {
+            let image = as_str(banner.get("webImageUrl")).trim();
+            if !image.starts_with("https://") || seen.contains(&image) {
+                continue;
+            }
+            let target = as_str(banner.get("linkValue")).trim();
+            let jump = if target.starts_with("https://") {
+                target.to_string()
+            } else if !target.is_empty() && target.chars().all(|c| c.is_ascii_digit()) {
+                format!("{home}/board_view?thread={target}")
+            } else {
+                home.clone()
+            };
+            seen.push(image);
+            slides.push(slide(image, &jump));
+            if slides.len() == MAX_SLIDES {
+                break;
+            }
+        }
+        slides
+    }
+
+    async fn get_body(url: &str) -> Result<Value, String> {
+        let body = http::get_json(url).await?;
+        match error_of(&body) {
+            Some(error) => Err(error),
+            None => Ok(body),
+        }
+    }
+
+    async fn board_rows(base: &str, alias: &str, board: &str) -> Result<Vec<(i64, i64, Value)>, String> {
+        let body = get_body(&threads_url(base, alias, board)).await?;
+        Ok(rows_from(&body, base, alias, board))
+    }
+
+    async fn boards_rows(base: &str, alias: &str, boards: &[String]) -> (Vec<Value>, Option<String>) {
+        let requests = boards.iter().map(|board| board_rows(base, alias, board));
+        let mut rows = Vec::new();
+        let mut loaded = false;
+        let mut last_error = None;
+        for result in futures::future::join_all(requests).await {
+            match result {
+                Ok(found) => {
+                    loaded = true;
+                    rows.extend(found);
+                }
+                Err(e) => last_error = Some(e),
+            }
+        }
+        let error = if loaded { None } else { last_error };
+        (merge_rows(rows), error)
+    }
+
+    pub async fn get_news(profile: &Value) -> Result<Value, String> {
+        let base = profile_str(profile, "nexonForumUrl").trim_end_matches('/');
+        let alias = profile_str(profile, "nexonForumAlias");
+        let country = match profile_str(profile, "nexonCountryCode") {
+            "" => "US",
+            country => country,
+        };
+        if !base.starts_with("https://") || !is_plain_token(alias) || !is_plain_token(country) {
+            return Err("profile is missing a valid Nexon forum address".to_string());
+        }
+        let notice_boards = profile_boards(profile, "nexonNoticeBoards");
+        let news_boards = profile_boards(profile, "nexonNewsBoards");
+
+        let community_address = community_url(base, alias, country);
+        let ((notices, notice_error), (news, news_error), community) = futures::join!(
+            boards_rows(base, alias, &notice_boards),
+            boards_rows(base, alias, &news_boards),
+            get_body(&community_address),
+        );
+
+        let slides = match &community {
+            Ok(body) => slides_from(body, base, alias),
+            Err(e) => {
+                log::warn!("news: Nexon forum banners failed ({e}); showing none");
+                Vec::new()
+            }
+        };
+        if notices.is_empty() && news.is_empty() && slides.is_empty() {
+            return Err(notice_error
+                .or(news_error)
+                .or(community.err())
+                .unwrap_or_else(|| "the Nexon forum returned no posts".to_string()));
+        }
+        Ok(envelope(notices, news, slides))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use serde_json::json;
+
+        const BASE: &str = "https://forum.nexon.com";
+        const ALIAS: &str = "bluearchive-en";
+
+        #[test]
+        fn threads_become_articles_that_open_on_the_forum() {
+            let body = json!({ "threads": [
+                { "threadId": "3554410", "title": " Toy Pre-Orders ", "createDate": 1790668800, "release": "ON", "isSticky": true },
+                { "threadId": "3550470", "title": "Developer's Letter", "createDate": 1790132400, "release": "ON" },
+                { "threadId": "1", "title": "Deleted", "createDate": 1, "isDelete": true },
+                { "threadId": "2", "title": "Hidden on web", "createDate": 2, "isWebHide": true },
+                { "threadId": "3", "title": "Draft", "createDate": 3, "release": "OFF" },
+                { "threadId": "4", "title": "   ", "createDate": 4 },
+            ]});
+            let rows = rows_from(&body, BASE, ALIAS, "3028");
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].2["content"], "Toy Pre-Orders");
+            assert_eq!(
+                rows[0].2["jumpUrl"],
+                "https://forum.nexon.com/bluearchive-en/board_view?board=3028&thread=3554410"
+            );
+        }
+
+        #[test]
+        fn boards_merge_newest_first_without_repeats_and_are_capped() {
+            let mut rows = vec![
+                (100, 1, article("Old", "https://x/1", "")),
+                (300, 3, article("New", "https://x/3", "")),
+                (200, 2, article("Mid", "https://x/2", "")),
+                (300, 3, article("New again", "https://x/3", "")),
+            ];
+            let merged = merge_rows(rows.clone());
+            let titles: Vec<&str> = merged.iter().filter_map(|a| a["content"].as_str()).collect();
+            assert_eq!(titles, vec!["New", "Mid", "Old"]);
+            for n in 10..40 {
+                rows.push((n, n, article("Filler", "https://x/f", "")));
+            }
+            assert_eq!(merge_rows(rows).len(), MAX_ITEMS);
+        }
+
+        #[test]
+        fn forum_banners_become_slides_with_safe_links() {
+            let community = json!({ "communityHome": { "webPlace": { "pcBanners": [
+                { "webImageUrl": "https://cdn.example/a.png", "linkType": "WEB_LINK", "linkValue": "https://forum.nexon.com/bluearchive-en/board_view?board=3218&thread=1" },
+                { "webImageUrl": "https://cdn.example/a.png", "linkValue": "https://forum.nexon.com/other" },
+                { "webImageUrl": "https://cdn.example/b.png", "linkValue": "3550498" },
+                { "webImageUrl": "https://cdn.example/c.png", "linkValue": "javascript:alert(1)" },
+                { "webImageUrl": "http://cdn.example/insecure.png", "linkValue": "3" },
+                { "webImageUrl": "", "linkValue": "4" },
+            ]}}});
+            let slides = slides_from(&community, BASE, ALIAS);
+            assert_eq!(slides.len(), 3);
+            assert_eq!(slides[0]["jumpUrl"], "https://forum.nexon.com/bluearchive-en/board_view?board=3218&thread=1");
+            assert_eq!(slides[1]["jumpUrl"], "https://forum.nexon.com/bluearchive-en/board_view?thread=3550498");
+            assert_eq!(slides[2]["jumpUrl"], "https://forum.nexon.com/bluearchive-en");
+        }
+
+        #[test]
+        fn board_ids_must_be_plain_numbers() {
+            let profile = json!({ "nexonNoticeBoards": ["3028", 3219, "3028", "../x", "", true] });
+            assert_eq!(profile_boards(&profile, "nexonNoticeBoards"), vec!["3028".to_string(), "3219".to_string()]);
+            assert!(profile_boards(&json!({}), "nexonNoticeBoards").is_empty());
+        }
+
+        #[test]
+        fn an_error_body_is_an_error_not_empty_news() {
+            let failed = json!({ "errorCode": 4, "error": "invalid parameter" });
+            assert!(error_of(&failed).unwrap().contains("invalid parameter"));
+            assert!(error_of(&json!({ "threads": [] })).is_none());
+        }
+    }
+}
+
 pub(super) use channels::get_news_data;
 
 // ------------ News Command and Cache ------------
 // The get-news-data command. It picks the right adapter for a game, keeps results for ten minutes, and falls back
-// to the last good copy if a fetch fails.
+// to the last good copy if a fetch fails. The last good copy is also kept on disk, so a fresh start can show it at
+// once (`{ saved: true }`) while the real fetch runs.
 mod channels {
     use std::time::{Duration, Instant};
 
-    use serde_json::{json, Value};
+    use parking_lot::Mutex;
+    use serde_json::{json, Map, Value};
     use tauri::{AppHandle, Manager};
 
-    use super::super::state::BackendState;
+    use super::super::BackendState;
     use super::super::{
-        arg_str, err_response, game_profiles, hoyoplay, http, hypergryph, ok_with,
-        nexon_forum, resolve_profile, yostar,
+        arg_str, err_response, game_profiles, http, hypergryph, ok_with, resolve_profile, yostar,
     };
+    use super::{hoyoplay, nexon_forum};
 
     const NEWS_CACHE_TTL: Duration = Duration::from_secs(60 * 10);
 
     static NEWS_CACHE: http::TtlCache<Value> =
         http::TtlCache::new(NEWS_CACHE_TTL, game_profiles::GAME_IDS.len());
+
+    const SAVED_NEWS_NAME: &str = "news-cache.json";
+
+    static SAVED: Mutex<Option<Map<String, Value>>> = Mutex::new(None);
+
+    fn saved_path(app: &AppHandle) -> std::path::PathBuf {
+        app.state::<BackendState>().user_data.join(SAVED_NEWS_NAME)
+    }
+
+    async fn saved_news(app: &AppHandle, game_id: &str) -> Option<Value> {
+        if SAVED.lock().is_none() {
+            let path = saved_path(app);
+            let read = tauri::async_runtime::spawn_blocking(move || {
+                std::fs::read(path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Map<String, Value>>(&bytes).ok())
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+            SAVED.lock().get_or_insert(read);
+        }
+        SAVED.lock().as_ref()?.get(game_id).cloned()
+    }
+
+    fn save_news(app: &AppHandle, game_id: &str, news: &Value) {
+        let bytes = {
+            let mut saved = SAVED.lock();
+            let map = saved.get_or_insert_with(Map::new);
+            if map.get(game_id) == Some(news) {
+                return;
+            }
+            map.insert(game_id.to_string(), news.clone());
+            serde_json::to_vec(map)
+        };
+        let Ok(bytes) = bytes else {
+            return;
+        };
+        let path = saved_path(app);
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(e) = super::super::fs_util::write_atomic(&path, &bytes) {
+                log::debug!("news: could not save the copy on disk: {e}");
+            }
+        });
+    }
 
     fn news_response(game_id: &str, news: Value) -> Value {
         ok_with(json!({ "gameId": game_id, "data": news }))
@@ -821,6 +1236,20 @@ mod channels {
         Some(pair)
     }
 
+    fn serve_and_save(
+        app: &AppHandle,
+        game_id: &str,
+        source: &str,
+        started: Instant,
+        fetched: Result<Value, String>,
+        stale: Option<Value>,
+    ) -> Value {
+        if let Ok(news) = &fetched {
+            save_news(app, game_id, news);
+        }
+        serve_fetched(game_id, source, started, fetched, stale)
+    }
+
     pub(crate) async fn get_news_data(app: &AppHandle, args: &[Value]) -> Result<Value, String> {
         let profile = resolve_profile(app, arg_str(args, 0));
         let game_id = game_profiles::profile_id(profile);
@@ -829,11 +1258,26 @@ mod channels {
         if let Some((data, true)) = &cached {
             return Ok(news_response(game_id, data.clone()));
         }
-        let stale = cached.map(|(data, _)| data);
+        let stale = match cached.map(|(data, _)| data) {
+            Some(data) => Some(data),
+            None => saved_news(app, game_id).await,
+        };
+
+        let saved_only = args.get(1).and_then(|o| o.get("saved")).and_then(Value::as_bool) == Some(true);
+        if saved_only {
+            return Ok(ok_with(json!({ "gameId": game_id, "data": stale })));
+        }
         let started = Instant::now();
 
         if let Some((source, fetched)) = fetch_adapter_news(profile).await {
-            return Ok(serve_fetched(game_id, source, started, fetched, stale));
+            return Ok(serve_and_save(app, game_id, source, started, fetched, stale));
+        }
+
+        if !super::super::api_config::peebify_content_on(app) {
+            return Ok(news_response(
+                game_id,
+                stale.unwrap_or_else(|| super::envelope(Vec::new(), Vec::new(), Vec::new())),
+            ));
         }
 
         let api_config = app.state::<BackendState>().api_config.clone();
@@ -843,15 +1287,11 @@ mod channels {
             }
         }
 
-        let client_key = profile
-            .get("apiClientKey")
-            .and_then(|v| v.as_str())
-            .unwrap_or(game_id);
-        let fetched = match api_config.news_url_for_client(Some(client_key)) {
+        let fetched = match api_config.news_url_for_client(Some(game_id)) {
             Some(url) => http::get_json(&url).await,
             None => Err("the API config is not loaded".to_string()),
         };
-        Ok(serve_fetched(game_id, "api.json", started, fetched, stale))
+        Ok(serve_and_save(app, game_id, "api.json", started, fetched, stale))
     }
 
     #[cfg(test)]

@@ -1,41 +1,60 @@
-// ------------ Gallery Page ------------
-// The Gallery tab. Lists the screenshots and clips the overlay saved, grouped by day, with filters for game and
-// type, a select mode for bulk actions, and a viewer to open any capture.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// ------------ Gallery ------------
+// The Gallery page with its capture tiles and the bar for bulk actions on selected captures.
+import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
 import { AnimatePresence, m } from "framer-motion";
-import { CheckSquare, FolderOpen, Images, RefreshCw, Settings } from "lucide-react";
+import {
+  CheckSquare,
+  FolderOpen,
+  Images,
+  RefreshCw,
+  Settings,
+  ExternalLink,
+  X,
+  Check,
+  Film,
+  Image as ImageIcon,
+} from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { useMediaStore, type KindFilter } from "../../store/mediaStore";
 import { useSettingsStore } from "../../store/settingsStore";
 import { useSessionUiStore } from "../../store/sessionUiStore";
 import { useUiStore } from "../../store/uiStore";
-import { getOverlayConfig, onCapturesChanged, openCaptureFolder } from "../../lib/ipc";
-import { useEscapeKey } from "../../lib/useClickOutside";
-import { useTauriEvent } from "../../lib/useTauriEvent";
+import {
+  onCapturesChanged,
+  openCaptureFolder,
+  type MediaItem,
+  openCapture,
+  revealCapture,
+} from "../../lib/ipc";
+import { reads, useRemembered } from "../../lib/launcherHooks";
+import { Hint } from "../ui/Tooltip";
+import { useEscapeKey, useTauriEvent } from "../../lib/hooks";
 import { fadeVariants } from "../../lib/motion";
-import { GAMES } from "../../data/games";
-import { ActionButton } from "../ui/ActionButton";
+import { GAMES, gameMeta } from "../../data/games";
+import { ActionButton, Chip } from "../ui/controls";
 import { GlassPage } from "../ui/GlassPage";
 import { Select } from "../ui/Select";
-import { MediaTile } from "./MediaTile";
-import { MediaViewer } from "./MediaViewer";
-import { SelectionBar } from "./SelectionBar";
-import { groupByDay } from "./media";
+import { MediaViewer, DeleteButton } from "./MediaViewer";
+import { fmtDayHeading, groupByDay } from "../../lib/playtime";
+import type { TKey } from "../../lib/i18n";
+import { useT } from "../../lib/useT";
+import { LazyClip, tileMedia } from "./media";
+import { iconFallback, iconSrcFor } from "../../lib/customMedia";
+import { useCustomizationStore } from "../../store/customizationStore";
 
+// ------------ Gallery Page ------------
+// The Gallery tab. Lists the screenshots and clips the overlay saved, grouped by day, with filters for game and
+// type, a select mode for bulk actions, and a viewer to open any capture.
 const PAGE = 96;
 
-const KIND_CHIPS: { value: KindFilter; label: string }[] = [
-  { value: "all", label: "All" },
-  { value: "screenshot", label: "Screenshots" },
-  { value: "clip", label: "Clips" },
-];
-
-const GAME_OPTIONS = [
-  { value: "all", label: "All games" },
-  ...GAMES.map((g) => ({ value: g.id, label: g.name })),
+const KIND_CHIPS: { value: KindFilter; label: TKey }[] = [
+  { value: "all", label: "gallery.kinds.all" },
+  { value: "screenshot", label: "common.screenshots" },
+  { value: "clip", label: "gallery.kinds.clips" },
 ];
 
 const noop = () => {};
+const takenAt = (item: MediaItem) => item.takenAt;
 
 const KEY_IGNORE =
   "input, textarea, select, [contenteditable=true], [role=menu], [role=listbox], [aria-expanded=true]";
@@ -44,25 +63,16 @@ function CaptureHint() {
   const overlayOn = useSettingsStore((s) => s.values.overlayEnabled === "true");
   const setView = useUiStore((s) => s.setView);
   const setSettingsCat = useSessionUiStore((s) => s.setSettingsCat);
-  const [shotKey, setShotKey] = useState("Alt+S");
-
-  useEffect(() => {
-    let cancelled = false;
-    void getOverlayConfig().then((config) => {
-      const key = config?.hotkeys.find((h) => h.id === "overlayShotHotkey")?.accelerator;
-      if (!cancelled && key) setShotKey(key);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const t = useT();
+  const config = useRemembered(reads.overlayConfig, []);
+  const shotKey = config?.hotkeys.find((h) => h.id === "overlayShotHotkey")?.accelerator || "Alt+S";
 
   return (
     <>
       <p className="max-w-[52ch] text-[12.5px] text-white/45">
         {overlayOn
-          ? `Press ${shotKey} in game to take a screenshot.`
-          : `Turn on the game overlay, then press ${shotKey} in game to take a screenshot.`}
+          ? t("gallery.hintOverlayOn", { key: shotKey })
+          : t("gallery.hintOverlayOff", { key: shotKey })}
       </p>
       <ActionButton
         icon={<Settings size={14} />}
@@ -71,45 +81,21 @@ function CaptureHint() {
           setView("settings");
         }}
       >
-        Open overlay settings
+        {t("gallery.openOverlaySettings")}
       </ActionButton>
     </>
   );
 }
 
-function Chip({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      className={`rounded-ui border px-[12px] py-[7px] text-[12.5px] font-medium transition-colors duration-150 ${
-        active
-          ? "border-white/[0.16] bg-white/[0.10] text-white"
-          : "border-white/[0.08] text-white/55 hover:bg-white/[0.05] hover:text-white"
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
-function CapturesHeader() {
+function OpenFolderButton() {
   const folder = useMediaStore((s) => s.folder);
+  const t = useT();
   return (
-    <span className="inline-flex" title={folder || undefined}>
+    <Hint tip={folder || undefined}>
       <ActionButton icon={<FolderOpen size={14} />} onClick={() => void openCaptureFolder()}>
-        Open folder
+        {t("gallery.openFolder")}
       </ActionButton>
-    </span>
+    </Hint>
   );
 }
 
@@ -134,10 +120,18 @@ function CapturesTab() {
   const toggleSelected = useMediaStore((s) => s.toggleSelected);
   const selectMany = useMediaStore((s) => s.selectMany);
   const clearSelection = useMediaStore((s) => s.clearSelection);
+  const t = useT();
+  const gameOptions = useMemo(
+    () => [
+      { value: "all", label: t("gallery.allGames") },
+      ...GAMES.map((g) => ({ value: g.id, label: g.name })),
+    ],
+    [t],
+  );
 
   const [viewing, setViewing] = useState<string | null>(null);
-  const [limit, setLimit] = useState(PAGE);
   const viewedIndex = useRef(0);
+  const [limit, setLimit] = useState(PAGE);
   const anchor = useRef<string | null>(null);
   const sentinel = useRef<HTMLDivElement>(null);
 
@@ -169,10 +163,10 @@ function CapturesTab() {
     [items, kind, gameId],
   );
   const shown = useMemo(() => visible.slice(0, limit), [visible, limit]);
-  const groups = useMemo(() => groupByDay(shown), [shown]);
+  const groups = useMemo(() => groupByDay(shown, takenAt), [shown]);
   const dayPaths = useMemo(() => {
     const byDay = new Map<string, string[]>();
-    for (const group of groupByDay(visible)) {
+    for (const group of groupByDay(visible, takenAt)) {
       const paths = group.items.map((i) => i.path);
       const known = byDay.get(group.key);
       if (known) known.push(...paths);
@@ -254,32 +248,38 @@ function CapturesTab() {
         <div className="flex flex-wrap gap-[6px]">
           {KIND_CHIPS.map((c) => (
             <Chip key={c.value} active={kind === c.value} onClick={() => setKind(c.value)}>
-              {c.label}
+              {t(c.label)}
             </Chip>
           ))}
         </div>
-        <Select ariaLabel="Game" value={gameId} onChange={setGame} options={GAME_OPTIONS} />
+        <Select
+          ariaLabel={t("gallery.gameFilter")}
+          value={gameId}
+          onChange={setGame}
+          options={gameOptions}
+        />
         <span className="ml-auto text-[12px] tabular-nums text-white/40">
-          {hydrated ? `${visible.length} item${visible.length === 1 ? "" : "s"}` : ""}
+          {hydrated ? t("gallery.itemCount", { count: visible.length }) : ""}
         </span>
+        <OpenFolderButton />
         <ActionButton
           icon={<CheckSquare size={14} />}
           variant={selectMode ? "accent" : "neutral"}
           onClick={() => setSelectMode(!selectMode)}
         >
-          {selectMode ? "Done" : "Select"}
+          {selectMode ? t("common.done") : t("gallery.select")}
         </ActionButton>
       </div>
 
       {error && (
-        <div className="mb-4 flex items-center gap-3 rounded-ui border border-(--color-danger,#f87171)/30 bg-(--color-danger,#f87171)/[0.08] px-4 py-3 text-[12.5px] text-(--color-danger-soft,#fca5a5)">
+        <div className="mb-4 flex items-center gap-3 rounded-ui border border-danger/30 bg-danger/[0.08] px-4 py-3 text-[12.5px] text-danger-soft">
           <span className="min-w-0 flex-1">{error}</span>
           <ActionButton
             icon={<RefreshCw size={14} className={loading ? "animate-spin" : undefined} />}
             disabled={loading}
             onClick={() => void load()}
           >
-            Retry
+            {t("common.retry")}
           </ActionButton>
         </div>
       )}
@@ -287,7 +287,7 @@ function CapturesTab() {
       {!hydrated ? (
         <div
           role="status"
-          aria-label="Loading captures"
+          aria-label={t("gallery.loadingCaptures")}
           className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(200px,1fr))]"
         >
           {Array.from({ length: 8 }, (_, i) => (
@@ -298,7 +298,7 @@ function CapturesTab() {
         <div className="flex flex-col items-center justify-center gap-3 rounded-ui border border-dashed border-white/15 bg-white/[0.04] px-6 py-12 text-center">
           <Images size={22} className="opacity-60" />
           <p className="max-w-[52ch] text-[13.5px] text-white/60">
-            {nothingCaptured ? "Nothing captured yet." : "Nothing matches these filters."}
+            {nothingCaptured ? t("gallery.nothingCaptured") : t("gallery.noMatches")}
           </p>
           {nothingCaptured && <CaptureHint />}
         </div>
@@ -314,7 +314,7 @@ function CapturesTab() {
             {groups.map((group) => (
               <section key={group.key}>
                 <div className="sticky top-0 z-[2] -mx-2 mb-3 flex items-baseline gap-2 rounded-[8px] bg-[rgba(12,12,16,0.92)] px-2 py-2">
-                  <h2 className="text-[14px] font-semibold text-white/90">{group.label}</h2>
+                  <h2 className="text-[14px] font-semibold text-white/90">{fmtDayHeading(group.date)}</h2>
                   <span className="text-[11.5px] tabular-nums text-white/35">
                     {dayPaths.get(group.key)?.length ?? group.items.length}
                   </span>
@@ -326,7 +326,7 @@ function CapturesTab() {
                       }
                       className="ml-auto text-[11.5px] font-medium text-white/50 hover:text-white"
                     >
-                      Select day
+                      {t("gallery.selectDay")}
                     </button>
                   )}
                 </div>
@@ -346,7 +346,7 @@ function CapturesTab() {
             ))}
             {hasMore && (
               <div ref={sentinel} className="flex items-center justify-center py-4">
-                <ActionButton onClick={() => setLimit((l) => l + PAGE)}>Load more</ActionButton>
+                <ActionButton onClick={() => setLimit((l) => l + PAGE)}>{t("gallery.loadMore")}</ActionButton>
               </div>
             )}
           </m.div>
@@ -378,17 +378,169 @@ function CapturesTab() {
 }
 
 export function GalleryPage() {
+  const t = useT();
   return (
-    <GlassPage
-      title="Gallery"
-      subtitle="Screenshots and clips from the overlay on this PC."
-      headerRight={
-        <div className="flex flex-wrap items-center justify-end gap-3">
-          <CapturesHeader />
-        </div>
-      }
-    >
+    <GlassPage title={t("common.gallery")} subtitle={t("gallery.subtitle")}>
       <CapturesTab />
     </GlassPage>
   );
 }
+
+// ------------ Selection Bar ------------
+// The floating bar at the bottom of the gallery while captures are selected. Shows how many are selected and
+// offers select all, open, show in folder, delete and clear.
+function SelectionBar({
+  items,
+  visibleCount,
+  onSelectAll,
+  onClear,
+}: {
+  items: MediaItem[];
+  visibleCount: number;
+  onSelectAll: () => void;
+  onClear: () => void;
+}) {
+  const t = useT();
+  const single = items.length === 1 ? items[0] : null;
+
+  return (
+    <m.div
+      initial={{ opacity: 0, y: 16 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 16 }}
+      transition={{ duration: 0.16 }}
+      className="pointer-events-none fixed bottom-6 left-[60px] right-0 z-(--z-banner) flex justify-center px-6"
+    >
+      <div className="glass pointer-events-auto flex max-w-full flex-wrap items-center gap-2 rounded-ui px-3 py-2 shadow-2xl">
+        <span className="px-2 text-[13px] font-medium tabular-nums text-white/85">
+          {t("gallery.selection.selected", { count: items.length })}
+        </span>
+        {items.length < visibleCount && (
+          <ActionButton icon={<CheckSquare size={14} />} onClick={onSelectAll}>
+            {t("gallery.selection.selectAll", { count: visibleCount })}
+          </ActionButton>
+        )}
+        {single && (
+          <>
+            <ActionButton
+              icon={<ExternalLink size={14} />}
+              onClick={() => void openCapture(single.path)}
+            >
+              {t("gallery.open")}
+            </ActionButton>
+            <ActionButton
+              icon={<FolderOpen size={14} />}
+              onClick={() => void revealCapture(single.path)}
+            >
+              {t("gallery.showInFolder")}
+            </ActionButton>
+          </>
+        )}
+        <DeleteButton items={items} onDeleted={onClear} />
+        <button
+          type="button"
+          aria-label={t("gallery.selection.clear")}
+          onClick={onClear}
+          className="grid h-[34px] w-[34px] place-items-center rounded-ui text-white/60 transition-colors hover:bg-white/[0.08] hover:text-white"
+        >
+          <X size={16} />
+        </button>
+      </div>
+    </m.div>
+  );
+}
+
+// ------------ Capture Tile ------------
+// One screenshot or clip in the gallery grid. Click to open it, or to tick it while in select mode (shift-click
+// selects a range). Clips only load their preview when they scroll into view.
+const MediaTile = memo(function MediaTile({
+  item,
+  selectMode,
+  selected,
+  onOpen,
+  onToggle,
+}: {
+  item: MediaItem;
+  selectMode: boolean;
+  selected: boolean;
+  onOpen: (path: string) => void;
+  onToggle: (path: string, range: boolean) => void;
+}) {
+  const media = tileMedia(item);
+  const game = gameMeta(item.gameId);
+  const icons = useCustomizationStore((s) => s.gameIcons);
+  const t = useT();
+
+  return (
+    <div
+      className={`group relative overflow-hidden rounded-ui border bg-black/40 transition-[border-color,box-shadow] duration-150 has-[>button:focus-visible]:outline-2 has-[>button:focus-visible]:outline-offset-2 has-[>button:focus-visible]:outline-(--accent-a) ${
+        selected
+          ? "border-(--accent-b)/70 shadow-[0_0_0_1px_rgba(var(--accent-b-rgb),0.5)]"
+          : "border-white/[0.08] hover:border-white/20"
+      }`}
+    >
+      <button
+        type="button"
+        onClick={(e) => (selectMode ? onToggle(item.path, e.shiftKey) : onOpen(item.path))}
+        aria-label={selectMode ? t("gallery.tile.select", { name: item.name }) : t("gallery.tile.open", { name: item.name })}
+        aria-pressed={selectMode ? selected : undefined}
+        className={`relative block aspect-video w-full ${selectMode ? "cursor-pointer" : "cursor-zoom-in"}`}
+      >
+        {media.src ? (
+          media.video ? (
+            <LazyClip src={media.src} />
+          ) : (
+            <img
+              src={media.src}
+              alt={item.name}
+              loading="lazy"
+              decoding="async"
+              draggable={false}
+              className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+            />
+          )
+        ) : (
+          <span className="grid h-full w-full place-items-center text-white/25">
+            {item.kind === "clip" ? <Film size={26} /> : <ImageIcon size={26} />}
+          </span>
+        )}
+        <span className="pointer-events-none absolute inset-x-0 bottom-0 h-[46px] bg-gradient-to-t from-black/70 to-transparent" />
+        {selectMode && selected && <span className="absolute inset-0 bg-(--accent-b)/15" />}
+      </button>
+
+      <div className="pointer-events-none absolute left-[7px] top-[7px] flex items-center gap-[5px]">
+        {selectMode ? (
+          <span
+            className={`grid h-[20px] w-[20px] place-items-center rounded-[6px] border ${
+              selected
+                ? "accent-grad border-transparent text-(--on-accent)"
+                : "border-white/50 bg-black/45"
+            }`}
+          >
+            {selected && <Check size={13} strokeWidth={3} />}
+          </span>
+        ) : (
+          item.kind === "clip" && (
+            <span className="rounded-[5px] bg-black/65 px-[6px] py-[2px] text-[9.5px] font-semibold uppercase tracking-[0.08em] text-white/85">
+              {t("gallery.clip")}
+            </span>
+          )
+        )}
+      </div>
+
+      <div className="pointer-events-none absolute bottom-[7px] left-[8px] flex max-w-[65%] items-center gap-[6px]">
+        {game.icon && item.gameId && (
+          <img
+            src={iconSrcFor(item.gameId, icons)}
+            onError={iconFallback(item.gameId)}
+            alt=""
+            className="h-[16px] w-[16px] rounded-[4px] object-cover"
+          />
+        )}
+        <span className="truncate text-[11px] text-white/80 opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100">
+          {game.name}
+        </span>
+      </div>
+    </div>
+  );
+});

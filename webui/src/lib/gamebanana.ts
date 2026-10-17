@@ -2,7 +2,8 @@
 // Talks to the backend to browse GameBanana: the mod feed, categories, mod pages, update checks, and
 // installing a mod from a link.
 import { isTauri } from "./tauri";
-import { rpc, rpcAction, rpcRead } from "./rpc";
+import { act, rpc, rpcAction, rpcRead } from "./rpc";
+import { t } from "./i18n";
 
 export interface GameBananaMod {
   id: number;
@@ -116,17 +117,17 @@ export async function gameBananaFeed(
 export function feedErrorText(error: string): { title: string; text: string } {
   if (error === "" || /^Request error|timed out|error sending request/i.test(error)) {
     return {
-      title: "Couldn't reach GameBanana",
-      text: "Check your internet connection, then try again.",
+      title: t("ipc.gamebanana.unreachable.title"),
+      text: t("ipc.gamebanana.unreachable.text"),
     };
   }
   if (/HTTP (429|5\d\d)|Invalid JSON|empty response/.test(error)) {
     return {
-      title: "Couldn't load mods from GameBanana",
-      text: "GameBanana is busy or down right now. Try again in a minute.",
+      title: t("ipc.gamebanana.loadFailed"),
+      text: t("ipc.gamebanana.busy"),
     };
   }
-  return { title: "Couldn't load mods from GameBanana", text: error };
+  return { title: t("ipc.gamebanana.loadFailed"), text: error };
 }
 
 export async function gameBananaCategories(gameId: string): Promise<GameBananaCategory[]> {
@@ -137,16 +138,8 @@ export async function gameBananaCategories(gameId: string): Promise<GameBananaCa
   return r?.success ? (r.categories ?? []) : [];
 }
 
-export async function gameBananaModProfile(
-  modId: number,
-): Promise<GameBananaProfile | undefined> {
-  const r = await rpcAction<{ success?: boolean } & GameBananaProfile>(
-    "Load mod",
-    "gamebanana-mod-profile",
-    modId,
-  );
-  return r?.success ? r : undefined;
-}
+export const gameBananaModProfile = (modId: number) =>
+  act<GameBananaProfile>("actions.failed.loadMod", "gamebanana-mod-profile", modId);
 
 export async function backfillModThumbnails(gameId: string): Promise<number> {
   if (!isTauri()) return 0;
@@ -164,15 +157,15 @@ export interface ModUpdate {
 export async function checkModUpdates(
   gameId: string,
   force: boolean,
-): Promise<{ updates: ModUpdate[]; cached: boolean } | undefined> {
-  if (!isTauri()) return { updates: [], cached: false };
-  const r = await rpcRead<{ success?: boolean; updates?: ModUpdate[]; cached?: boolean }>(
+): Promise<ModUpdate[] | undefined> {
+  if (!isTauri()) return [];
+  const r = await rpcRead<{ success?: boolean; updates?: ModUpdate[] }>(
     "check-mod-updates",
     gameId,
     force,
   );
   if (!r || r.success === false) return undefined;
-  return { updates: r.updates ?? [], cached: r.cached === true };
+  return r.updates ?? [];
 }
 
 export async function updateGameBananaMod(
@@ -180,14 +173,9 @@ export async function updateGameBananaMod(
   modId: string,
   fileId?: number,
 ): Promise<string | undefined> {
-  const r = await rpcAction<{ success?: boolean; folderName?: string }>(
-    "Update mod",
-    "update-gamebanana-mod",
-    gameId,
-    modId,
-    fileId ?? null,
-  );
-  return r?.success ? r.folderName : undefined;
+  const args = [gameId, modId, fileId ?? null];
+  return (await act<{ folderName?: string }>("actions.failed.updateMod", "update-gamebanana-mod", ...args))
+    ?.folderName;
 }
 
 export function installLabel(
@@ -221,12 +209,12 @@ export async function installGameBananaMod(
       return { installed: r.installed ?? [], alreadyInstalled: r.alreadyInstalled === true };
     }
     if (r?.cancelled) return { error: null };
-    return { error: r?.error || "The install did not finish." };
+    return { error: r?.error || t("ipc.gamebanana.installUnfinished") };
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
   }
 }
 
 export async function cancelGameBananaInstall(gameId: string): Promise<void> {
-  await rpcAction("Cancel mod download", "cancel-gamebanana-install", gameId);
+  await rpcAction("actions.failed.cancelModDownload", "cancel-gamebanana-install", gameId);
 }

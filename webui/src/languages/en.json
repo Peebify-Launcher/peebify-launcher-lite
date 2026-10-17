@@ -1,0 +1,1702 @@
+{
+  "_meta": {
+    "name": "English",
+    "englishName": "English",
+    "locale": "en",
+    "authors": "Peebify"
+  },
+  "common": {
+    "cancel": "Cancel",
+    "close": "Close",
+    "confirm": "Confirm",
+    "delete": "Delete",
+    "dismiss": "Dismiss",
+    "done": "Done",
+    "next": "Next",
+    "no": "No",
+    "yes": "Yes",
+    "ok": "OK",
+    "retry": "Retry",
+    "remove": "Remove",
+    "update": "Update",
+    "install": "Install",
+    "uninstall": "Uninstall",
+    "loading": "Loading…",
+    "failed": "Failed",
+    "minimize": "Minimize",
+    "maximize": "Maximize",
+    "settings": "Settings",
+    "mods": "Mods",
+    "downloads": "Downloads",
+    "playtime": "Playtime",
+    "gallery": "Gallery",
+    "captures": "Captures",
+    "screenshots": "Screenshots",
+    "overlay": "Overlay",
+    "notifications": "Notifications",
+    "general": "General",
+    "voicePacks": "Voice packs",
+    "today": "Today",
+    "thisWeek": "This week",
+    "openLogsFolder": "Open logs folder",
+    "reset": "Reset",
+    "open": "Open",
+    "installed": "Installed",
+    "installing": "Installing…",
+    "cancelling": "Cancelling…",
+    "updating": "Updating…",
+    "checking": "Checking…",
+    "checkForUpdates": "Check for updates",
+    "previous": "Previous",
+    "refresh": "Refresh",
+    "rename": "Rename",
+    "duplicate": "Duplicate",
+    "apply": "Apply",
+    "download": "Download",
+    "openFolder": "Open folder",
+    "sort": "Sort",
+    "allTime": "All time",
+    "resume": "Resume",
+    "pause": "Pause",
+    "tryAgain": "Try again",
+    "genericError": "Something went wrong. Check the logs for details."
+  },
+  "format": {
+    "b": "{n} B",
+    "kb": "{n} KB",
+    "mb": "{n} MB",
+    "gb": "{n} GB",
+    "tb": "{n} TB",
+    "kbps": "{n} KB/s",
+    "mbps": "{n} MB/s",
+    "hm": "{h}h {m}m",
+    "ms": "{m}m {s}s",
+    "m": "{m}m",
+    "s": "{s}s",
+    "thousands": "{n}k",
+    "millions": "{n}M",
+    "justNow": "just now",
+    "justNowCapital": "Just now",
+    "never": "Never",
+    "today": "today",
+    "yesterday": "yesterday",
+    "minutesAgo": "{n}m ago",
+    "hoursAgo": "{n}h ago",
+    "daysAgo": "{n}d ago",
+    "monthsAgo": "{n}mo ago",
+    "yearsAgo": "{n}y ago"
+  },
+  "language": {
+    "title": "Language",
+    "description": "The language the launcher is shown in.",
+    "systemDefault": "System default"
+  },
+  "settings": {
+    "sections": {
+      "general": {
+        "title": "Preferences",
+        "subtitle": "Startup, window, notifications, and downloads."
+      },
+      "appearance": {
+        "title": "Appearance",
+        "subtitle": "Wallpapers, icons, game colors, and what the home screen shows."
+      },
+      "games": {
+        "title": "Games",
+        "subtitle": "Pick your preferences for the side-bar, as well as additional customization."
+      },
+      "mods": {
+        "subtitle": "Set up mod support and the XXMI tools."
+      },
+      "overlay": {
+        "subtitle": "The in-game drawer, the on-screen readout, and captures."
+      },
+      "about": {
+        "title": "About",
+        "subtitle": "Troubleshooting, credits, and community."
+      }
+    },
+    "groups": {
+      "homeScreen": "Home screen",
+      "display": "Display",
+      "gameBanana": "GameBanana",
+      "recording": "Recording",
+      "dangerZone": "Danger zone",
+      "modSupport": "Mod support",
+      "languageAndStartup": "Language and startup",
+      "windowBehavior": "Window behavior",
+      "sidebar": "Sidebar",
+      "shortcuts": "Shortcuts",
+      "files": "Files",
+      "troubleshooting": "Troubleshooting",
+      "privacy": "Privacy",
+      "gameDownloads": "Game downloads",
+      "notifications": "Notifications"
+    },
+    "options": {
+      "toTray": "To tray"
+    },
+    "items": {
+      "startOnBoot": {
+        "title": "Start with Windows",
+        "description": "Open the launcher on system startup."
+      },
+      "startOnBootAction": {
+        "title": "On boot, open",
+        "description": "How the launcher appears when it starts with Windows.",
+        "options": {
+          "open": "Normally",
+          "minimized": "Minimized"
+        }
+      },
+      "launchAction": {
+        "title": "When a game launches",
+        "description": "Close hides the launcher until the game exits, then quits."
+      },
+      "reopenAfterGameClose": {
+        "title": "Re-open after the game closes",
+        "description": "Restore the launcher when the game exits."
+      },
+      "closeAction": {
+        "title": "When you press close",
+        "description": "The X button in the top-right corner."
+      },
+      "minimizeAction": {
+        "title": "When you press minimize",
+        "description": "The minimize button next to it."
+      },
+      "rememberWindowState": {
+        "title": "Remember window size & position",
+        "description": "Restore the launcher's last window bounds on startup."
+      },
+      "osNotifications": {
+        "title": "System notifications",
+        "description": "Show Windows notifications for finished downloads and launch failures while the launcher is in the background."
+      },
+      "hideNewsPanel": {
+        "title": "Show news panel",
+        "description": "Per-game news, notices, and the banner slideshow."
+      },
+      "hideSocials": {
+        "title": "Show socials tray",
+        "description": "Social links on the home screen."
+      },
+      "hidePlaytime": {
+        "title": "Show playtime pill",
+        "description": "The playtime tracker by the Start button."
+      },
+      "hideBottomRightButtons": {
+        "title": "Show quick-action buttons",
+        "description": "The repair / settings / folder shortcuts in the bottom-right."
+      },
+      "uiScale": {
+        "title": "Interface size",
+        "description": "Makes text, buttons and panels bigger or smaller. Applied on top of the automatic sizing for your monitor.",
+        "options": {
+          "default": "100% (default)"
+        }
+      },
+      "animatedWallpaper": {
+        "title": "Animated wallpaper",
+        "description": "Use the looping video wallpaper instead of a static image."
+      },
+      "glassEffects": {
+        "title": "Glass effects",
+        "description": "How much blur and glass detail the launcher draws. Lower it on older PCs.",
+        "options": {
+          "full": "Full",
+          "balanced": "Balanced",
+          "lite": "Lite"
+        }
+      },
+      "timeFormat": {
+        "title": "Clock format",
+        "description": "How playtime and session times are written.",
+        "options": {
+          "system": "System",
+          "h12": "12-hour",
+          "h24": "24-hour"
+        }
+      },
+      "showNsfwMods": {
+        "title": "Show NSFW mods",
+        "description": "Show mature-rated mods in the GameBanana browser."
+      },
+      "overlayEnabled": {
+        "title": "Overlay",
+        "description": "Peebify's built-in overlay allows you to manage Mods in-game or capture screenshots & clips."
+      },
+      "overlayShotToast": {
+        "title": "Show a message on screen",
+        "description": "Confirms over the game that a capture was saved, and says why when one fails."
+      },
+      "overlayShotFormat": {
+        "title": "Format",
+        "description": "PNG is lossless and large. JPEG is small and lossy."
+      },
+      "overlayShotQuality": {
+        "title": "JPEG quality",
+        "description": "Higher keeps more detail and makes a bigger file."
+      },
+      "overlayRecRes": {
+        "title": "Resolution",
+        "description": "Recording below your resolution costs less on performance, but loses quality.",
+        "options": {
+          "native": "Same as the game"
+        }
+      },
+      "overlayRecFps": {
+        "title": "Frame rate",
+        "description": "The rate at which to capture the game. Higher hits harder on performance and produces a larger file at the end."
+      },
+      "overlayRecCodec": {
+        "title": "Codec",
+        "description": "H.264 is the most compatible codec, while AV1 produces the smallest file size."
+      },
+      "overlayRecQuality": {
+        "title": "Quality",
+        "description": "Automatically selects bitrate depending on selected quality.",
+        "options": {
+          "efficient": "Efficient",
+          "balanced": "Balanced",
+          "high": "High"
+        }
+      },
+      "peebifyContent": {
+        "title": "Peebify online content",
+        "description": "Requests the latest News & Wallpapers from Peebify.net, the only thing this launcher asks Peebify for. Off, News & Wallpapers stop updating. Highly recommended to keep on."
+      },
+      "openLogs": {
+        "title": "Launcher logs",
+        "description": "Open the folder with launcher logs for troubleshooting.",
+        "button": "Open folder"
+      },
+      "clearData": {
+        "title": "Clear launcher data",
+        "description": "Resets all launcher settings to defaults. Playtime and mod profiles are erased. Installed games stay installed.",
+        "button": "Clear data"
+      },
+      "hideSidebarPlaytime": {
+        "title": "Show Playtime",
+        "description": "Playtime charts and stats."
+      },
+      "hideSidebarGallery": {
+        "title": "Show Gallery",
+        "description": "Your screenshots and clips."
+      },
+      "hideSidebarDownloads": {
+        "title": "Show Downloads",
+        "description": "The download queue and its progress."
+      },
+      "hideSidebarMods": {
+        "title": "Show Mods",
+        "description": "Browse and manage mods."
+      },
+      "hideSidebarVersion": {
+        "title": "Show version",
+        "description": "The release channel and version number at the bottom of the sidebar."
+      },
+      "downloadSpeedLimit": {
+        "title": "Speed limit",
+        "description": "Caps how fast games download and repair. Unlimited uses all of your connection.",
+        "unlimited": "Unlimited"
+      },
+      "downloadWhileGaming": {
+        "title": "While you play",
+        "description": "What game downloads do while a game you started from Peebify is running. Mods always keep going.",
+        "options": {
+          "off": "Keep going",
+          "slow": "Slow down",
+          "pause": "Pause"
+        }
+      },
+      "downloadConnections": {
+        "title": "Connections",
+        "description": "How many connections downloads use at once. Auto works best for most internet connections.",
+        "auto": "Auto"
+      }
+    },
+    "clearData": {
+      "toastTitle": "Clearing launcher data",
+      "toastText": "Peebify will restart when it's done.",
+      "confirmTitle": "Clear launcher data?",
+      "confirmMessage": "This resets all launcher settings to their defaults and erases playtime and mod profiles. Unfinished downloads are discarded. Installed games stay installed. This can't be undone.",
+      "clearing": "Clearing…"
+    },
+    "appearance": {
+      "customWallpaperDescription": "Use a local image or video as the background.",
+      "customWallpaperFor": "Custom wallpaper for {game}",
+      "defaultWallpaperFor": "Default wallpaper for {game}",
+      "selectFile": "Select file",
+      "customIcon": "Custom icon",
+      "defaultIcon": "Default icon",
+      "selectIcon": "Select icon",
+      "gameColors": "Game colors",
+      "gameColorsDescription": "The color each game is drawn in on the Playtime charts.",
+      "changeColor": "Change the color for {game}",
+      "colorFor": "Color for {game}",
+      "resetColorTip": "Reset {game} to its default color",
+      "resetColor": "Reset the color for {game}",
+      "homePreviewLabel": "Preview of the home screen with your choices applied",
+      "wallpaperAndIcon": "Wallpaper and icon",
+      "chooseGame": "Choose a game",
+      "wallpaper": "Wallpaper",
+      "gameIcon": "Game icon",
+      "gameIconDescription": "Replaces the sidebar icon. Static or animated (WebP, GIF).",
+      "defaultTag": "Default",
+      "customTag": "Custom",
+      "chartColors": "Playtime chart colors",
+      "chartPreviewLabel": "Sample week of playtime drawn in these colors",
+      "sidebarHint": "Home and Settings always stay."
+    },
+    "library": {
+      "inSidebar": "In your sidebar",
+      "visibleCount": "{shown} of {total}",
+      "removeFromSidebar": "Remove {game} from the sidebar",
+      "keepOne": "Keep at least one game in the sidebar",
+      "moved": "{game}, position {position} of {total}",
+      "notInSidebar": "Not in your sidebar",
+      "installed": "Installed",
+      "installUnfinished": "Install unfinished",
+      "notInstalled": "Not installed"
+    },
+    "mods": {
+      "enableModSupport": "Enable mod support"
+    },
+    "voicePacks": {
+      "loading": "Loading packs",
+      "loadFailed": "Could not load the pack list. Check your connection and try again.",
+      "noneSelected": "None selected, the game installs without spoken audio",
+      "selectedSummary": "{selected} of {total} selected, {size} on top of the base game",
+      "description": "Spoken audio installed alongside the game. A newly selected pack downloads on the next update, or right away with a repair. Turning a pack off stops future downloads but keeps files already on disk.",
+      "selectAll": "Select all",
+      "packDetailsTagged_one": "{tag} · {size} · {count} file",
+      "packDetailsTagged_other": "{tag} · {size} · {count} files",
+      "packDetails_one": "{size} · {count} file",
+      "packDetails_other": "{size} · {count} files"
+    },
+    "fpsUnlock": {
+      "noCap": "No cap",
+      "status": {
+        "launching": "Starting the game",
+        "attaching": "Attaching",
+        "locating": "Finding the setting",
+        "ready": "Active"
+      },
+      "title": "Unlock the frame rate",
+      "description": "{game} caps at 60. Unlocking it needs admin permissions on game start.",
+      "nextLaunch": "Takes effect the next time you start {game}.",
+      "capTitle": "Frame rate cap",
+      "capDescription": "Unlocks the 60 fps ceiling.",
+      "fpsUnit": "fps",
+      "tabbedOut": "While tabbed out",
+      "tabbedOutDescription": "Keeps fans quiet.",
+      "tabbedOutAria": "Frame rate while tabbed out"
+    },
+    "overlay": {
+      "pressShortcut": "Press a shortcut…",
+      "notSet": "Not set",
+      "pickDifferent": "Pick a different shortcut",
+      "savedWithCatch": "Shortcut saved with a catch",
+      "notSaved": "That shortcut was not saved",
+      "loaderRejected": "The mod loader would not take it.",
+      "closesTitle": "The launcher closes when a game starts",
+      "closesDescription": "Peebify draws the overlay, so closing it on launch leaves nothing to draw with. Switch that to Minimize and the overlay will work.",
+      "minimizeInstead": "Minimize instead",
+      "windowErrorTitle": "The overlay window could not be opened",
+      "windowErrorDescription": "Restart the game to try again. Details: {error}",
+      "borderlessDescription": "The overlay cannot draw over a game in exclusive fullscreen. Pick Borderless or Windowed in the game's display settings.",
+      "featuresHint": "Turn the overlay on to use the options below.",
+      "trackUnavailable": "Windows 10 has no way to record one app's audio on its own, so this can't be offered here.",
+      "perAppNeedsWindows11": "Per-app tracks need Windows 11.",
+      "shortcutsDescription": "Click a shortcut, then press the keys you want. Escape cancels.",
+      "loaderKeyDescription": "{description} Only for {game}. Applies the next time the game starts.",
+      "loaderKeyDescriptionActiveGame": "{description} Only for the active game. Applies the next time the game starts.",
+      "capturesFolder": "Captures folder",
+      "change": "Change…",
+      "capturesFolderChanged": "Captures folder changed",
+      "readFailedTitle": "Shortcuts and the captures folder could not be read",
+      "readFailedDescription": "They come from the launcher backend, which did not answer. Reopening Settings will try again.",
+      "audio": "Audio",
+      "audioDescription": "Controls which audio is captured. Pick what works best for you."
+    },
+    "storage": {
+      "title": "Storage",
+      "rescan": "Rescan",
+      "usedBy": "Used by {game}",
+      "usedByOn": "Used by {game} on {drive}",
+      "freeOf": "{free} free of {total}",
+      "gameFiles": "Game files",
+      "mods": "Mods",
+      "media": "Media",
+      "other": "Other files",
+      "free": "Free",
+      "manage": "Manage",
+      "modCount_one": "{count} mod",
+      "modCount_other": "{count} mods",
+      "noMods": "No mods installed",
+      "modsUnsupported": "{game} has no mod support",
+      "screenshots_one": "{count} screenshot",
+      "screenshots_other": "{count} screenshots",
+      "clips_one": "{count} clip",
+      "clips_other": "{count} clips",
+      "noMedia": "No screenshots or clips yet",
+      "nothingTitle": "Nothing on disk yet",
+      "nothingText": "Install {game} to see how much space it uses.",
+      "breakdown": "Game files {game}, mods {mods}, media {media}, free {free}"
+    },
+    "about": {
+      "version": "Version {version}",
+      "discord": "Discord",
+      "website": "Website",
+      "profile": "Profile",
+      "profileOf": "{name} on GitHub",
+      "developer": "Developer",
+      "contributors": "Contributors",
+      "xxmiMakers": "Makers of XXMI",
+      "xxmiDescription": "Peebify's mod support is built on the XXMI modding framework and its per-game model importers.",
+      "xxmiLink": "XXMI on GitHub"
+    }
+  },
+  "maintenance": {
+    "schedule": {
+      "never": "Never",
+      "daily": "Daily",
+      "weekly": "Weekly"
+    },
+    "qualitySize": "{quality} {size}",
+    "customLauncherOverrides": "Not used while another program starts the game. Add these arguments in that program instead.",
+    "closeGameFirst": "Close {game} first.",
+    "voicePack": {
+      "applyingTitle": "Applying the {language} voice pack",
+      "applyingText": "Downloading it now and removing the old one. Track it on Downloads."
+    },
+    "verify": {
+      "checkingTitle": "Checking {game}",
+      "checkingText": "Validating installed files. Track it on Downloads.",
+      "intactTitle": "{game} is intact",
+      "intactText": "Every installed file matches the game manifest.",
+      "brokenSummary_one": "{count} file needs repair. A full repair re-downloads it.",
+      "brokenSummary_other": "{count} files need repair. A full repair re-downloads them.",
+      "brokenTitle": "{game} has broken files",
+      "updateTitle": "{game} has an update",
+      "updateText_one": "{count} file differs from the latest version. The update replaces it.",
+      "updateText_other": "{count} files differ from the latest version. The update replaces them.",
+      "updatingTitle": "Updating {game}",
+      "trackOnDownloads": "Track it on Downloads.",
+      "fullRepair": "Full repair",
+      "repairingTitle": "Repairing {game}",
+      "repairingText": "Replacing the broken files. Track it on Downloads."
+    },
+    "autoUpdateSummary": {
+      "installFirst": "Install the game first",
+      "ownLauncher": "Handled by the game's own launcher",
+      "off": "Off",
+      "checksOnStartup": "Checks on startup",
+      "dailyCheck": "Daily check",
+      "weeklyCheck": "Weekly check",
+      "on": "On"
+    },
+    "selectedGame": {
+      "managedByPeebify": "Managed by Peebify",
+      "managedByOwn": "Managed by its own launcher, which handles repair and updates"
+    },
+    "groups": {
+      "maintenance": "Maintenance",
+      "launchOptions": "Launch options",
+      "dangerZone": "Danger zone"
+    },
+    "autoUpdate": {
+      "title": "Auto-update {game}",
+      "description": "Checks for updates, and downloads them when convenient.",
+      "ariaLabel": "Auto-update this game"
+    },
+    "checkOnStartup": {
+      "title": "Check on startup",
+      "description": "Look for an update for this game when the launcher opens."
+    },
+    "scheduledCheck": {
+      "title": "Scheduled check",
+      "description": "How often to look for an update while the launcher is open."
+    },
+    "repair": {
+      "title": "Repair and verify",
+      "description": "Replace broken or missing game files, or check them without changing anything.",
+      "quickTip": "Checks file sizes against the local manifest",
+      "quick": "Quick",
+      "fullTip": "Hashes every file and re-downloads what is broken",
+      "full": "Full",
+      "verifyTip": "Reports problems without changing any files",
+      "verify": "Verify"
+    },
+    "location": {
+      "title": "Install location",
+      "steamCopy": "This is the Steam copy, so move it from Steam under Properties, Installed Files, then use Locate to point Peebify at the new folder.",
+      "description": "Move the game to another folder, or point Peebify at a copy you installed or moved by hand.",
+      "move": "Move…",
+      "locate": "Locate…"
+    },
+    "voiceLanguage": {
+      "title": "Voice-over language",
+      "pending": "Not applied yet. Apply now downloads the new voice pack and removes the old one.",
+      "description": "Applies on the next update.",
+      "applyNow": "Apply now"
+    },
+    "directx": {
+      "modsForceDx11": "Mods are on for {game} and only work with DirectX 11, so it always launches with that. Turn mods off to pick again.",
+      "description": "Force a specific Graphics API (DX11/DX12) onto a game.",
+      "ariaLabel": "DirectX version"
+    },
+    "resourceQuality": {
+      "title": "Resource quality",
+      "pending": "{installed} is installed. Apply now downloads the {quality} files and removes the {installed} ones.",
+      "description": "Higher quality looks sharper but takes more disk space.",
+      "descriptionNotInstalled": "Higher quality looks sharper but takes more disk space. This is the quality that gets installed.",
+      "checkButton": "Check",
+      "checkTip": "Compares the selected quality with the files on disk and with the quality the game launches at.",
+      "check": {
+        "checkingTitle": "Checking {game}'s resource quality",
+        "checkingText": "Comparing the files on disk with the {quality} file list.",
+        "okTitle": "{game} is set up for {quality}",
+        "okText": "All {quality} files are in place, and the game launches at {quality}.",
+        "behindTitle": "{game} launches at {launch}, not {quality}",
+        "behindText": "All {quality} files are in place, but {launch} is what is recorded as installed. Apply switches the game over to {quality}.",
+        "incompleteTitle": "{game}'s {quality} files are incomplete",
+        "incompleteText": "{present} of {total} {quality} files are in place, so the game may fall back to a lower quality. Run a full repair to finish them.",
+        "missingTitle": "{game} isn't on {quality}",
+        "missingText": "{quality} is selected, but {installed} is what is on disk, so the game runs at {installed}. Apply downloads the {quality} files.",
+        "missingNoneText": "{quality} is selected, but none of its files are on disk. Apply downloads them.",
+        "failedTitle": "Couldn't check {game}'s resource quality"
+      }
+    },
+    "steam": {
+      "title": "Launch through Steam",
+      "found": "This is the Steam copy of {game}. Starting it through Steam keeps the overlay, controller settings and Steam playtime working.",
+      "notFound": "This is the Steam copy of {game}, but Steam itself couldn't be found on this PC, so the game is started directly."
+    },
+    "launchArgs": {
+      "title": "Custom launch arguments",
+      "description": "Extra command-line arguments added when the game starts. Wrap an argument in quotes if it contains spaces.",
+      "placeholder": "e.g. -popupwindow"
+    },
+    "customLauncher": {
+      "title": "Start the game with another program",
+      "chosen": "{path}. Peebify's launch arguments, DirectX and quality choices aren't passed to it.",
+      "description": "This replaces Peebify Launcher's normal behavior so that an external program can launch the game.",
+      "change": "Change…",
+      "choose": "Choose…",
+      "clear": "Clear"
+    },
+    "uninstall": {
+      "discardTitle": "Discard download",
+      "uninstallTitle": "Uninstall game",
+      "partial": "Delete the files an unfinished install left behind. Playtime and settings are kept.",
+      "steamCopy": "Hands the uninstall to Steam and removes the game from Peebify. Playtime and settings are kept.",
+      "description": "Permanently delete the installed game files. Playtime and settings are kept.",
+      "discard": "Discard"
+    }
+  },
+  "mods": {
+    "previewUnavailable": "Preview unavailable",
+    "imageCounter": "{index} of {total}",
+    "toast": {
+      "installedTitle": "Mod installed",
+      "installedText": "{name} is switched on and ready for {game}.",
+      "updatedTitle": "Mod updated"
+    },
+    "page": {
+      "subtitle": "Your mods, profiles and downloads for each game.",
+      "off": {
+        "badge": "Off",
+        "title": "Mods, right inside the launcher",
+        "body": "Set up the loader, manage your mods and browse GameBanana without leaving Peebify.",
+        "library": "Library and profiles",
+        "libraryText": "Group mods into profiles and switch between them per game.",
+        "browse": "Browse GameBanana",
+        "browseText": "Find, install and update mods without opening a browser.",
+        "worksWith": "Works with",
+        "riskTitle": "Mods can get your account banned",
+        "turnOn": "Turn on mod support",
+        "enabledTitle": "Mod support is on",
+        "enabledText": "Pick a game to get started. The first time a game starts with mods, Windows will ask for permission."
+      },
+      "picker": {
+        "noSupport": "No mod support",
+        "notInstalled": "{variant} · not installed",
+        "installing": "{variant} · installing",
+        "ready": "{variant} · ready",
+        "on": "{variant} · on"
+      },
+      "unsupported": {
+        "title": "Mods aren't available for {game}",
+        "noLoader": "No one has made a mod loader for this game yet, so there's nothing for Peebify to use."
+      },
+      "setup": {
+        "title": "Setup",
+        "summaryNotInstalled": "The mod tools aren't installed yet",
+        "summaryInstalling": "Installing the mod tools…",
+        "summaryOn": "{version} installed, mods on for {game}",
+        "summaryOff": "{version} installed, mods off for {game}",
+        "useMods": "Use mods in {game}",
+        "useModsNoTools": "Peebify installs the mod tools on its own, so this turns on once they are ready.",
+        "useModsExperimental": "This game is experimental! The mod loader is less reliable here than on the others.",
+        "useModsDescription": "The mod loader starts just before the game, so Windows will ask for permission. Only the mods you switch on get loaded in.",
+        "dx11Title": "DirectX is locked to DX11",
+        "dx11Description": "The mod tools only work with DX11, so {game} always launches with DX11 while mods are on.",
+        "rescanTitle": "Refresh the mod list",
+        "rescanDescription": "Look for mods added, removed or renamed outside Peebify, such as in the Mods folder.",
+        "loaderSettingDescription": "{description} Takes effect the next time the game starts.",
+        "msUnit": "ms",
+        "folderTitle": "Mod tools folder",
+        "folderDefault": "{path} (Peebify's own folder)",
+        "change": "Change…"
+      },
+      "view": {
+        "ariaLabel": "Mods view",
+        "library": "Library",
+        "libraryCount": "Library ({count})",
+        "browse": "Browse"
+      },
+      "toasts": {
+        "folderChangedTitle": "Mod tools folder changed",
+        "folderChangedFound": "Peebify now uses {path}. The {variant} tools are already in it.",
+        "folderChangedMissing": "Peebify now uses {path}. The {variant} tools aren't in it yet, so Peebify will install them there on its own."
+      },
+      "confirm": {
+        "changeFolderTitle": "Use a different mod tools folder?",
+        "changeFolderMessage": "Nothing gets moved. Your mods and tools stay in {folder}, and Peebify only shows what is in the folder you pick. Pick this folder again to see them.",
+        "changeFolderConfirm": "Choose folder",
+        "resetFolderTitle": "Go back to the default folder?",
+        "resetFolderMessage": "Nothing gets moved. Your mods and tools stay in {folder}, and Peebify goes back to its own folder. Pick this folder again to see them.",
+        "resetFolderConfirm": "Reset folder"
+      }
+    },
+    "hub": {
+      "importMod": "Import mod…",
+      "updateAll": "Update all ({count})",
+      "dropToImport": "Drop the file to import it",
+      "rescan": {
+        "updatedTitle": "Mod list updated",
+        "updatedText": "Found {changes}.",
+        "newMods_one": "{count} new mod",
+        "newMods_other": "{count} new mods",
+        "goneMods_one": "{count} mod gone",
+        "goneMods_other": "{count} mods gone",
+        "switched_one": "{count} switched on or off",
+        "switched_other": "{count} switched on or off",
+        "renamed_one": "{count} renamed",
+        "renamed_other": "{count} renamed",
+        "listSeparator": ", ",
+        "listLast": "{rest} and {last}",
+        "nothingTitle": "Nothing changed",
+        "nothingText": "The {game} mods folder still matches what's listed here."
+      },
+      "stillInstallingTitle": "A mod is still installing",
+      "stillInstallingText": "Wait for it to finish, then try again.",
+      "importedTitle_one": "Installed {count} mod",
+      "importedTitle_other": "Installed {count} mods",
+      "nothingInstalled": "Nothing was installed",
+      "notModFileTitle": "That isn't a mod file",
+      "notModFileText": "Try a .zip, .7z or .rar file instead.",
+      "checkFailedTitle": "Could not check for updates",
+      "checkFailedText": "GameBanana did not answer. Try again in a moment.",
+      "updatesAvailable_one": "{count} update available",
+      "updatesAvailable_other": "{count} updates available",
+      "allCurrentTitle": "Everything is current",
+      "allCurrentText": "Your {game} mods match the newest files on GameBanana.",
+      "updatedNewest": "{name} now has the newest file from GameBanana.",
+      "updatedAllTitle_one": "Updated {count} mod",
+      "updatedAllTitle_other": "Updated {count} mods",
+      "nothingUpdated": "Nothing was updated",
+      "updatedAllText": "{game} has the newest files from GameBanana.",
+      "updatedAllFailed": "Check the notifications above for what went wrong.",
+      "uninstallTitle": "Uninstall \"{name}\"?",
+      "uninstallMessage": "This deletes the mod files from this PC. There is no undo."
+    },
+    "list": {
+      "sort": {
+        "name": "Sort by name",
+        "newest": "Newest first",
+        "largest": "Largest first"
+      },
+      "loading": "Loading mods",
+      "searchPlaceholder": "Search your mods…",
+      "searchLabel": "Search mods",
+      "noMatches": "Nothing matches. Try a different search to see every mod again.",
+      "toggleEnable": "Enable {name}",
+      "toggleInclude": "Include {name} in {profile}",
+      "inProfile": {
+        "title": "Mods in Profile",
+        "pickProfile": "Pick a profile to see the mods in it.",
+        "readError": "Couldn't read the mods folder.",
+        "empty": "Add installed mods from the menu on each row, or drag them here."
+      },
+      "installed": {
+        "title": "Mods Installed",
+        "readError": "Peebify couldn't read the {game} mods folder. If it's on another drive, check that the drive is connected.",
+        "empty": "No mods for {game} on this PC. Import a .zip, .7z or .rar file, drop one onto this window.",
+        "emptyBrowse": "No mods for {game} on this PC. Import a .zip, .7z or .rar file, drop one onto this window, or find something new in Browse.",
+        "browseMods": "Browse mods"
+      }
+    },
+    "row": {
+      "source": {
+        "gamebanana": "GameBanana",
+        "archive": "Imported",
+        "manual": "Added manually"
+      },
+      "updateVersionTitle": "Version {version} is on GameBanana",
+      "updateTitle": "A newer file is on GameBanana",
+      "updateBadgeVersion": "Update v{version}",
+      "more": "More for {name}",
+      "removeFromProfile": "Remove from profile",
+      "showInBrowse": "Show in Browse",
+      "addTo": "Add to {profile}"
+    },
+    "profiles": {
+      "title": "Profiles",
+      "newProfile": "New profile",
+      "active": "Active profile",
+      "installedCount_one": "{count} installed mod",
+      "installedCount_other": "{count} installed mods",
+      "installedSuffix_one": "installed mod",
+      "installedSuffix_other": "installed mods",
+      "namePlaceholder": "Profile name",
+      "none": "No profiles yet.",
+      "missing_one": "{count} mod in this profile is no longer installed.",
+      "missing_other": "{count} mods in this profile are no longer installed.",
+      "applying": "Applying…",
+      "needOne": "You need at least one profile",
+      "partOn_one": "{count} on",
+      "partOn_other": "{count} on",
+      "partOff_one": "{count} off",
+      "partOff_other": "{count} off",
+      "partMissing_one": "{count} no longer installed",
+      "partMissing_other": "{count} no longer installed",
+      "offNote": "Mods load once they are turned on for this game.",
+      "nothingNeeded": "Nothing needed changing.",
+      "summaryWithNote": "{summary}. {note}",
+      "switchedTo": "Switched to {name}",
+      "alreadyApplied": "{name} was already applied",
+      "deleteTitle": "Delete the \"{name}\" profile?",
+      "deleteMessage": "This only forgets the list of mods. None of your mod files are deleted, and whatever is switched on right now stays on.",
+      "deleteConfirm": "Delete profile"
+    },
+    "browse": {
+      "sort": {
+        "relevance": "Best match",
+        "new": "Newest",
+        "updated": "Recently updated",
+        "likes": "Most liked",
+        "views": "Most viewed",
+        "downloads": "Most downloaded"
+      },
+      "perPage": "{n} per page",
+      "loadFailed": "Couldn't load this mod from GameBanana.",
+      "noAnswer": "GameBanana did not answer.",
+      "alreadyInstalledTitle": "Already installed",
+      "alreadyInstalledText": "{name} is already in your {game} mods, so nothing was downloaded.",
+      "updatedText": "{name} now has {file}.",
+      "allCategories": "All categories",
+      "backToList": "Back to the mod list",
+      "openOnGameBanana": "Open on GameBanana",
+      "viewFullSize": "View this image full size",
+      "showImage": "Show image {index} of {total}",
+      "filesError": "Couldn't load the files for this mod.",
+      "noFiles": "This mod has no downloadable files.",
+      "olderInstalled": "An older file of this mod is already installed. Use Update in your Library to replace it instead of installing a second copy.",
+      "virusFlagged": "GameBanana's virus scan flagged this file as \"{result}\", so Peebify won't install it.",
+      "olderVersion": "You have an older version of this file. Update replaces it.",
+      "searchPlaceholder": "Search every {game} mod on GameBanana…",
+      "searchLabel": "Search GameBanana",
+      "category": "Category",
+      "perPageLabel": "Mods per page",
+      "disclaimer": "Everything here is made by other people. Peebify does not check any of it, so install at your own risk.",
+      "truncated": "Showing {shown} of about {total} matches for “{query}”. Sorting, categories, and page size apply to the ones Peebify has loaded, so narrow the search to reach the rest.",
+      "allMatches": "Showing every match for “{query}”. It is all made by other people, so install at your own risk.",
+      "nothingFound": "Nothing found for “{query}”.",
+      "noMods": "No mods found.",
+      "unknownAuthor": "Unknown author",
+      "page": "Page {page}",
+      "pageOf": "Page {page} of {total}",
+      "noPreview": "No preview"
+    },
+    "lightbox": {
+      "dialogLabel": "Image {index} of {total}",
+      "close": "Close the image viewer",
+      "previous": "Previous image",
+      "next": "Next image",
+      "alt": "{title}, image {index} of {total}"
+    }
+  },
+  "overlay": {
+    "crash": {
+      "title": "Something went wrong",
+      "body": "The overlay hit an error. It has been written to the log.",
+      "reload": "Reload overlay"
+    },
+    "app": {
+      "title": "Peebify Overlay",
+      "sections": "Overlay sections",
+      "modsGallery": "Mods gallery",
+      "sessionSubtitle": "{game} · {elapsed}",
+      "noGame": "No game is running",
+      "noGameBody": "No game is running.",
+      "openClose": "Open / close",
+      "closeOverlay": "Close overlay",
+      "closeTitle": "Close (Esc)"
+    },
+    "viewer": {
+      "position": "{index} of {total}",
+      "openFailed": "That file could not be opened.",
+      "revealFailed": "That file could not be shown.",
+      "deleteConfirm": "Delete?"
+    },
+    "captures": {
+      "otherGame": "Other",
+      "unsupported": "This version of Windows cannot capture a game window, so screenshots are not available. Windows 10 version 1903 or later is needed.",
+      "takingScreenshot": "Taking screenshot…",
+      "takeScreenshot": "Take screenshot",
+      "format": "Format",
+      "screenshotFormat": "Screenshot format",
+      "quality": "Quality",
+      "screenshotQuality": "Screenshot quality",
+      "pngLossless": "PNG is lossless, so quality only applies to JPEG.",
+      "showMessage": "Show a message on screen",
+      "videoRecording": "Video recording",
+      "starting": "Starting…",
+      "saving": "Saving…",
+      "stopRecording": "Stop recording · <elapsed></elapsed>",
+      "startRecording": "Start recording",
+      "needsMediaFoundation": "Recording needs Windows Media Foundation. Install the Media Feature Pack from Optional features.",
+      "resolution": "Resolution",
+      "native": "Native",
+      "recordingResolution": "Recording resolution",
+      "frameRate": "Frame rate",
+      "recordingFrameRate": "Recording frame rate",
+      "qualityEfficient": "Efficient",
+      "qualityBalanced": "Balanced",
+      "qualityHigh": "High",
+      "recordingQuality": "Recording quality",
+      "encoder": "Encoder",
+      "estimate": "About {mb} MB per minute at these settings.",
+      "audioTracks": "Audio tracks",
+      "needsWindows11": "Windows 11 is needed for this track",
+      "audioDesktop": "Desktop records everything you can hear, the game and Discord included.",
+      "audioSilent": "Nothing is selected, so clips will be silent.",
+      "audioMixed": "Each source is captured on its own and mixed into one track.",
+      "discordNone": "No Discord client is running, so nothing will be captured from it.",
+      "discordCapturing": "Capturing {client}.",
+      "discordChoose": "More than one Discord is running. Choose which to capture.",
+      "clipsNote": "Clips are saved as MP4 beside your screenshots. Resolution, frame rate and encoder apply to the next recording, not the one in progress.",
+      "folder": "Captures folder",
+      "openFolder": "Open",
+      "changeFolder": "Change…",
+      "useDefaultFolder": "Use default",
+      "filterAll": "All",
+      "filterClips": "Clips",
+      "stored": "{size} stored",
+      "empty": "Nothing captured yet.",
+      "clip": "Clip",
+      "view": "View",
+      "deleteConfirm": "Delete?",
+      "showMore_one": "Show more ({count} left)",
+      "showMore_other": "Show more ({count} left)",
+      "recordingFailed": "Recording failed.",
+      "recordingStartFailed": "Recording could not start.",
+      "screenshotFailed": "The screenshot failed."
+    },
+    "gallery": {
+      "modsOff": "Mods are turned off for this game. Turn them on in the launcher, then restart the game to browse mods here."
+    },
+    "mods": {
+      "uninstallConfirm": "Uninstall? This deletes the mod files from this PC. There is no undo.",
+      "modSupportOff": "Mod support is off for this game. The mod loader injects when the game starts, so switch it on in the launcher and start the game again.",
+      "loaderLoaded": "{loader} · loaded",
+      "loaderNotInstalled": "{loader} · not installed",
+      "switchOnFailed": "{name} could not be switched on",
+      "switchOffFailed": "{name} could not be switched off",
+      "profileSwitchFailed": "Some mods in {profile} did not switch",
+      "useMod": "Use {name}",
+      "profiles": "Profiles",
+      "activeProfile": "Active profile",
+      "profileName": "Profile name",
+      "noProfiles": "No profiles yet.",
+      "applying": "Applying…",
+      "apply": "Apply",
+      "deleteProfileConfirm": "Delete {profile}?",
+      "newProfile": "New",
+      "rename": "Rename",
+      "duplicate": "Duplicate",
+      "missing_one": "{count} mod in this profile is no longer installed.",
+      "missing_other": "{count} mods in this profile are no longer installed.",
+      "pending_one": "{count} change saved. Press <key>{key}</key> in the game to load it. It also loads on its own the next time the game starts.",
+      "pending_other": "{count} changes saved. Press <key>{key}</key> in the game to load them. They also load on their own the next time the game starts.",
+      "filter_one": "Filter {count} mod",
+      "filter_other": "Filter {count} mods",
+      "pickProfile": "Pick a profile to see the mods in it.",
+      "profileEmpty": "Add installed mods from the menu on each row, or drag them here.",
+      "noMatch": "Nothing matches that.",
+      "noneInstalled": "No mods are installed for this game. The Mods gallery tab can add some."
+    },
+    "settings": {
+      "shortcutCapturing": "{label}: press the new shortcut, or Escape to keep the current one",
+      "shortcutCurrent": "{label}: {shortcut}. Press to change",
+      "shortcutUnset": "{label}: not set. Press to change",
+      "helperStarting": "The overlay helper is starting.",
+      "helperFailed": "The overlay helper stopped. Restart the game to try again.",
+      "helperMismatched": "The overlay helper does not match this version of Peebify. Reinstall Peebify to fix it.",
+      "helperIdle": "The overlay helper is not running.",
+      "blocked_one": "Windows would not give Peebify {keys}. Another program already holds it, so pick a different shortcut below.",
+      "blocked_other": "Windows would not give Peebify {keys}. Another program already holds them, so pick a different shortcut below.",
+      "invalid_one": "Peebify cannot use {keys} as a shortcut, so pick a different one below.",
+      "invalid_other": "Peebify cannot use {keys} as shortcuts, so pick a different one below.",
+      "modSupport": "Mod support",
+      "modSupportDescription": "Applies the next time you start the game.",
+      "enableMods": "I understand, turn mods on",
+      "nsfw": "NSFW mods",
+      "nsfwDescription": "Show mature rated mods in the gallery.",
+      "overlayShortcuts": "Overlay shortcuts",
+      "reset": "Reset",
+      "resetShortcut": "Reset {label}",
+      "loaderShortcuts": "Mod loader shortcuts",
+      "loaderShortcutDescription": "{description} It takes effect the next time the game starts.",
+      "capturingNote": "Every Peebify shortcut is released while you pick one, so the key reaches this field instead of the game. Press Escape to keep the current one.",
+      "shortcutRejected": "That shortcut cannot be used.",
+      "loaderRejected": "The mod loader would not take that shortcut.",
+      "everythingElse": "Everything else",
+      "everythingElseDescription": "Open the full launcher settings in the window behind the game.",
+      "openLauncher": "Open launcher"
+    }
+  },
+  "hud": {
+    "savedFile": "Saved {name}",
+    "screenshotSaved": "Screenshot saved",
+    "screenshotFailed": "The screenshot failed.",
+    "recordingStarted": "Recording started",
+    "recordingStartedWarnings": "Recording started. {warnings}",
+    "clipSaved": "Saved {name} · {length}",
+    "recordingSaved": "Recording saved · {length}",
+    "withReason": "{reason} {saved}",
+    "recordingFailed": "Recording failed.",
+    "rec": "REC {time}"
+  },
+  "home": {
+    "communityTools": {
+      "title": "Community tools",
+      "officialSite": "Official Site"
+    },
+    "quickSettings": {
+      "title": "Quick settings",
+      "checkUpdates": "Check for updates",
+      "quickRepair": "Quick repair",
+      "onlyFullRepair": "Only a full repair works here",
+      "fullRepair": "Full repair",
+      "gameFolder": "Game folder",
+      "locateInstall": "Locate existing install",
+      "moveGame": "Move game",
+      "discardDownload": "Discard download",
+      "uninstallGame": "Uninstall game",
+      "notUsedWithCustomLauncher": "Not used while another program starts the game.",
+      "modsNeedDx11": "Mods need DirectX 11",
+      "quality": "Quality",
+      "qualityHint": "The quality that gets installed.",
+      "qualityPending": "{installed} is installed. Apply to switch to {quality}.",
+      "apply": "Apply"
+    },
+    "news": {
+      "title": "News & Notices",
+      "loading": "Loading news…",
+      "failed": "Could not load news.",
+      "empty": "No news yet.",
+      "banner": "Banner {n} of {total}",
+      "openBanner": "Open banner {n} of {total}",
+      "showBanner": "Show banner {n}"
+    },
+    "playtimeTracker": {
+      "heading": "Playtime · {game}",
+      "thisMonth": "This month",
+      "avgSession": "Avg. session",
+      "lastPlayed": "Last played",
+      "yesterday": "Yesterday"
+    },
+    "startBar": {
+      "buttons": {
+        "launch": "Launch",
+        "starting": "Starting",
+        "waitingForSteam": "Waiting for Steam",
+        "running": "Running"
+      },
+      "updateTo": "Update to {version}",
+      "finishSwitch": "Finish switching to {quality}",
+      "updateFromTo": "Update from {current} to {latest}",
+      "startNow": "Start now",
+      "startNowPauses": "Start now, pauses {game}",
+      "moveToFront": "Move to front",
+      "waitingFor": "Waiting for {game}",
+      "timeLeft": "{time} left"
+    }
+  },
+  "layout": {
+    "notifications": {
+      "clearAll": "Clear all notifications",
+      "empty": "No notifications yet."
+    },
+    "offline": {
+      "backOnline": "Back online",
+      "restored": "Your connection is restored.",
+      "title": "You're offline",
+      "checking": "Checking your connection…",
+      "retrying": "Check your internet connection. Trying again in {seconds}s.",
+      "dismiss": "Dismiss offline notice"
+    },
+    "sidebar": {
+      "home": "Home",
+      "gamePlaying": "{game}, playing now",
+      "gameUpdate": "{game}, update available",
+      "gamePlayingUpdate": "{game}, playing now, update available",
+      "moved": "{game}, position {position} of {total}",
+      "activeBadge": "{label}, {count} active"
+    },
+    "window": {
+      "notificationsUnread": "Notifications, {count} unread",
+      "restore": "Restore"
+    }
+  },
+  "gallery": {
+    "subtitle": "Screenshots and clips from the overlay on this PC.",
+    "kinds": {
+      "all": "All",
+      "clips": "Clips"
+    },
+    "allGames": "All games",
+    "gameFilter": "Game",
+    "hintOverlayOn": "Press {key} in game to take a screenshot.",
+    "hintOverlayOff": "Turn on the game overlay, then press {key} in game to take a screenshot.",
+    "openOverlaySettings": "Open overlay settings",
+    "openFolder": "Open folder",
+    "itemCount_one": "{count} item",
+    "itemCount_other": "{count} items",
+    "select": "Select",
+    "loadingCaptures": "Loading captures",
+    "nothingCaptured": "Nothing captured yet.",
+    "noMatches": "Nothing matches these filters.",
+    "selectDay": "Select day",
+    "loadMore": "Load more",
+    "open": "Open",
+    "showInFolder": "Show in folder",
+    "clip": "Clip",
+    "screenshot": "Screenshot",
+    "delete": {
+      "title_one": "Delete {count} capture?",
+      "title_other": "Delete {count} captures?",
+      "messageOne": "The file moves to the Recycle Bin, where it can be recovered. If it can't go to the Recycle Bin, it is not deleted.",
+      "messageMany": "The files move to the Recycle Bin, where they can be recovered. Any that can't go to the Recycle Bin are not deleted."
+    },
+    "tile": {
+      "select": "Select {name}",
+      "open": "Open {name}"
+    },
+    "viewer": {
+      "previous": "Previous",
+      "subtitle": "{game} · {date} · {n} of {total}",
+      "info": {
+        "game": "Game",
+        "taken": "Taken",
+        "size": "Size",
+        "resolution": "Resolution",
+        "duration": "Duration",
+        "kind": "Kind",
+        "file": "File"
+      }
+    },
+    "selection": {
+      "selected": "{count} selected",
+      "selectAll": "Select all {count}",
+      "clear": "Clear selection"
+    }
+  },
+  "playtime": {
+    "charts": {
+      "noPlaytime": "No playtime",
+      "dayNoPlaytime": "{date}: no playtime",
+      "dayTotal": "{date}: {time}",
+      "daySingleGame": "{date}: {time} of {game}",
+      "dayManyGames": "{date}: {time} ({games})",
+      "gameTime": "{game} {time}",
+      "lastDays_one": "Playtime, last {count} day",
+      "lastDays_other": "Playtime, last {count} days",
+      "share": "{game} · {pct}% of playtime"
+    },
+    "lessThanMinute": "<1m",
+    "loadingEarlier": "Loading earlier sessions…",
+    "showEarlier": "Show earlier sessions",
+    "showLess": "Show less",
+    "sessionsTitle": "Sessions",
+    "loadingHistory": "Loading your play history…",
+    "rangeAria": "Playtime range",
+    "summaryLine": {
+      "inRange_one": "{count} session · {time} in the last {days} days",
+      "inRange_other": "{count} sessions · {time} in the last {days} days",
+      "latestInRange_one": "Latest {count} session · {time} in the last {days} days",
+      "latestInRange_other": "Latest {count} sessions · {time} in the last {days} days",
+      "recorded_one": "{count} session · {time} recorded",
+      "recorded_other": "{count} sessions · {time} recorded",
+      "latest_one": "Latest {count} session · {time}",
+      "latest_other": "Latest {count} sessions · {time}"
+    },
+    "summary": {
+      "hours_one": "hour",
+      "hours_other": "hours",
+      "minutes_one": "minute",
+      "minutes_other": "minutes",
+      "vsLastMonth": "vs. last month",
+      "averageSession": "Average session",
+      "longestSession": "Longest session",
+      "sessionsLogged": "Sessions logged",
+      "lastDays_one": "Last {count} day",
+      "lastDays_other": "Last {count} days",
+      "streak_one": "{count}-day streak",
+      "streak_other": "{count}-day streak",
+      "best": "· best {count}",
+      "shareOfPlay": "Share of play",
+      "nothingInRange": "Nothing played in this range."
+    },
+    "filter": {
+      "showAll": "Show all games",
+      "showingOnly": "Showing only {game}. Show all games",
+      "showOnly": "Show only {game}"
+    },
+    "day": {
+      "sessions_one": "{count} session",
+      "sessions_other": "{count} sessions",
+      "startedThisDay": "Sessions that started this day"
+    },
+    "session": {
+      "toNow": "{time} to now",
+      "removeConfirm": "Click again to remove this session",
+      "remove": "Remove session"
+    },
+    "empty": {
+      "title": "No sessions to show",
+      "filtered": "This game has no sessions in the selected range.",
+      "all": "Play something and it shows up here.",
+      "range_one": "Nothing played in the last {count} day.",
+      "range_other": "Nothing played in the last {count} days."
+    }
+  },
+  "downloads": {
+    "page": {
+      "subtitle": "Installs, updates, repairs and moves.",
+      "empty": "Nothing running. Install or update a game from its home screen."
+    },
+    "queue": {
+      "title": "Queued",
+      "count_one": "{count} waiting",
+      "count_other": "{count} waiting",
+      "countAfter_one": "{count} waiting · after {game}",
+      "countAfter_other": "{count} waiting · after {game}",
+      "countAfterPaused_one": "{count} waiting · after {game} (paused)",
+      "countAfterPaused_other": "{count} waiting · after {game} (paused)",
+      "startNow": "Start now",
+      "startNowPauses": "Start now, pauses {game}",
+      "moveToFront": "Move to front",
+      "holderPaused": "{game} is paused. Resume it, or use Start now to go first.",
+      "waitingToStart": "Waiting to start",
+      "startsAfter": "Starts when {game} finishes",
+      "startsAfterAny": "Starts when a download finishes"
+    },
+    "job": {
+      "pause": "Pause",
+      "resume": "Resume",
+      "progress": "{done} of {total}",
+      "timeLeft": "{eta} left",
+      "resumesAutomatically": "Resumes automatically",
+      "waitingFor": "Waiting for {game}",
+      "downloadAnyway": "Download anyway",
+      "resumesAfterGame": "Resumes when the game closes"
+    },
+    "stage": {
+      "paused": "{stage} · paused",
+      "waiting": "{stage} · waiting",
+      "percent": "{stage} · {percent}%",
+      "held": "{stage} · paused while you play"
+    },
+    "speed": {
+      "network": "Network",
+      "disk": "Disk write",
+      "peak": "peak {speed}"
+    },
+    "updates": {
+      "title": "Updates available",
+      "count_one": "{count} game",
+      "count_other": "{count} games",
+      "closeGame": "Close the game to update",
+      "ready": "New version ready",
+      "updateGame": "Update {game}"
+    },
+    "history": {
+      "title": "Finished",
+      "clear": "Clear",
+      "stopped": "Stopped",
+      "activeJob": "This game already has an active job",
+      "repairHint": "Replace the broken files",
+      "repair": "Repair",
+      "retryHint": "Try again"
+    },
+    "outcome": {
+      "done": {
+        "install": "installed",
+        "update": "updated",
+        "repair": "repaired",
+        "verify": "verified",
+        "move": "moved",
+        "uninstall": "removed"
+      },
+      "cancelled": {
+        "install": "install cancelled",
+        "update": "update cancelled",
+        "repair": "repair cancelled",
+        "verify": "verify cancelled",
+        "move": "move cancelled",
+        "uninstall": "removal cancelled"
+      },
+      "error": {
+        "install": "install failed",
+        "update": "update failed",
+        "repair": "repair failed",
+        "verify": "verify failed",
+        "move": "move failed",
+        "uninstall": "removal failed"
+      },
+      "finished": "finished",
+      "otherCancelled": "{kind} cancelled",
+      "otherFailed": "{kind} failed"
+    }
+  },
+  "setup": {
+    "badge": "Setup",
+    "title": {
+      "games": "Which games do you play?"
+    },
+    "blurb": {
+      "games": "The ones you pick go in your sidebar. You can add the rest, reorder them, or change your mind at any time in Settings, under Games."
+    },
+    "status": {
+      "nothingPickedFinish": "Nothing picked. Finish to show every game.",
+      "picked_one": "{count} game selected",
+      "picked_other": "{count} games selected"
+    },
+    "action": {
+      "finish": "Finish"
+    },
+    "games": {
+      "installed": "Installed"
+    }
+  },
+  "install": {
+    "title": "Install {game}",
+    "distributedSteam": "Distributed through Steam",
+    "version": "Version {version}",
+    "versionUnavailable": "Version unavailable",
+    "summary": {
+      "download": "Download",
+      "sizeOnDisk": "Size on disk",
+      "freeAfter": "Free after install"
+    },
+    "drive": {
+      "free": "{free} free of {total}",
+      "freeOnDrive": "{drive} · {free} free of {total}",
+      "checking": "Checking drive space…"
+    },
+    "steam": {
+      "body": "{game} is installed and updated through Steam. Install it there, then point Peebify at it.",
+      "stepInstall": "Install in Steam",
+      "stepInstallText": "Find {game} in your Steam library and let it finish installing.",
+      "stepLocateText": "Pick the installed folder so Peebify can launch and update it."
+    },
+    "locateInstall": "Locate install",
+    "folder": {
+      "label": "Install folder",
+      "resolving": "Resolving default location…",
+      "none": "No location selected",
+      "browse": "Browse",
+      "alreadyInstalled": "Already installed?",
+      "locateExisting": "Locate existing",
+      "checkDefault": "Check default location"
+    },
+    "quality": {
+      "title": "Resource quality",
+      "default": "Default",
+      "sd": "Lower-resolution textures. Smallest install.",
+      "hd": "Balanced sharpness and size.",
+      "uhd": "Highest-resolution textures.",
+      "download": "{size} download",
+      "note": "Higher quality looks sharper and needs more disk space. You can switch later in settings."
+    },
+    "voice": {
+      "title": "Voice pack",
+      "hint": "The language used for audio",
+      "aria": "Voice-over language",
+      "changeLater": "Change them later",
+      "loadFailed": "Couldn't load the voice pack list."
+    },
+    "details": {
+      "unavailable": "Size details unavailable. {reason}",
+      "unreachable": "Could not reach the update server.",
+      "includes": "Includes {parts}"
+    },
+    "shortOnSpace": "Needs about {required} free while installing. Only {free} is free on this drive. Pick another location or free up space first.",
+    "tooDeep_one": "This folder is {count} character too deep for {game}. Windows won't let the game reach its own files from here, so its updates would fail after installing. Pick a folder of at most {max} characters. One directly off {root} works.",
+    "tooDeep_other": "This folder is {count} characters too deep for {game}. Windows won't let the game reach its own files from here, so its updates would fail after installing. Pick a folder of at most {max} characters. One directly off {root} works.",
+    "toast": {
+      "installingTitle": "Installing {game}",
+      "installingText": "Added to the download queue. Track it on the Downloads page.",
+      "locatedTitle": "{game} located",
+      "locatedText": "Verifying your installation. Track it on the Downloads page.",
+      "locateFailed": "Couldn't locate {game}",
+      "foundTitle": "{game} found",
+      "foundText": "Found it at Peebify's default install location. Verifying it now.",
+      "findFailed": "Couldn't find {game}",
+      "linked": "Linked your existing installation."
+    }
+  },
+  "ui": {
+    "kindBadge": {
+      "install": "Install",
+      "update": "Update",
+      "repair": "Repair",
+      "verify": "Verify",
+      "move": "Move",
+      "remove": "Remove"
+    },
+    "searchField": {
+      "clear": "Clear search"
+    },
+    "slider": {
+      "value": "{value} {unit}"
+    },
+    "colorPicker": {
+      "field": "{label}: saturation and brightness",
+      "fieldValue": "Saturation {saturation}%, brightness {brightness}%",
+      "hue": "{label}: hue",
+      "hex": "{label}: hex code",
+      "revertHint": "Click the left half to go back",
+      "revert": "Go back to the color you started with",
+      "eyedropper": "Pick a color from the screen",
+      "presets": "Presets",
+      "usePreset": "Use {color}"
+    }
+  },
+  "crash": {
+    "title": "Something went wrong",
+    "body": "The launcher UI hit an unexpected error. It has been written to the log. Reloading usually fixes it.",
+    "page": {
+      "title": "This page hit an error",
+      "body": "It has been written to the log. The rest of the launcher still works.",
+      "backHome": "Back to home"
+    }
+  },
+  "app": {
+    "openDownloads": "Open Downloads",
+    "theGame": "the game",
+    "launchFailed": {
+      "title": "{game} didn't start",
+      "titleUnknown": "The game didn't start",
+      "text": "The game was never launched, so no playtime was recorded."
+    },
+    "modsLoadFailed": {
+      "title": "Mods didn't load",
+      "text": "{game} is starting without mods. {error}",
+      "textUnknown": "The game is starting without mods. {error}"
+    },
+    "customLauncherMissing": {
+      "title": "The custom launcher is missing",
+      "text": "{path} is no longer there, so {game} is starting on its own.",
+      "textNoPath": "The program is no longer there, so {game} is starting on its own."
+    },
+    "launchWaiting": {
+      "title": "{game} hasn't started yet",
+      "titleUnknown": "The game hasn't started yet",
+      "text": "Steam hasn't started the game yet."
+    },
+    "modToolsUpdating": {
+      "title": "Updating the mod tools",
+      "text": "{game} starts once the mod tools finish updating.",
+      "textUnknown": "The game starts once the mod tools finish updating."
+    },
+    "overlayBlocked": {
+      "title": "The overlay cannot draw over exclusive fullscreen",
+      "text": "Switch the game to Borderless or Windowed in its display settings, then press the overlay shortcut again."
+    },
+    "jobDone": {
+      "title": {
+        "install": "{game} installed",
+        "update": "{game} updated",
+        "repair": "{game} repaired",
+        "move": "{game} moved",
+        "uninstall": "{game} removed"
+      },
+      "titleOther": "{game} finished",
+      "text": {
+        "install": "The install finished successfully.",
+        "update": "The update finished successfully.",
+        "repair": "The repair finished successfully.",
+        "move": "The game files are in their new folder.",
+        "uninstall": "The removal finished."
+      },
+      "textOther": "The {kind} finished successfully."
+    },
+    "jobFailed": {
+      "title": {
+        "install": "{game} install failed",
+        "update": "{game} update failed",
+        "repair": "{game} repair failed",
+        "move": "{game} move failed",
+        "uninstall": "{game} removal failed"
+      },
+      "titleOther": "{game} {kind} failed"
+    },
+    "gamesDetected": {
+      "title_one": "Found an installed game",
+      "title_other": "Found {count} installed games",
+      "text_one": "{names} was already in your Peebify games folder and has been added to your library.",
+      "text_other": "{names} were already in your Peebify games folder and have been added to your library."
+    }
+  },
+  "actions": {
+    "failed": {
+      "launch": "Launch failed",
+      "saveSettings": "Save settings failed",
+      "saveSetting": "Save setting failed",
+      "changeCustomLauncher": "Change the custom launcher failed",
+      "saveFpsUnlock": "Save FPS unlocker setting failed",
+      "saveLoaderSetting": "Save mod loader setting failed",
+      "importMod": "Import mod failed",
+      "enableMod": "Enable mod failed",
+      "disableMod": "Disable mod failed",
+      "enableMods": "Enable mods failed",
+      "disableMods": "Disable mods failed",
+      "createProfile": "Create profile failed",
+      "renameProfile": "Rename profile failed",
+      "deleteProfile": "Delete profile failed",
+      "duplicateProfile": "Duplicate profile failed",
+      "updateProfile": "Update profile failed",
+      "applyProfile": "Apply profile failed",
+      "deleteMod": "Delete mod failed",
+      "changeShortcut": "Change shortcut failed",
+      "changeCapturesFolder": "Change captures folder failed",
+      "resetCapturesFolder": "Reset captures folder failed",
+      "openCapturesFolder": "Open captures folder failed",
+      "openModsFolder": "Open mods folder failed",
+      "changeModsFolder": "Change mods folder failed",
+      "resetModsFolder": "Reset mods folder failed",
+      "saveWallpaper": "Save wallpaper failed",
+      "saveGameIcon": "Save game icon failed",
+      "loadEarlierSessions": "Load earlier sessions failed",
+      "removeSession": "Remove session failed",
+      "download": "Download failed",
+      "pause": "Pause failed",
+      "resume": "Resume failed",
+      "prioritizeDownload": "Prioritize download failed",
+      "cancel": "Cancel failed",
+      "switchGame": "Switch game failed",
+      "openLogsFolder": "Open logs folder failed",
+      "wipeLauncherData": "Wipe launcher data failed",
+      "repair": "Repair failed",
+      "verifyGameFiles": "Verify game files failed",
+      "moveGame": "Move game failed",
+      "uninstall": "Uninstall failed",
+      "openFolder": "Open folder failed",
+      "install": "Install failed",
+      "resumeInstall": "Resume install failed",
+      "openGameFolder": "Open game folder failed",
+      "openScreenshotsFolder": "Open screenshots folder failed",
+      "open": "Open failed",
+      "showInFolder": "Show in folder failed",
+      "loadMod": "Load mod failed",
+      "updateMod": "Update mod failed",
+      "cancelModDownload": "Cancel mod download failed",
+      "openLink": "Open link failed",
+      "keepGoing": "Could not keep the download going"
+    },
+    "game": {
+      "joinAnd": "{first} and {second}",
+      "switchingQuality": {
+        "title": "Switching {game} to {quality}",
+        "text": "Downloading the {quality} files and removing the {from} ones. Track it on Downloads."
+      },
+      "switchUnfinished": {
+        "title": "{game} didn't finish switching to {quality}",
+        "text": "Peebify closed partway through. Resume to finish downloading the {quality} files."
+      },
+      "checking": {
+        "title": "Checking {game}",
+        "text": "Looking for updates…"
+      },
+      "checkFailed": "Couldn't check for updates",
+      "upToDate": {
+        "title": "Up to date",
+        "text": "{game} is up to date."
+      },
+      "updateAvailable": {
+        "title": "Update available",
+        "text": "{game} has a new version ready."
+      },
+      "quickRepair": {
+        "title": "Quick repair for {game}",
+        "text": "Checking file sizes against the local manifest."
+      },
+      "fullRepair": {
+        "title": "Full repair for {game}",
+        "message": "This hashes every installed game file and re-downloads any that are missing or corrupted. It is far more thorough than a quick repair, and can take a while.",
+        "confirm": "Full repair"
+      },
+      "repairing": {
+        "title": "Repairing {game}",
+        "text": "Verifying game files. Track it on Downloads."
+      },
+      "located": {
+        "title": "{game} located",
+        "checking": "Verifying your installation. Track it on the Downloads page.",
+        "linkedUnchecked": "Linked your existing installation. Run a full repair from Settings if it has problems.",
+        "linked": "Linked your existing installation."
+      },
+      "locateFailed": "Couldn't locate {game}",
+      "move": {
+        "title": "Move {game}",
+        "message": "Pick a new folder next. The game files are moved there and the old folder is removed once it's done.",
+        "confirm": "Choose folder"
+      },
+      "discard": {
+        "title": "Discard the {game} download?",
+        "message": "This deletes the files downloaded so far by the unfinished install. You can start the install again later.",
+        "confirm": "Discard"
+      },
+      "discarding": {
+        "title": "Discarding {game}",
+        "text": "Removing the unfinished download."
+      },
+      "uninstall": {
+        "title": "Uninstall {game}?",
+        "steam": "Steam will ask you to confirm the uninstall, and Peebify removes {game} from its library. Your launcher settings and playtime history are kept.",
+        "steamMods_one": "Steam will ask you to confirm the uninstall, and Peebify removes {game} from its library. The mod you installed for it is removed too. Your launcher settings and playtime history are kept.",
+        "steamMods_other": "Steam will ask you to confirm the uninstall, and Peebify removes {game} from its library. The {count} mods you installed for it are removed too. Your launcher settings and playtime history are kept.",
+        "files": "This permanently deletes the installed game files from your disk. Your launcher settings and playtime history are kept.",
+        "filesMods_one": "This permanently deletes the installed game files from your disk, along with the mod you installed for it. Your launcher settings and playtime history are kept.",
+        "filesMods_other": "This permanently deletes the installed game files from your disk, along with the {count} mods you installed for it. Your launcher settings and playtime history are kept."
+      },
+      "uninstalling": {
+        "title": "Uninstalling {game}",
+        "textSteam": "Handing the uninstall to Steam.",
+        "text": "Removing game files."
+      },
+      "closeFirst": "Close {game} first.",
+      "jobActiveBlocker": "Finish or cancel this game's current download, repair or move first."
+    },
+    "cancelInstall": {
+      "title": "Cancel {game} install?",
+      "message": "The files downloaded so far will be deleted and the next install starts from the beginning.",
+      "confirm": "Cancel install",
+      "keep": "Keep downloading"
+    },
+    "enableMods": {
+      "riskWarning": "Most gacha games don't allow mods in their terms of service, so using them puts your account at risk. By turning mods on, you accept that risk."
+    },
+    "shortcut": {
+      "blockedKey": "That key cannot be used in a shortcut. Try a letter, digit, function or navigation key.",
+      "needsModifier": "Add Ctrl, Alt or Shift, or use a function key."
+    }
+  },
+  "stages": {
+    "check": "Check",
+    "finalize": "Finalize",
+    "scan": "Scan",
+    "verify": "Verify",
+    "replace": "Replace",
+    "transfer": "Transfer",
+    "phase": {
+      "verifying": "Verifying",
+      "checking": "Checking",
+      "downloading": "Downloading",
+      "extracting": "Extracting",
+      "finalizing": "Finalizing",
+      "repairing": "Repairing",
+      "waiting": "Waiting",
+      "paused": "Paused",
+      "waitingNetwork": "Waiting for connection",
+      "queued": "Queued",
+      "done": "Done",
+      "cancelled": "Cancelled",
+      "deferred": "Deferred",
+      "error": "Error",
+      "removingOldCopy": "Removing old copy",
+      "transferring": "Transferring",
+      "removing": "Removing",
+      "heldForGame": "Paused while you play"
+    }
+  },
+  "ipc": {
+    "channel": {
+      "stable": "Stable",
+      "beta": "Beta"
+    },
+    "quality": {
+      "sd": "SD",
+      "hd": "HD",
+      "uhd": "UHD"
+    },
+    "voicePack": {
+      "en": "EN",
+      "ja": "JP",
+      "ko": "KR",
+      "zh": "CN"
+    },
+    "settingSaved": "Setting saved",
+    "updateServerNoAnswer": "The update server did not answer.",
+    "upNext": "Up next",
+    "captures": {
+      "readFailed": "Could not read your captures.",
+      "deleteFailed": "Could not delete that capture."
+    },
+    "gamebanana": {
+      "unreachable": {
+        "title": "Couldn't reach GameBanana",
+        "text": "Check your internet connection, then try again."
+      },
+      "loadFailed": "Couldn't load mods from GameBanana",
+      "busy": "GameBanana is busy or down right now. Try again in a minute.",
+      "installUnfinished": "The install did not finish."
+    }
+  },
+  "stores": {
+    "media": {
+      "partialTitle": "Some captures were not deleted",
+      "failedTitle": "Delete failed",
+      "partialText": "{deleted} deleted, {failed} failed. {error}",
+      "checkLogs": "Check the logs for details.",
+      "noneDeleted": "Those captures could not be deleted."
+    }
+  },
+  "games": {
+    "other": "Other",
+    "reorderHint": "Press Alt with the up or down arrow to move this game",
+    "notes": {
+      "steamOnly": "{game} is only distributed on PC through Steam. Install it there first, then point Peebify at the folder. Peebify launches it through Steam, so the overlay and playtime tracking keep working.",
+      "re1999": "Bluepoch ships Reverse: 1999 as whole archives with no per-file checksums, so Peebify can install and update the game but cannot check individual files. Repair clears leftover update folders; a damaged install has to be reinstalled.",
+      "bd2": "Neowiz ships Brown Dust II as one client package, so Peebify installs and updates it in a single download. Peebify checksums every file it unpacks, but repairing even one of them means fetching that whole package again.",
+      "dna": "Pan Studio ships Duet Night Abyss as one archive, so Peebify installs and updates it in a single download and unpacks it with HDiffPatch. Peebify checks every file against Pan Studio's checksums, but repairing even one of them means fetching that whole archive again."
+    },
+    "playtime": {
+      "range": {
+        "week": "7 days",
+        "month": "30 days"
+      },
+      "hoursShort": "{h}h",
+      "lessThanHour": "<1h",
+      "todayHeading": "Today · {date}",
+      "yesterdayHeading": "Yesterday · {date}",
+      "timeRange": "{start} to {end}"
+    }
+  }
+}

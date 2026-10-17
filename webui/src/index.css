@@ -9,7 +9,6 @@
   --color-danger: #f87171;
   --color-danger-soft: #fca5a5;
   --color-warning: #fcd34d;
-  --color-success: #6ee7b7;
 }
 
 :root {
@@ -62,6 +61,18 @@ textarea:focus-visible {
   animation-play-state: paused !important;
 }
 
+.effects-lite {
+  --glass-bg: rgba(18, 18, 22, 0.9);
+  --glass-strong-bg: rgba(18, 18, 22, 0.92);
+  --glass-blur: none;
+  --glass-strong-blur: none;
+}
+.effects-lite [class*="backdrop-blur"],
+.effects-lite [class*="backdrop-saturate"] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -73,7 +84,8 @@ textarea:focus-visible {
   .animate-spin {
     animation: none !important;
   }
-  .progress-shimmer {
+  .progress-shimmer,
+  .start-button-busy::after {
     display: none;
   }
   .activity-bar {
@@ -127,9 +139,6 @@ body {
   user-select: none;
 }
 
-/* Interface size animation (lib/scaleTransition.ts): the layout is held at its size from before the change as a card
-   in the window's top-left corner, and scaled with a transform, so nothing re-wraps or shifts mid-animation. No
-   will-change on purpose: it would make the browser stretch a bitmap and blur the text. */
 html.ui-scale-pinned body {
   position: fixed;
   left: 0;
@@ -166,6 +175,24 @@ h2 {
     backdrop-filter: var(--glass-strong-blur);
   }
 
+  .expand-trigger {
+    position: relative;
+    isolation: isolate;
+  }
+  .expand-trigger::before {
+    content: "";
+    position: absolute;
+    inset: 4px;
+    z-index: -1;
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.05);
+    opacity: 0;
+    transition: opacity 150ms ease;
+  }
+  .expand-trigger:hover::before {
+    opacity: 1;
+  }
+
   .accent-grad {
     background: linear-gradient(180deg, var(--accent-a), var(--accent-b));
   }
@@ -182,6 +209,13 @@ h2 {
     box-shadow:
       0 18px 40px -16px rgba(0, 0, 0, 0.6),
       inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    opacity: var(--fade, 1);
+  }
+  [data-morph-clipped="true"] .job-card {
+    clip-path: inset(
+      calc((1 - var(--grow)) * (100% - 46px) - var(--slack)) calc((1 - var(--grow)) * (100% - 200px) - var(--slack))
+        calc(var(--slack) * -1) calc(var(--slack) * -1) round 12px
+    );
   }
   .job-card-icon {
     box-shadow:
@@ -191,9 +225,32 @@ h2 {
   .start-button {
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
     transition:
-      transform 200ms cubic-bezier(0.2, 0.7, 0.2, 1),
+      transform 630ms
+        linear(
+          0, 0.0675, 0.2346, 0.4531, 0.6816, 0.8884, 1.0534, 1.1669, 1.2286, 1.2447, 1.2255, 1.183, 1.1289, 1.0732,
+          1.0233, 0.9839, 0.9573, 0.9433, 0.9402, 0.9455, 0.9563, 0.9697, 0.9832, 0.9953, 1.0046, 1.0109, 1.0141,
+          1.0146, 1.0132, 1.0104, 1.0071, 1.0038, 1.0009, 0.9987, 0.9972, 0.9965, 0.9964, 0.9968, 0.9975, 0.9983, 1
+        ),
       box-shadow 200ms ease,
       background-color 150ms ease;
+  }
+  .start-button-busy::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(100deg, transparent 30%, rgba(17, 17, 17, 0.08) 50%, transparent 70%);
+    background-size: 250% 100%;
+    animation: start-slosh 1.4s ease-in-out infinite alternate;
+    pointer-events: none;
+  }
+  .start-ripple {
+    background: radial-gradient(
+      circle,
+      rgba(17, 17, 17, 0) 38%,
+      rgba(17, 17, 17, 0.12) 52%,
+      rgba(17, 17, 17, 0) 68%
+    );
   }
   .start-button-idle:hover,
   .start-button-raised {
@@ -222,6 +279,81 @@ h2 {
   inset: 0;
   background: linear-gradient(90deg, transparent 20%, rgba(0, 0, 0, 0.16) 50%, transparent 80%);
   animation: progress-sheen 1.6s ease-in-out infinite;
+}
+@property --pour {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 1;
+}
+.window-pour [data-window-root] {
+  clip-path: inset(
+    calc((1 - var(--pour)) * var(--pour-t)) calc((1 - var(--pour)) * var(--pour-r))
+      calc((1 - var(--pour)) * var(--pour-b)) calc((1 - var(--pour)) * var(--pour-l)) round
+      calc(12px - 3px * var(--pour))
+  );
+}
+.window-pour [data-window-root] {
+  --pour: 0;
+}
+.window-pour.window-pouring [data-window-root] {
+  --pour: 1;
+  transition: --pour 600ms
+    linear(
+      0, 0.0236, 0.0805, 0.1558, 0.2394, 0.3247, 0.4072, 0.4846, 0.5553, 0.6188, 0.6751, 0.7243, 0.7671, 0.804,
+      0.8356, 0.8625, 0.8852, 0.9045, 0.9207, 0.9342, 0.9456, 0.955, 0.9629, 0.9694, 0.9748, 0.9793, 0.983, 0.9861,
+      0.9886, 0.9907, 0.9924, 0.9938, 0.9949, 0.9958, 0.9966, 0.9972, 0.9977, 0.9982, 0.9985, 0.9988, 1
+    );
+}
+
+@keyframes rail-stretch {
+  0% {
+    transform: scaleY(1);
+  }
+  35% {
+    transform: scaleY(1.9);
+  }
+  100% {
+    transform: scaleY(1);
+  }
+}
+.rail-stretch {
+  animation: rail-stretch 420ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+@keyframes badge-pop {
+  from {
+    transform: scale(0.4);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+.badge-pop {
+  animation: badge-pop 560ms
+    linear(
+      0, 0.0675, 0.2346, 0.4531, 0.6816, 0.8884, 1.0534, 1.1669, 1.2286, 1.2447, 1.2255, 1.183, 1.1289, 1.0732,
+      1.0233, 0.9839, 0.9573, 0.9433, 0.9402, 0.9455, 0.9563, 0.9697, 0.9832, 0.9953, 1.0046, 1.0109, 1.0141,
+      1.0146, 1.0132, 1.0104, 1.0071, 1.0038, 1.0009, 0.9987, 0.9972, 0.9965, 0.9964, 0.9968, 0.9975, 0.9983, 1
+    );
+}
+
+@keyframes tooltip-bud {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+}
+.tooltip-bud {
+  animation: tooltip-bud 120ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+@keyframes start-slosh {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
 }
 @keyframes activity-bar {
   0%,
@@ -259,4 +391,39 @@ select,
 textarea,
 [role="button"] {
   -webkit-app-region: no-drag;
+}
+
+/* ------------ In-Game Overlay ------------
+   The overlay window's drawer, rail and content panes, its numbers font, and its wider scrollbars. Only the
+   overlay uses these classes. */
+.ov-mono {
+  font-family: "Cascadia Mono", "SF Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.ov-drawer {
+  background:
+    radial-gradient(120% 80% at 0% 0%, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 60%),
+    linear-gradient(104deg, rgba(19, 19, 25, 0.975) 0%, rgba(10, 10, 13, 0.945) 100%);
+  box-shadow: 26px 0 70px -24px rgba(0, 0, 0, 0.8);
+}
+
+.ov-rail {
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.3), rgba(0, 0, 0, 0.22));
+}
+
+.ov-content {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.022), rgba(255, 255, 255, 0) 220px);
+}
+
+.ov-scroll::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+.ov-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 5px;
 }

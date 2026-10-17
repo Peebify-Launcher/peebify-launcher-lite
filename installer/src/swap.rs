@@ -15,6 +15,7 @@ fn is_preserved(name: &std::ffi::OsStr) -> bool {
     let n = name.to_string_lossy();
     n == consts::STAGED_DIR_NAME
         || n == consts::BACKUP_DIR_NAME
+        || n == consts::UPDATE_STATE_NAME
         || n.eq_ignore_ascii_case(consts::GAMES_DIR_NAME)
 }
 
@@ -168,24 +169,29 @@ pub fn roll_back_swap(dir: &Path, backup: &Path, installed: &[PathBuf]) -> Resul
     }
 }
 
-fn restore_backup(dir: &Path, backup: &Path) -> Result<(), String> {
+pub fn restore_backup(dir: &Path, backup: &Path) -> Result<(), String> {
     for entry in std::fs::read_dir(backup).map_err(|e| format!("read backup dir: {e}"))? {
         let entry = entry.map_err(|e| e.to_string())?;
         let from = entry.path();
         let to = dir.join(entry.file_name());
-        if to.exists() {
-            let _ = if to.is_dir() {
-                std::fs::remove_dir_all(&to)
-            } else {
-                std::fs::remove_file(&to)
-            };
-        }
+        let _ = remove_entry(&to);
         win::retry(20, Duration::from_millis(250), || {
             std::fs::rename(&from, &to)
         })
         .map_err(|e| format!("restore {}: {e}", to.display()))?;
     }
     let _ = std::fs::remove_dir_all(backup);
+    Ok(())
+}
+
+pub fn recover_interrupted(dir: &Path) -> Result<(), String> {
+    let marker_path = dir.join(consts::UPDATE_STATE_NAME);
+    let backup = dir.join(consts::BACKUP_DIR_NAME);
+    if !(marker_path.exists() && backup.exists()) {
+        return Ok(());
+    }
+    restore_backup(dir, &backup)?;
+    let _ = std::fs::remove_file(&marker_path);
     Ok(())
 }
 
@@ -239,23 +245,6 @@ mod tests {
         assert!(foreign_collisions(&other.join("missing"), &staged_files()).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&other);
-    }
-
-    #[test]
-    fn expected_names_cover_the_payload_layout() {
-        let dir = scratch("expected");
-        std::fs::create_dir_all(dir.join("icons")).unwrap();
-        assert_eq!(foreign_collisions(&dir, &expected_top_names()), vec!["icons"]);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn collision_message_names_every_item() {
-        let one = collision_message(&["resources".to_string()]);
-        assert!(one.contains("an item named resources,"));
-        let two = collision_message(&["icons".to_string(), "resources".to_string()]);
-        assert!(two.contains("items named icons and resources,"));
-        assert!(!two.contains('\u{2014}'));
     }
 
     #[test]

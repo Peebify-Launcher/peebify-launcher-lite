@@ -36,10 +36,23 @@ const COVER_H: f32 = 880.0;
 const JPEG_QUALITY: u8 = 80;
 const WALLPAPER_SRC: &str = "assets/wallpaper.jpg";
 
-fn prepare_wallpaper() {
+fn write_jpeg(out_dir: &std::path::Path, name: &str, img: &image::RgbImage) {
     use image::codecs::jpeg::JpegEncoder;
     use image::ImageEncoder;
 
+    let mut encoded = Vec::new();
+    JpegEncoder::new_with_quality(&mut encoded, JPEG_QUALITY)
+        .write_image(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .unwrap_or_else(|e| panic!("encode {name}: {e}"));
+    std::fs::write(out_dir.join(name), &encoded).unwrap_or_else(|e| panic!("write {name}: {e}"));
+}
+
+fn prepare_wallpaper() {
     let out_dir = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
     println!("cargo:rerun-if-changed={WALLPAPER_SRC}");
     let img = image::open(WALLPAPER_SRC).unwrap_or_else(|e| panic!("read {WALLPAPER_SRC}: {e}"));
@@ -55,17 +68,7 @@ fn prepare_wallpaper() {
     };
 
     let rgb = img.into_rgb8();
-    let mut encoded = Vec::new();
-    JpegEncoder::new_with_quality(&mut encoded, JPEG_QUALITY)
-        .write_image(
-            rgb.as_raw(),
-            rgb.width(),
-            rgb.height(),
-            image::ExtendedColorType::Rgb8,
-        )
-        .unwrap_or_else(|e| panic!("encode wall.jpg: {e}"));
-    std::fs::write(out_dir.join("wall.jpg"), &encoded)
-        .unwrap_or_else(|e| panic!("write wall.jpg: {e}"));
+    write_jpeg(&out_dir, "wall.jpg", &rgb);
 
     let small = image::imageops::resize(
         &rgb,
@@ -74,26 +77,7 @@ fn prepare_wallpaper() {
         image::imageops::FilterType::Triangle,
     );
     let blurred = image::imageops::blur(&small, 6.0);
-    let mut blur_encoded = Vec::new();
-    JpegEncoder::new_with_quality(&mut blur_encoded, JPEG_QUALITY)
-        .write_image(
-            blurred.as_raw(),
-            blurred.width(),
-            blurred.height(),
-            image::ExtendedColorType::Rgb8,
-        )
-        .unwrap_or_else(|e| panic!("encode wall-blur.jpg: {e}"));
-    std::fs::write(out_dir.join("wall-blur.jpg"), &blur_encoded)
-        .unwrap_or_else(|e| panic!("write wall-blur.jpg: {e}"));
-    println!("cargo:rerun-if-env-changed=PEEBIFY_BUILD_VERBOSE");
-    if std::env::var_os("PEEBIFY_BUILD_VERBOSE").is_some() {
-        println!(
-            "cargo:warning=wallpaper wall.jpg: {}x{}, {} KB",
-            rgb.width(),
-            rgb.height(),
-            encoded.len() / 1024
-        );
-    }
+    write_jpeg(&out_dir, "wall-blur.jpg", &blurred);
 }
 
 fn numeric_version(version: &str) -> u64 {

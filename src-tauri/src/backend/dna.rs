@@ -2,27 +2,32 @@
 // Talks to Pan Studio's CDN for Duet Night Abyss. A build ships as one HDiffPatch directory archive (.hdiff): a full archive unpacks the game
 // from nothing, a diff archive patches an older build in place. Both are applied by the bundled hpatchz. The CDN also lists every file's MD5
 // per build (Hash.json), which is what verification checks, and the official launcher's banner and notice feeds, which drive the news panel.
-use std::path::Path;
+// It holds the game's publisher (what the install, repair and verify reconcile to), its install preview and its news.
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
-use serde_json::Value;
+use futures::future::BoxFuture;
+use peebify_transfer::part::with_suffix;
+use peebify_transfer::Sealed;
+use serde_json::{json, Value};
 
+use super::engine::{package_preview, JobCore, JobKind, Preview};
+use super::extract::{run_hpatchz, Extracted, VERIFIED_SUFFIX};
 use super::fs_util;
-use super::game_profiles;
-use super::http;
+use super::game_manager::local_game_version_at;
+use super::game_profiles::{self, profile_str};
+use super::manifest::{json_u64, Container, Cx, Entry, Hash, Manifest, Policy, Publisher, Unpacked, Unpacker};
 use super::news::{article, as_i64, as_str, envelope, local_month_day, slide, MAX_ITEMS, MAX_SLIDES};
+use super::validator::{self, Triage};
+use super::http;
 
-/// The official launcher's version record in the game folder: `{"version": 16001}`.
 pub const VERSION_FILE: &str = "GameVersion.json";
-/// Where Peebify keeps a downloading archive inside the game folder. hpatchz ignores it when patching in place.
 pub const PATCH_DIR: &str = "PeebifyPatch";
 pub const HPATCHZ: &str = "hpatchz.exe";
 
-fn profile_str<'a>(profile: &'a Value, key: &str) -> &'a str {
-    profile.get(key).and_then(Value::as_str).unwrap_or("").trim()
-}
-
-/// The download mirrors, fastest first in the official launcher's own speed test. Only https mirrors are used.
 pub fn cdns(profile: &Value) -> Vec<String> {
     profile
         .get("dnaCdns")
@@ -45,24 +50,15 @@ fn package_root(profile: &Value) -> Result<&str, String> {
     }
 }
 
-fn number_of(value: Option<&Value>) -> Option<u64> {
-    match value? {
-        Value::Number(n) => n.as_u64(),
-        Value::String(s) => s.trim().parse().ok(),
-        _ => None,
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Manifest {
+pub struct Build {
     pub latest: u64,
-    /// The major version folder, such as "1.6". Its digits are the start of `latest` (1.6 -> 16001).
     pub number: String,
     pub min_supported: u64,
 }
 
-pub fn manifest_from(body: &Value) -> Result<Manifest, String> {
-    let latest = number_of(body.get("latest_version"))
+pub fn build_from(body: &Value) -> Result<Build, String> {
+    let latest = json_u64(body.get("latest_version"))
         .filter(|v| *v > 0)
         .ok_or("the version manifest has no latest_version")?;
     let number = as_str(body.get("latest_version_number")).trim().to_string();
@@ -77,8 +73,8 @@ pub fn manifest_from(body: &Value) -> Result<Manifest, String> {
             "the version manifest's latest_version {latest} does not belong to version {number}"
         ));
     }
-    let min_supported = number_of(body.get("min_supported_version")).unwrap_or(0);
-    Ok(Manifest { latest, number, min_supported })
+    let min_supported = json_u64(body.get("min_supported_version")).unwrap_or(0);
+    Ok(Build { latest, number, min_supported })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,21 +83,15 @@ pub struct Package {
     pub file_name: String,
     pub md5: String,
     pub download_bytes: u64,
-    /// The size of the whole game once patched.
     pub install_bytes: u64,
-    /// One address per mirror, best first.
     pub urls: Vec<String>,
-    /// A full archive unpacks from nothing; otherwise it patches the build in the game folder.
     pub full: bool,
 }
 
-/// The CDN folder for a build: `1.6/16001/full_16001` for a full archive.
-/// Diff archives are only tried for builds the manifest still supports, and the official launcher's naming for them
-/// has not been seen yet (no diff build has shipped since it was studied), so `{from}_{to}` is a best guess and a miss falls back to full.
-pub fn package_dir(manifest: &Manifest, from: Option<u64>) -> String {
+pub fn package_dir(build: &Build, from: Option<u64>) -> String {
     match from {
-        Some(from) => format!("{}/{}/{from}_{}", manifest.number, manifest.latest, manifest.latest),
-        None => format!("{}/{}/full_{}", manifest.number, manifest.latest, manifest.latest),
+        Some(from) => format!("{}/{}/{from}_{}", build.number, build.latest, build.latest),
+        None => format!("{}/{}/full_{}", build.number, build.latest, build.latest),
     }
 }
 
@@ -119,8 +109,8 @@ pub fn package_from(body: &Value, version: u64, full: bool, folder_urls: &[Strin
     if md5.len() != 32 || !md5.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("the archive record has no usable MD5".to_string());
     }
-    let download_bytes = number_of(info.get("size")).filter(|s| *s > 0).ok_or("the archive record has no size")?;
-    let install_bytes = number_of(body.get("new_size")).unwrap_or(0);
+    let download_bytes = json_u64(info.get("size")).filter(|s| *s > 0).ok_or("the archive record has no size")?;
+    let install_bytes = json_u64(body.get("new_size")).unwrap_or(0);
     Ok(Package {
         version,
         urls: folder_urls.iter().map(|folder| format!("{folder}/{file_name}")).collect(),
@@ -147,122 +137,312 @@ async fn get_json_from_any(profile: &Value, rel: &str) -> Result<Value, String> 
     Err(last)
 }
 
-pub async fn fetch_manifest(profile: &Value) -> Result<Manifest, String> {
+pub async fn fetch_build(profile: &Value) -> Result<Build, String> {
     let root = package_root(profile)?;
-    manifest_from(&get_json_from_any(profile, &format!("{root}/VersionManifest.json")).await?)
+    build_from(&get_json_from_any(profile, &format!("{root}/VersionManifest.json")).await?)
 }
 
-pub async fn fetch_version(profile: &Value) -> Result<String, String> {
-    Ok(fetch_manifest(profile).await?.latest.to_string())
-}
-
-async fn fetch_package_at(profile: &Value, manifest: &Manifest, from: Option<u64>) -> Result<Package, String> {
+async fn fetch_package_at(profile: &Value, build: &Build, from: Option<u64>) -> Result<Package, String> {
     let root = package_root(profile)?;
-    let dir = package_dir(manifest, from);
+    let dir = package_dir(build, from);
     let body = get_json_from_any(profile, &format!("{root}/{dir}/HPatchDiffMd5.json")).await?;
     let folders: Vec<String> = cdns(profile).iter().map(|cdn| format!("{cdn}/{root}/{dir}")).collect();
-    package_from(&body, manifest.latest, from.is_none(), &folders)
+    package_from(&body, build.latest, from.is_none(), &folders)
 }
 
-/// The archive that brings the game folder to the latest build: a diff when the installed build is still supported and one exists, else full.
-/// `repair` always picks the full archive, as the official launcher does.
-pub async fn fetch_package(profile: &Value, installed: Option<u64>, repair: bool) -> Result<(Manifest, Package), String> {
-    let manifest = fetch_manifest(profile).await?;
-    let patchable = installed.filter(|v| !repair && *v >= manifest.min_supported && *v < manifest.latest);
+pub async fn fetch_package(profile: &Value, build: &Build, installed: Option<u64>, repair: bool) -> Result<Package, String> {
+    let patchable = installed.filter(|v| !repair && *v >= build.min_supported && *v < build.latest);
     if let Some(from) = patchable {
-        match fetch_package_at(profile, &manifest, Some(from)).await {
-            Ok(package) => return Ok((manifest, package)),
+        match fetch_package_at(profile, build, Some(from)).await {
+            Ok(package) => return Ok(package),
             Err(e) => log::warn!(
                 "{}: no diff archive from {from} to {} ({e}); downloading the full game instead.",
                 game_profiles::display_name(profile),
-                manifest.latest
+                build.latest
             ),
         }
     }
-    let package = fetch_package_at(profile, &manifest, None).await?;
-    Ok((manifest, package))
+    fetch_package_at(profile, build, None).await
 }
 
 pub fn installed_version(game_path: &Path) -> Option<u64> {
     let text = std::fs::read_to_string(game_path.join(VERSION_FILE)).ok()?;
     let body: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
-    number_of(body.get("version")).filter(|v| *v > 0)
+    json_u64(body.get("version")).filter(|v| *v > 0)
 }
 
-/// Written exactly as the official launcher writes it, so either launcher can pick the install up.
 pub fn write_installed_version(game_path: &Path, version: u64) -> Result<(), String> {
     let text = format!("{{\n    \"version\": {version}\n}}");
     fs_util::write_atomic(&game_path.join(VERSION_FILE), text.as_bytes())
         .map_err(|e| format!("Could not record the installed Duet Night Abyss version: {e}"))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FileHash {
-    pub path: String,
-    pub md5: String,
-}
-
-pub fn hashes_from(body: &Value) -> Vec<FileHash> {
-    let mut hashes: Vec<FileHash> = body
+pub fn files_from(body: &Value, game_path: &Path) -> Vec<Entry> {
+    let mut files: Vec<Entry> = body
         .as_object()
         .into_iter()
         .flatten()
         .filter_map(|(path, entry)| {
             let path = path.trim().trim_start_matches(['/', '\\']).replace('\\', "/");
             let safe = !path.is_empty() && !path.split('/').any(|part| part.is_empty() || part == "." || part == "..");
-            let md5 = as_str(entry.get("md5")).trim().to_ascii_lowercase();
-            (safe && md5.len() == 32 && md5.chars().all(|c| c.is_ascii_hexdigit())).then_some(FileHash { path, md5 })
+            let md5 = as_str(entry.get("md5")).trim();
+            let size = fs_util::safe_join(game_path, &path).ok().and_then(|p| std::fs::metadata(p).ok()).filter(|m| m.is_file());
+            (safe && md5.len() == 32 && md5.chars().all(|c| c.is_ascii_hexdigit()))
+                .then(|| Entry::new(path, size.map_or(0, |m| m.len()), Hash::parse(md5), ""))
         })
         .collect();
-    hashes.sort_by(|a, b| a.path.cmp(&b.path));
-    hashes
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files
 }
 
-pub async fn fetch_hashes(profile: &Value, manifest: &Manifest) -> Result<Vec<FileHash>, String> {
+async fn fetch_files(profile: &Value, build: &Build, game_path: &Path) -> Result<Vec<Entry>, String> {
     let root = package_root(profile)?;
-    let rel = format!("{root}/{}/{}/Hash.json", manifest.number, manifest.latest);
-    let hashes = hashes_from(&get_json_from_any(profile, &rel).await?);
-    if hashes.is_empty() {
+    let rel = format!("{root}/{}/{}/Hash.json", build.number, build.latest);
+    let body = get_json_from_any(profile, &rel).await?;
+    let game_path = game_path.to_path_buf();
+    let files = tauri::async_runtime::spawn_blocking(move || files_from(&body, &game_path))
+        .await
+        .map_err(|e| format!("file list task panicked: {e}"))?;
+    if files.is_empty() {
         return Err("the file list for this build is empty".to_string());
     }
-    Ok(hashes)
+    Ok(files)
 }
 
-/// Hashes every listed file and returns the ones that are missing or differ. `on_progress` receives bytes read.
-pub fn verify_files(
-    game_path: &Path,
-    hashes: &[FileHash],
-    cancel: &AtomicBool,
-    mut on_progress: impl FnMut(u64),
-) -> Result<Vec<FileHash>, String> {
-    let mut broken = Vec::new();
-    for entry in hashes {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(fs_util::CANCELLED_MSG.to_string());
-        }
-        let path = fs_util::safe_join(game_path, &entry.path)?;
-        if !path.is_file() {
-            broken.push(entry.clone());
-            continue;
-        }
-        let got = fs_util::md5_file(&path, &mut || cancel.load(Ordering::Relaxed), &mut |n| on_progress(n));
-        match got {
-            Ok(got) if fs_util::checksum_matches(&entry.md5, &got) => {}
-            Ok(_) => broken.push(entry.clone()),
-            Err(e) if e == fs_util::CANCELLED_MSG => return Err(e),
-            Err(_) => broken.push(entry.clone()),
+// ------------ Install Preview ------------
+// The size of the full archive.
+pub(super) async fn preview(profile: &Value) -> Result<Preview, String> {
+    let package = fetch_package(profile, &fetch_build(profile).await?, None, false).await?;
+    Ok(package_preview(package.version.to_string(), package.download_bytes, package.install_bytes, 1))
+}
+
+// ------------ Publisher ------------
+// The build's archive is the only way to its files: it is fetched into a patch folder beside the game and applied by
+// hpatchz, a full archive over the folder and a diff into a copy of it that is swapped in. A repair and a verify check
+// the files Hash.json lists, and a repair applies the full archive again. An archive is noted once it is known to be
+// whole, so a retry after a failed patch does not hash it again.
+pub(super) struct Dna;
+
+impl Publisher for Dna {
+    fn manifest<'a>(&'a self, cx: &'a Cx<'a>) -> BoxFuture<'a, Result<Manifest, String>> {
+        Box::pin(async move {
+            let name = game_profiles::display_name(cx.profile);
+            let build = fetch_build(cx.profile).await?;
+            let installed = installed_version(cx.dir);
+            let mut manifest = Manifest { version: build.latest.to_string(), adopts: installed.is_none(), ..Default::default() };
+            if cx.purpose != JobKind::Install && installed.is_some_and(|v| v != build.latest) {
+                return Ok(manifest);
+            }
+            if cx.purpose != JobKind::Install {
+                manifest.entries = fetch_files(cx.profile, &build, cx.dir)
+                    .await
+                    .map_err(|e| format!("Could not load the {name} file list: {e}"))?;
+            }
+            if cx.purpose == JobKind::Verify {
+                return Ok(manifest);
+            }
+            let package = fetch_package(cx.profile, &build, installed, cx.purpose == JobKind::Repair).await?;
+            log::info!(
+                "{name} {} archive for build {} — {:.2}GB to download, {:.2}GB installed.",
+                if package.full { "full" } else { "diff" },
+                package.version,
+                peebify_transfer::progress::gib(package.download_bytes as f64),
+                peebify_transfer::progress::gib(package.install_bytes as f64),
+            );
+            let hpatchz = fs_util::resource(cx.app, HPATCHZ).ok_or_else(|| {
+                format!("{name} is applied with {HPATCHZ}, which is missing from Peebify's install. Reinstall Peebify to restore it.")
+            })?;
+            let room = if cx.purpose != JobKind::Install {
+                0
+            } else if package.full {
+                let dir = cx.dir.to_path_buf();
+                let held = tauri::async_runtime::spawn_blocking(move || {
+                    fs_util::directory_size(&dir).saturating_sub(fs_util::directory_size(&dir.join(PATCH_DIR)))
+                })
+                .await
+                .unwrap_or(0);
+                package.install_bytes.saturating_sub(held)
+            } else {
+                package.install_bytes
+            };
+            let folders: Vec<String> = package
+                .urls
+                .iter()
+                .filter_map(|url| url.strip_suffix(&format!("/{}", package.file_name)))
+                .map(str::to_string)
+                .collect();
+            let url = package.urls.first().ok_or("no download mirror for the archive")?;
+            let part = Entry::new(format!("{PATCH_DIR}/{}", package.file_name), package.download_bytes, Hash::parse(&package.md5), url.as_str());
+            let unpack = Hpatch { hpatchz, md5: package.md5, bytes: package.install_bytes, full: package.full };
+            manifest.containers = vec![Container { parts: vec![part], unpack: Some(Arc::new(unpack)), room }];
+            manifest.mirrors = folders;
+            Ok(manifest)
+        })
+    }
+
+    fn triage(&self, dir: &Path, files: &[Entry]) -> Triage {
+        let noted = |part: &Entry| {
+            fs_util::safe_join(dir, &part.path).is_ok_and(|path| {
+                std::fs::metadata(&path).is_ok_and(|meta| meta.len() == part.size)
+                    && std::fs::read_to_string(with_suffix(&path, VERIFIED_SUFFIX)).is_ok_and(|note| note.trim() == part.hash.expected())
+            })
+        };
+        Triage { trusted: files.iter().filter(|f| noted(f)).map(|f| fs_util::manifest_key(&f.path)).collect(), ..Triage::default() }
+    }
+
+    fn after_seal<'a>(
+        &'a self,
+        _job: &'a Arc<JobCore>,
+        dir: &'a Path,
+        manifest: &'a Manifest,
+        sealed: &'a Sealed,
+    ) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            write_installed_version(dir, manifest.version.parse().map_err(|_| format!("{:?} is not a build number.", manifest.version))?)?;
+            validator::update_game_config_file(sealed, dir, &manifest.version)?;
+            let patch_dir = dir.join(PATCH_DIR);
+            match std::fs::remove_dir_all(&patch_dir) {
+                Ok(()) => log::info!("Removed {} now that the build is installed.", patch_dir.display()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => log::warn!("Could not remove {} after installing ({e}); it is safe to delete by hand.", patch_dir.display()),
+            }
+            Ok(true)
+        })
+    }
+
+    fn latest<'a>(&'a self, profile: &'a Value, _fresh: bool) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move { Ok(json!({ "version": fetch_build(profile).await?.latest.to_string() })) })
+    }
+
+    fn preview<'a>(&'a self, profile: &'a Value, _quality: Option<&'a str>) -> BoxFuture<'a, Result<Preview, String>> {
+        Box::pin(preview(profile))
+    }
+
+    fn write_space(&self, download: u64, install: u64) -> (u64, f64) {
+        (download.saturating_add(install), 1.0)
+    }
+
+    fn installed_version(&self, dir: &Path) -> Option<String> {
+        local_game_version_at(dir).or_else(|| installed_version(dir).map(|v| v.to_string()))
+    }
+
+    fn policy(&self, _dir: &Path) -> Policy {
+        Policy { checksums: true, records: true, ..Policy::default() }
+    }
+}
+
+struct Hpatch {
+    hpatchz: PathBuf,
+    md5: String,
+    bytes: u64,
+    full: bool,
+}
+
+impl Unpacker for Hpatch {
+    fn is_package(&self, name: &str) -> bool {
+        name.ends_with(".hdiff")
+    }
+
+    fn unpack<'a>(
+        &'a self,
+        job: &'a Arc<JobCore>,
+        dir: &'a Path,
+        archive: &'a Path,
+        _wanted: Option<&'a HashSet<String>>,
+    ) -> BoxFuture<'a, Result<Unpacked, String>> {
+        Box::pin(async move {
+            let name = game_profiles::display_name(job.profile());
+            let patch_dir = dir.join(PATCH_DIR);
+            if let Err(e) = fs_util::write_atomic(&with_suffix(archive, VERIFIED_SUFFIX), self.md5.as_bytes()) {
+                log::warn!("{name}: could not remember the checked archive ({e}).");
+            }
+            let report = job.unpacking(archive, self.bytes, 1, format!("Installing {name}..."));
+            clear_patch_leftovers(dir);
+            let full = self.full;
+            let baseline = match full {
+                true => {
+                    let (dir, patch_dir) = (dir.to_path_buf(), patch_dir.clone());
+                    tauri::async_runtime::spawn_blocking(move || fs_util::directory_size(&dir).saturating_sub(fs_util::directory_size(&patch_dir)))
+                        .await
+                        .unwrap_or(0)
+                }
+                false => 0,
+            };
+            let watching = Arc::new(AtomicBool::new(true));
+            let watcher = {
+                let (watching, report, total) = (Arc::clone(&watching), Arc::clone(&report), self.bytes as f64);
+                let (install, patch_dir) = (dir.to_path_buf(), patch_dir.clone());
+                tauri::async_runtime::spawn(async move {
+                    while watching.load(Ordering::Relaxed) {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        let (install, patch_dir) = (install.clone(), patch_dir.clone());
+                        let written = tauri::async_runtime::spawn_blocking(move || {
+                            bytes_written(&install, &patch_dir, full).saturating_sub(baseline)
+                        })
+                        .await
+                        .unwrap_or(0);
+                        if total > 0.0 && watching.load(Ordering::Relaxed) {
+                            report((written as f64 / total * 100.0).min(99.0));
+                        }
+                    }
+                })
+            };
+
+            let old_dir = (!full).then_some(dir);
+            let patched = job
+                .gate
+                .cancellable(run_hpatchz(&self.hpatchz, old_dir, archive, dir))
+                .await
+                .map_err(|e| job.cancel_aware(e));
+            watching.store(false, Ordering::Relaxed);
+            watcher.abort();
+            if patched.is_err() {
+                clear_patch_leftovers(dir);
+            }
+            patched?;
+            report(100.0);
+            Ok(Unpacked { written: Extracted::Tree { root: dir.to_path_buf(), skip: vec![patch_dir] }, files: Vec::new() })
+        })
+    }
+}
+
+fn patch_temp_dirs(install_path: &Path) -> Vec<PathBuf> {
+    let (Some(parent), Some(folder)) = (install_path.parent(), install_path.file_name()) else {
+        return Vec::new();
+    };
+    let folder = folder.to_string_lossy().into_owned();
+    let Ok(entries) = std::fs::read_dir(parent) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.strip_prefix(&folder)
+                .and_then(|rest| rest.strip_suffix(".tmp"))
+                .is_some_and(|digits| digits.len() == 3 && digits.chars().all(|c| c.is_ascii_digit()))
+        })
+        .map(|entry| entry.path())
+        .collect()
+}
+
+fn clear_patch_leftovers(install_path: &Path) {
+    for dir in patch_temp_dirs(install_path) {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => log::info!("Removed {}, left by an interrupted Duet Night Abyss patch.", dir.display()),
+            Err(e) => log::warn!("Could not remove {} ({e}).", dir.display()),
         }
     }
-    Ok(broken)
 }
 
-pub fn listed_bytes(game_path: &Path, hashes: &[FileHash]) -> u64 {
-    hashes
-        .iter()
-        .filter_map(|entry| fs_util::safe_join(game_path, &entry.path).ok())
-        .filter_map(|path| std::fs::metadata(path).ok())
-        .map(|meta| meta.len())
-        .sum()
+fn bytes_written(install_path: &Path, patch_dir: &Path, full: bool) -> u64 {
+    if full {
+        fs_util::directory_size(install_path).saturating_sub(fs_util::directory_size(patch_dir))
+    } else {
+        patch_temp_dirs(install_path)
+            .iter()
+            .map(|dir| fs_util::directory_size(dir))
+            .sum()
+    }
 }
 
 // ------------ News ------------
@@ -290,7 +470,6 @@ fn in_language<'a>(content: Option<&'a Value>, language: &str) -> Option<&'a Val
         .find(|c| as_str(c.get("language")).eq_ignore_ascii_case(language))
 }
 
-/// The CDN still links some images over plain http; every mirror serves https too.
 fn secure(url: &str) -> Option<String> {
     let url = url.trim();
     if url.starts_with("https://") {
@@ -438,25 +617,25 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn manifest() -> Manifest {
-        Manifest { latest: 16001, number: "1.6".into(), min_supported: 15001 }
+    fn build() -> Build {
+        Build { latest: 16001, number: "1.6".into(), min_supported: 15001 }
     }
 
     #[test]
     fn the_manifest_is_read_and_its_version_must_match_its_folder() {
         let body = json!({ "latest_version": "16001", "latest_version_number": "1.6", "min_supported_version": "15001" });
-        assert_eq!(manifest_from(&body).unwrap(), manifest());
+        assert_eq!(build_from(&body).unwrap(), build());
         let mismatched = json!({ "latest_version": "17001", "latest_version_number": "1.6" });
-        assert!(manifest_from(&mismatched).is_err());
+        assert!(build_from(&mismatched).is_err());
         let malformed = json!({ "latest_version": "16001", "latest_version_number": "1.6/../x" });
-        assert!(manifest_from(&malformed).is_err());
-        assert!(manifest_from(&json!({ "latest_version_number": "1.6" })).is_err());
+        assert!(build_from(&malformed).is_err());
+        assert!(build_from(&json!({ "latest_version_number": "1.6" })).is_err());
     }
 
     #[test]
     fn full_and_diff_archives_live_in_their_build_folder() {
-        assert_eq!(package_dir(&manifest(), None), "1.6/16001/full_16001");
-        assert_eq!(package_dir(&manifest(), Some(15001)), "1.6/16001/15001_16001");
+        assert_eq!(package_dir(&build(), None), "1.6/16001/full_16001");
+        assert_eq!(package_dir(&build(), Some(15001)), "1.6/16001/15001_16001");
     }
 
     #[test]
@@ -497,38 +676,44 @@ mod tests {
     }
 
     #[test]
-    fn the_file_list_keeps_only_safe_paths_with_real_hashes() {
+    fn the_file_list_keeps_only_safe_paths_with_real_hashes_and_takes_their_sizes_from_disk() {
+        let dir = std::env::temp_dir().join(format!("peebify-dna-files-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("EM")).unwrap();
+        std::fs::write(dir.join("EM.exe"), b"hello").unwrap();
         let body = json!({
             "/EM.exe": { "md5": "7E06F6AFFE27BA1B531A80503ADCA722" },
             "/EM/Binaries/Win64/EM-Win64-Shipping.exe": { "md5": "3ef374f8f7eb44d211bcc0c063a520d9" },
             "/../escape.dll": { "md5": "3ef374f8f7eb44d211bcc0c063a520d9" },
             "/broken.bin": { "md5": "zz" },
         });
-        let hashes = hashes_from(&body);
-        assert_eq!(hashes.len(), 2);
-        assert_eq!(hashes[0].path, "EM.exe");
-        assert_eq!(hashes[0].md5, "7e06f6affe27ba1b531a80503adca722");
+        let files = files_from(&body, &dir);
+        assert_eq!(files.len(), 2);
+        assert_eq!((&*files[0].path, files[0].size), ("EM.exe", 5));
+        assert_eq!(files[0].hash.expected(), "7e06f6affe27ba1b531a80503adca722");
+        assert_eq!(files[1].size, 0, "a missing file has no size to go by");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn verification_reports_missing_and_changed_files() {
-        let dir = std::env::temp_dir().join(format!("peebify-dna-verify-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("EM")).unwrap();
-        std::fs::write(dir.join("EM/good.bin"), b"hello").unwrap();
-        std::fs::write(dir.join("EM/bad.bin"), b"tampered").unwrap();
-        let good = fs_util::md5_hex(b"hello");
-        let hashes = vec![
-            FileHash { path: "EM/good.bin".into(), md5: good.clone() },
-            FileHash { path: "EM/bad.bin".into(), md5: good.clone() },
-            FileHash { path: "EM/missing.bin".into(), md5: good },
-        ];
-        let mut read = 0;
-        let broken = verify_files(&dir, &hashes, &AtomicBool::new(false), |n| read += n).unwrap();
-        let names: Vec<&str> = broken.iter().map(|b| b.path.as_str()).collect();
-        assert_eq!(names, vec!["EM/bad.bin", "EM/missing.bin"]);
-        assert_eq!(read, 13);
-        assert!(verify_files(&dir, &hashes, &AtomicBool::new(true), |_| {}).is_err());
+    fn an_archive_noted_as_whole_at_its_size_is_not_hashed_again() {
+        let dir = std::env::temp_dir().join(format!("peebify-dna-note-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(PATCH_DIR)).unwrap();
+        let part = Entry::new("PeebifyPatch/full_1.hdiff", 5, Hash::parse("5d41402abc4b2a76b9719d911017c592"), "");
+        let archive = dir.join(PATCH_DIR).join("full_1.hdiff");
+        let trusted = |part: &Entry| Dna.triage(&dir, std::slice::from_ref(part)).trusted.len();
+        std::fs::write(&archive, b"hello").unwrap();
+        assert_eq!(trusted(&part), 0, "nothing vouches for it yet");
+        std::fs::write(with_suffix(&archive, VERIFIED_SUFFIX), "5d41402abc4b2a76b9719d911017c592").unwrap();
+        assert_eq!(trusted(&part), 1);
+        std::fs::write(&archive, b"hello!").unwrap();
+        assert_eq!(trusted(&part), 0, "a file of another size is checked");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_hdiff_archives_are_packages_of_other_builds() {
+        let unpack = Hpatch { hpatchz: PathBuf::new(), md5: String::new(), bytes: 0, full: true };
+        assert!(unpack.is_package("full_15001.hdiff") && !unpack.is_package("EM.exe"));
     }
 
     #[test]

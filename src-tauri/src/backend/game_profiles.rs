@@ -1,6 +1,9 @@
 // ------------ Game Profiles ------------
 // The list of supported games and everything the launcher needs to know about each one: names, executables, download sources, install type, mod support and so on.
-// Other files look a game up here by id instead of hardcoding anything about it.
+// Other files look a game up here by id instead of hardcoding anything about it. Also checks where a game really lives
+// from the folder someone picked.
+
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde_json::{json, Value};
@@ -37,7 +40,7 @@ pub fn audio_language(profile_id: &str) -> String {
         .lock()
         .get(profile_id)
         .cloned()
-        .unwrap_or_else(|| super::download_engine::HOYO_AUDIO_LANGUAGE.to_string())
+        .unwrap_or_else(|| super::sophon::HOYO_AUDIO_LANGUAGE.to_string())
 }
 
 fn saved_voice_language(app: &tauri::AppHandle, key: &str) -> Option<String> {
@@ -114,10 +117,10 @@ pub(crate) async fn resolve_audio_language(
         return lang;
     }
 
-    let applied_dir = dir.to_path_buf();
+    let recorded_dir = dir.to_path_buf();
     let recorded = tauri::async_runtime::spawn_blocking(move || {
-        let applied = super::sophon::load_applied(&applied_dir)?;
-        super::sophon::applied_voice_languages(&applied)
+        super::validator::Record::load(&recorded_dir)
+            .groups
             .into_iter()
             .find(|lang| VOICE_LANGUAGES.contains(&lang.as_str()))
     })
@@ -139,9 +142,9 @@ pub(crate) async fn resolve_audio_language(
         return saved;
     }
     log::info!("[voice] {id}: found the {lang} voice pack from {source}.");
-    super::config_channels::set_config_value(app, &key, json!(lang));
+    super::config::set_config_value(app, &key, json!(lang));
     set_audio_language(id, &lang);
-    super::install_preview::invalidate_preview(id);
+    super::engine::invalidate_preview(id);
     use tauri::Emitter;
     let _ = app.emit("settings-changed", json!({ "key": key, "value": lang }));
     lang
@@ -172,20 +175,18 @@ pub fn content_tags(profile_id: &str) -> Option<Vec<String>> {
 }
 
 // ------------ Profile Table ------------
-// The profile of every supported game, written out as one big JSON value that is built once on first use.
+// The profile of every supported game, written out as one big JSON value that is built once on first use. Each profile gets its "id" from its key.
 fn profiles() -> &'static Value {
     static PROFILES: OnceLock<Value> = OnceLock::new();
     PROFILES.get_or_init(|| {
-        json!({
+        let mut table = json!({
             "wuwa": {
-                "id": "wuwa",
                 "wallpaperSlug": "wuthering-waves",
                 "displayName": "Wuthering Waves",
-                "shortName": "Wuthering Waves",
-                "apiClientKey": "wuwa",
 
                 "supportsManagedInstall": true,
                 "gameConfigUrl": "https://prod-alicdn-gamestarter.kurogame.com/launcher/game/50004_P7xcUZnEr1AXIGON25E6KjpOgTlVrg6e/G153/official/index.json",
+                "extraMirrors": ["https://hw-pcdownload-aliyun.aki-game.net"],
 
                 "executableName": "Wuthering Waves.exe",
                 "clientProcessName": "Client-Win64-Shipping.exe",
@@ -198,6 +199,7 @@ fn profiles() -> &'static Value {
 
                 "resourceQualityArgs": { "sd": ["-krqlv=sd"], "hd": ["-krqlv=hd"], "uhd": ["-krqlv=uhd"] },
                 "resourceQualityDefault": "hd",
+                "resourceQualityDir": ["Client", "Content", "{QUALITY}"],
 
                 "mods": {
                     "variant": "wwmi",
@@ -238,11 +240,8 @@ fn profiles() -> &'static Value {
             },
 
             "zzz": {
-                "id": "zzz",
                 "wallpaperSlug": "zenless-zone-zero",
                 "displayName": "Zenless Zone Zero",
-                "shortName": "Zenless Zone Zero",
-                "apiClientKey": "zzz",
 
                 "supportsManagedInstall": true,
                 "installMode": "sophon",
@@ -287,21 +286,17 @@ fn profiles() -> &'static Value {
                     ]
                 },
 
-                "luniteUsesHoyolabIcon": true,
                 "socialUrls": {
                     "discord": "https://discord.com/invite/zenlesszonezero",
                     "youtube": "https://www.youtube.com/@ZZZ_Official",
                     "x": "https://twitter.com/ZZZ_EN",
-                    "lunite": "https://www.hoyolab.com/accountCenter/postList?id=219270333"
+                    "hoyolab": "https://www.hoyolab.com/accountCenter/postList?id=219270333"
                 }
             },
 
             "hsr": {
-                "id": "hsr",
                 "wallpaperSlug": "honkai-star-rail",
                 "displayName": "Honkai: Star Rail",
-                "shortName": "Honkai: Star Rail",
-                "apiClientKey": "hsr",
 
                 "supportsManagedInstall": true,
                 "installMode": "sophon",
@@ -314,7 +309,6 @@ fn profiles() -> &'static Value {
                 "mods": {
                     "variant": "srmi",
                     "loaderMode": "hook",
-                    "forceDx11Args": [],
                     "gameBananaId": 18366,
                     "modIniDefaults": {
                         "Rendering": { "texture_hash": 0, "track_texture_updates": 0, "track_region_hashes": 0, "track_implicit_index_buffers": 1, "allow_buffer_resize": 1 },
@@ -339,25 +333,20 @@ fn profiles() -> &'static Value {
                     ]
                 },
 
-                "luniteUsesHoyolabIcon": true,
                 "socialUrls": {
                     "discord": "https://discord.gg/honkaistarrail",
                     "youtube": "https://www.youtube.com/@HonkaiStarRail",
                     "x": "https://twitter.com/HonkaiStarRail",
-                    "lunite": "https://www.hoyolab.com/accountCenter/postList?id=172534910"
+                    "hoyolab": "https://www.hoyolab.com/accountCenter/postList?id=172534910"
                 }
             },
 
             "nte": {
-                "id": "nte",
                 "wallpaperSlug": "neverness-to-everness",
                 "displayName": "Neverness to Everness",
-                "shortName": "Neverness to Everness",
-                "apiClientKey": "nte",
 
                 "supportsManagedInstall": true,
                 "installMode": "netease",
-                "showLuniteSocial": false,
 
                 "nteResUrls": [
                     "https://ntecdn1.perfectworld.com/clientRes",
@@ -400,15 +389,11 @@ fn profiles() -> &'static Value {
             },
 
             "endfield": {
-                "id": "endfield",
                 "wallpaperSlug": "arknights-endfield",
                 "displayName": "Arknights: Endfield",
-                "shortName": "Endfield",
-                "apiClientKey": "endfield",
 
                 "supportsManagedInstall": true,
                 "installMode": "hypergryph",
-                "showLuniteSocial": false,
 
                 "hgApiUrl": "https://launcher.gryphline.com/api/proxy/batch_proxy",
                 "hgWebApiUrl": "https://launcher.gryphline.com/api/proxy/web/batch_proxy",
@@ -455,11 +440,8 @@ fn profiles() -> &'static Value {
             },
 
             "genshin": {
-                "id": "genshin",
                 "wallpaperSlug": "genshin-impact",
                 "displayName": "Genshin Impact",
-                "shortName": "Genshin Impact",
-                "apiClientKey": "genshin",
 
                 "supportsManagedInstall": true,
                 "installMode": "sophon",
@@ -474,7 +456,6 @@ fn profiles() -> &'static Value {
                 "mods": {
                     "variant": "gimi",
                     "loaderMode": "hook",
-                    "forceDx11Args": [],
                     "gameBananaId": 8552,
                     "modIniDefaults": {
                         "Rendering": { "texture_hash": 0, "track_texture_updates": 0, "track_region_hashes": 0, "allow_buffer_resize": 1 },
@@ -500,21 +481,17 @@ fn profiles() -> &'static Value {
                     ]
                 },
 
-                "luniteUsesHoyolabIcon": true,
                 "socialUrls": {
                     "discord": "https://discord.gg/genshinimpact",
                     "youtube": "https://www.youtube.com/@GenshinImpact",
                     "x": "https://twitter.com/GenshinImpact",
-                    "lunite": "https://www.hoyolab.com/accountCenter/postList?id=143134221"
+                    "hoyolab": "https://www.hoyolab.com/accountCenter/postList?id=143134221"
                 }
             },
 
             "hi3": {
-                "id": "hi3",
                 "wallpaperSlug": "honkai-impact-3rd",
                 "displayName": "Honkai Impact 3rd",
-                "shortName": "Honkai Impact 3rd",
-                "apiClientKey": "hi3",
 
                 "supportsManagedInstall": true,
                 "installMode": "sophon",
@@ -527,7 +504,6 @@ fn profiles() -> &'static Value {
                 "mods": {
                     "variant": "himi",
                     "loaderMode": "hook",
-                    "forceDx11Args": [],
                     "gameBananaId": 10349,
                     "experimental": true,
                     "modIniDefaults": {
@@ -555,24 +531,21 @@ fn profiles() -> &'static Value {
                     ]
                 },
 
-                "luniteUsesHoyolabIcon": true,
                 "socialUrls": {
                     "discord": "https://discord.gg/honkaiimpact3",
                     "youtube": "https://www.youtube.com/@HonkaiImpact3rd",
                     "x": "https://twitter.com/HonkaiImpact3",
-                    "lunite": "https://www.hoyolab.com/accountCenter/postList?id=73565430"
+                    "hoyolab": "https://www.hoyolab.com/accountCenter/postList?id=73565430"
                 }
             },
 
             "pgr": {
-                "id": "pgr",
                 "wallpaperSlug": "punishing-gray-raven",
                 "displayName": "Punishing: Gray Raven",
-                "shortName": "Punishing: Gray Raven",
-                "apiClientKey": "pgr",
 
                 "supportsManagedInstall": true,
                 "gameConfigUrl": "https://prod-alicdn-gamestarter.kurogame.com/launcher/game/G143/50015_LWdk9D2Ep9mpJmqBZZkcPBU2YNraEWBQ/index.json",
+                "extraMirrors": ["https://zspms-alicdn-gamestarter.kurogame.net"],
                 "newsSource": "pgr",
 
                 "executableName": "PGR.exe",
@@ -583,7 +556,6 @@ fn profiles() -> &'static Value {
                 "graphicsApiArgs": { "dx11": ["-force-d3d11"], "dx12": ["-force-d3d12"] },
                 "graphicsApiDefault": "dx11",
 
-                "showLuniteSocial": false,
                 "communityTools": {
                     "official": [
                         {
@@ -608,15 +580,11 @@ fn profiles() -> &'static Value {
             },
 
             "gf2": {
-                "id": "gf2",
                 "wallpaperSlug": "girls-frontline-2",
                 "displayName": "Girls' Frontline 2: Exilium",
-                "shortName": "Girls' Frontline 2",
-                "apiClientKey": "gf2",
 
                 "supportsManagedInstall": true,
                 "installMode": "gf2",
-                "showLuniteSocial": false,
 
                 "gf2ConfigUrl": "https://gf2-launcher-us.sunborngame.com/flexible_config?version=1.0.2",
                 "gf2ClientPackage": "GF2_Exilium_Origin.zip",
@@ -651,14 +619,10 @@ fn profiles() -> &'static Value {
             },
 
             "gf1": {
-                "id": "gf1",
                 "wallpaperSlug": "girls-frontline",
                 "displayName": "Girls' Frontline",
-                "shortName": "Girls' Frontline",
-                "apiClientKey": "gf1",
                 "supportsManagedInstall": false,
                 "newsSource": "gf1",
-                "showLuniteSocial": false,
 
                 "executableName": "GirlsFrontLine.exe",
                 "clientProcessName": "GirlsFrontLine.exe",
@@ -689,15 +653,11 @@ fn profiles() -> &'static Value {
             },
 
             "re1999": {
-                "id": "re1999",
                 "wallpaperSlug": "reverse-1999",
                 "displayName": "Reverse: 1999",
-                "shortName": "Reverse: 1999",
-                "apiClientKey": "re1999",
 
                 "supportsManagedInstall": true,
                 "installMode": "bluepoch",
-                "showLuniteSocial": false,
 
                 "maxPathTail": 200,
 
@@ -709,6 +669,7 @@ fn profiles() -> &'static Value {
                     "https://launcher-hw.sl916.com",
                     "https://launcher-bak-hw.sl916.com"
                 ],
+                "extraMirrors": ["https://download.bluepoch.com", "https://download-bak.bluepoch.com"],
                 "bpGameId": "60001",
                 "bpChannelId": 200,
                 "bpSubChannelId": "6001",
@@ -746,15 +707,11 @@ fn profiles() -> &'static Value {
             },
 
             "bd2": {
-                "id": "bd2",
                 "wallpaperSlug": "brown-dust-2",
                 "displayName": "Brown Dust II",
-                "shortName": "Brown Dust II",
-                "apiClientKey": "bd2",
 
                 "supportsManagedInstall": true,
                 "installMode": "bd2",
-                "showLuniteSocial": false,
 
                 "bdStarterConfigUrl": "https://pc.bd2.pmang.cloud/browndust2starter/starter/config/launcher_g.json",
                 "bdGameKey": "10000002",
@@ -790,15 +747,11 @@ fn profiles() -> &'static Value {
             },
 
             "arknights": {
-                "id": "arknights",
                 "wallpaperSlug": "arknights",
                 "displayName": "Arknights",
-                "shortName": "Arknights",
-                "apiClientKey": "arknights",
 
                 "supportsManagedInstall": true,
                 "installMode": "yostar",
-                "showLuniteSocial": false,
 
                 "ysApiUrl": "https://api-launcher-en.yo-star.com",
                 "ysGameTag": "Arknights_EN",
@@ -838,14 +791,10 @@ fn profiles() -> &'static Value {
                 }
             },
             "bluearchive": {
-                "id": "bluearchive",
                 "wallpaperSlug": "blue-archive",
                 "displayName": "Blue Archive",
-                "shortName": "Blue Archive",
-                "apiClientKey": "bluearchive",
                 "supportsManagedInstall": false,
                 "newsSource": "nexon",
-                "showLuniteSocial": false,
 
                 "nexonForumUrl": "https://forum.nexon.com",
                 "nexonForumAlias": "bluearchive-en",
@@ -881,15 +830,11 @@ fn profiles() -> &'static Value {
                 }
             },
             "dna": {
-                "id": "dna",
                 "wallpaperSlug": "duet-night-abyss",
                 "displayName": "Duet Night Abyss",
-                "shortName": "Duet Night Abyss",
-                "apiClientKey": "dna",
 
                 "supportsManagedInstall": true,
                 "installMode": "dna",
-                "showLuniteSocial": false,
 
                 "dnaCdns": [
                     "https://pan01-cdn-ali-jp.dna-panstudio.com",
@@ -928,7 +873,11 @@ fn profiles() -> &'static Value {
                     "x": "https://x.com/DNAbyss_EN"
                 }
             }
-        })
+        });
+        for (id, profile) in table.as_object_mut().expect("the table is an object") {
+            profile["id"] = json!(id);
+        }
+        table
     })
 }
 
@@ -948,22 +897,6 @@ pub fn profile(id: &str) -> &'static Value {
                 .expect("WUWA profile must exist")
         }
     }
-}
-
-pub fn list_profiles() -> Value {
-    let list: Vec<Value> = GAME_IDS
-        .iter()
-        .map(|id| {
-            let p = profile(id);
-            json!({
-                "id": p["id"],
-                "displayName": p["displayName"],
-                "shortName": p["shortName"],
-                "supportsManagedInstall": is_managed(p),
-            })
-        })
-        .collect();
-    Value::Array(list)
 }
 
 pub fn is_managed(profile: &Value) -> bool {
@@ -1008,6 +941,17 @@ impl InstallMode {
     }
 }
 
+pub fn profile_str<'a>(profile: &'a Value, key: &str) -> &'a str {
+    profile.get(key).and_then(Value::as_str).unwrap_or("").trim()
+}
+
+pub fn required_str<'a>(profile: &'a Value, key: &str) -> Result<&'a str, String> {
+    match profile_str(profile, key) {
+        "" => Err(format!("{} is missing its {key} setting.", display_name(profile))),
+        value => Ok(value),
+    }
+}
+
 pub fn display_name(profile: &Value) -> &str {
     profile["displayName"].as_str().unwrap_or("")
 }
@@ -1018,6 +962,10 @@ pub fn profile_id(profile: &Value) -> &str {
 
 pub fn executable_name(profile: &Value) -> &str {
     profile["executableName"].as_str().unwrap_or("")
+}
+
+pub fn data_dir(install_path: &Path, executable_name: &str) -> PathBuf {
+    install_path.join(format!("{}_Data", executable_name.trim_end_matches(".exe")))
 }
 
 pub fn install_folder_name(profile: &Value) -> String {
@@ -1180,6 +1128,485 @@ fn string_array(v: &Value) -> Option<Vec<String>> {
     )
 }
 
+// ------------ Game Path Checks ------------
+// Figures out where a game really lives from the folder someone picked, looking a few levels in each direction for its executable, and decides if that folder is acceptable.
+// It also holds the Windows path length budget, since some games break when installed too deep.
+
+pub struct Validation {
+    pub is_valid: bool,
+    pub error: Option<String>,
+    pub resolved_path: Option<String>,
+}
+
+impl Validation {
+    fn invalid(error: impl Into<String>) -> Self {
+        Self {
+            is_valid: false,
+            error: Some(error.into()),
+            resolved_path: None,
+        }
+    }
+}
+
+fn resolve(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+const WALK_DIR_BUDGET: usize = 5_000;
+const WHOLE_DRIVE: &str = "Pick the game's own folder, not a whole drive.";
+
+fn is_volume_root(path: &Path) -> bool {
+    resolve(path).parent().is_none()
+}
+
+fn skipped_dir(entry: &std::fs::DirEntry) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const HIDDEN_OR_SYSTEM: u32 = 0x2 | 0x4;
+    if entry
+        .metadata()
+        .is_ok_and(|m| m.file_attributes() & HIDDEN_OR_SYSTEM != 0)
+    {
+        return true;
+    }
+    std::env::var_os("SystemRoot")
+        .is_some_and(|root| entry.path().as_os_str().eq_ignore_ascii_case(&root))
+}
+
+fn subdirs(dir: &Path, budget: &mut usize) -> Option<Vec<PathBuf>> {
+    if *budget == 0 {
+        return None;
+    }
+    *budget -= 1;
+    Some(
+        std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false) && !skipped_dir(e))
+            .map(|e| e.path())
+            .collect(),
+    )
+}
+
+pub fn find_game_install_root(
+    game_path: &Path,
+    executable_name: &str,
+    max_depth: u32,
+) -> Option<PathBuf> {
+    if executable_name.is_empty() {
+        return None;
+    }
+    if game_path.join(executable_name).exists() {
+        return Some(game_path.to_path_buf());
+    }
+    if is_volume_root(game_path) {
+        return None;
+    }
+
+    fn walk(
+        dir: &Path,
+        exe: &str,
+        depth: u32,
+        max_depth: u32,
+        budget: &mut usize,
+    ) -> Option<PathBuf> {
+        if depth > max_depth {
+            return None;
+        }
+        let entries = subdirs(dir, budget)?;
+
+        for sub in &entries {
+            if sub.join(exe).exists() {
+                return Some(sub.clone());
+            }
+        }
+        for sub in &entries {
+            if let Some(found) = walk(sub, exe, depth + 1, max_depth, budget) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    let mut budget = WALK_DIR_BUDGET;
+    walk(game_path, executable_name, 1, max_depth, &mut budget)
+}
+
+pub fn find_install_root_by_marker(
+    game_path: &Path,
+    marker_parts: &[String],
+    max_depth: u32,
+) -> Option<PathBuf> {
+    if marker_parts.is_empty() {
+        return None;
+    }
+
+    let marker_exists = |root: &Path| {
+        let mut p = root.to_path_buf();
+        for part in marker_parts {
+            p.push(part);
+        }
+        p.exists()
+    };
+
+    let mut dir = resolve(game_path);
+    for _ in 0..5 {
+        if marker_exists(&dir) {
+            return Some(dir);
+        }
+        match dir.parent() {
+            Some(parent) if parent != dir => dir = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+
+    if is_volume_root(game_path) {
+        return None;
+    }
+
+    fn walk(
+        dir: &Path,
+        depth: u32,
+        max_depth: u32,
+        marker_exists: &dyn Fn(&Path) -> bool,
+        budget: &mut usize,
+    ) -> Option<PathBuf> {
+        if depth > max_depth {
+            return None;
+        }
+        if marker_exists(dir) {
+            return Some(dir.to_path_buf());
+        }
+        if depth == max_depth {
+            return None;
+        }
+        for sub in subdirs(dir, budget)? {
+            if let Some(found) = walk(&sub, depth + 1, max_depth, marker_exists, budget) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    let mut budget = WALK_DIR_BUDGET;
+    walk(&resolve(game_path), 0, max_depth, &marker_exists, &mut budget)
+}
+
+pub fn resolve_launch(install_root: &Path, profile: &Value) -> (PathBuf, Vec<String>) {
+    let candidates = launch_candidates(profile);
+    let joined = |candidate: &LaunchCandidate| {
+        candidate
+            .parts
+            .iter()
+            .fold(install_root.to_path_buf(), |p, part| p.join(part))
+    };
+    for candidate in &candidates {
+        let path = joined(candidate);
+        if path.exists() {
+            return (path, candidate.args.clone());
+        }
+    }
+    match candidates.first() {
+        Some(first) => (joined(first), first.args.clone()),
+        None => (
+            install_root.join(executable_name(profile)),
+            Vec::new(),
+        ),
+    }
+}
+
+pub fn launch_executable_path(install_root: &Path, profile: &Value) -> PathBuf {
+    resolve_launch(install_root, profile).0
+}
+
+pub const WINDOWS_MAX_PATH: usize = 259;
+
+pub fn max_install_root_len(profile: &Value) -> usize {
+    WINDOWS_MAX_PATH.saturating_sub(max_path_tail(profile))
+}
+
+pub fn fits_path_budget(root: &Path, profile: &Value) -> bool {
+    root_len(root) <= max_install_root_len(profile)
+}
+
+pub(crate) fn root_len(root: &Path) -> usize {
+    root.to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .encode_utf16()
+        .count()
+}
+
+pub fn path_budget_error(root: &Path, profile: &Value) -> Option<String> {
+    let limit = max_install_root_len(profile);
+    let len = root_len(root);
+    if len <= limit {
+        return None;
+    }
+    Some(format!(
+        "This folder is {} character{} too deep for {}. Windows limits the game to {WINDOWS_MAX_PATH}-character paths, and {} needs {} of those for the files it writes itself, so its folder has to be at most {limit} characters long (this one is {len}). Pick a shorter folder, such as one directly off C:\\.",
+        len - limit,
+        if len - limit == 1 { "" } else { "s" },
+        display_name(profile),
+        display_name(profile),
+        max_path_tail(profile),
+    ))
+}
+
+pub fn validate_game_path_for_profile(game_path: &str, profile: &Value) -> Validation {
+    if game_path.is_empty() {
+        return Validation::invalid("No path provided.");
+    }
+    let picked = Path::new(game_path);
+
+    if let Some(marker) = install_root_marker(profile) {
+        let Some(install_root) = find_install_root_by_marker(picked, &marker, 4) else {
+            return Validation::invalid(if is_volume_root(picked) {
+                WHOLE_DRIVE
+            } else {
+                "Could not find NTE game files in this folder or its parents."
+            });
+        };
+        let launch_exe = launch_executable_path(&install_root, profile);
+        if !launch_exe.exists() {
+            let base = launch_exe
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            return Validation::invalid(format!(
+                "\"{base}\" not found under the detected install folder."
+            ));
+        }
+        let selected = resolve(picked);
+        let resolved = resolve(&install_root);
+        return Validation {
+            is_valid: true,
+            error: None,
+            resolved_path: (resolved != selected)
+                .then(|| install_root.to_string_lossy().to_string()),
+        };
+    }
+
+    let exe = executable_name(profile);
+    let Some(resolved) = find_game_install_root(picked, exe, 4) else {
+        return Validation::invalid(if is_volume_root(picked) {
+            WHOLE_DRIVE.to_string()
+        } else {
+            format!("\"{exe}\" not found in this folder or its subfolders.")
+        });
+    };
+    let resolved_str = resolved.to_string_lossy().to_string();
+    Validation {
+        is_valid: true,
+        error: None,
+        resolved_path: (resolved_str != game_path).then_some(resolved_str),
+    }
+}
+
+// ------------ Default Install Folders ------------
+// The places Peebify offers to install a game into, best first, and whether a game already sits in one of them.
+pub(crate) const GAMES_DIR_NAME: &str = "games";
+
+pub(crate) fn launcher_dir() -> PathBuf {
+    if cfg!(debug_assertions) {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default()
+    } else {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_default()
+    }
+}
+
+pub(crate) fn is_protected_root(dir: &Path) -> bool {
+    let protected_roots: Vec<String> = [
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+        "SystemRoot",
+        "windir",
+    ]
+    .iter()
+    .filter_map(|var| std::env::var(var).ok())
+    .filter(|v| !v.is_empty())
+    .map(|v| v.to_lowercase())
+    .collect();
+    let dir_lower = dir.to_string_lossy().to_lowercase();
+    protected_roots
+        .iter()
+        .any(|root| dir_lower == *root || dir_lower.starts_with(&format!("{root}\\")))
+}
+
+pub(crate) fn default_install_dirs(profile: &Value) -> Vec<(&'static str, PathBuf)> {
+    let folder_name = install_folder_name(profile);
+
+    let mut candidates: Vec<(&'static str, PathBuf)> = Vec::with_capacity(3);
+
+    let dir = launcher_dir();
+    if !is_protected_root(&dir) {
+        candidates.push(("launcher", dir.join(GAMES_DIR_NAME).join(&folder_name)));
+    }
+
+    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    if !home.is_empty() {
+        candidates.push((
+            "user-home",
+            Path::new(&home).join("Peebify Games").join(&folder_name),
+        ));
+    }
+
+    candidates.push(("system-drive", system_drive_games_root().join(&folder_name)));
+
+    candidates.sort_by_key(|(_, dir)| !fits_path_budget(dir, profile));
+    candidates
+}
+
+pub(crate) fn system_drive_games_root() -> PathBuf {
+    let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+    Path::new(&format!("{system_drive}\\")).join("Peebify Games")
+}
+
+pub(crate) fn install_in_default_dirs(profile: &'static Value) -> Option<String> {
+    default_install_dirs(profile)
+        .into_iter()
+        .find_map(|(_, dir)| {
+            if !dir.is_dir() {
+                return None;
+            }
+            let picked = dir.to_string_lossy().to_string();
+            let validation = validate_game_path_for_profile(&picked, profile);
+            if !validation.is_valid {
+                return None;
+            }
+            let resolved = validation.resolved_path.unwrap_or(picked);
+            if is_unfinished_fresh_install(&dir, Path::new(&resolved)) {
+                log::info!(
+                    "Startup scan: skipped {resolved} because a fresh install there never finished."
+                );
+                return None;
+            }
+            Some(resolved)
+        })
+}
+
+pub(crate) fn is_unfinished_fresh_install(dir: &Path, resolved: &Path) -> bool {
+    super::validator::install_marker_owns_dir(dir) == Some(true)
+        || super::validator::install_marker_owns_dir(resolved) == Some(true)
+}
+
+#[cfg(test)]
+mod path_budget_tests {
+    use super::*;
+
+    const RE1999_WORST_TAIL: &str = concat!(
+        r"reverse1999_Data\StreamingAssets\PersistentRoot\_tmp1\60001\Windows\",
+        r"b506cfbcc5e4cd49f865962da80b7300\",
+        "hotupdate_847690_49bb686f5d6b59c49f47158e0c30c633_",
+        "7256a44a1d7e5767113affb11ad09e8d.zip",
+    );
+
+    #[test]
+    fn the_budget_covers_the_path_the_game_actually_failed_on() {
+        let profile = profile("re1999");
+        let needed = RE1999_WORST_TAIL.len() + 1;
+        assert!(
+            needed <= max_path_tail(profile),
+            "{} needs {needed} characters below its folder, but the budget is {}",
+            display_name(profile),
+            max_path_tail(profile),
+        );
+    }
+
+    #[test]
+    fn the_folder_that_broke_the_game_is_refused() {
+        let profile = profile("re1999");
+        let too_deep = Path::new(
+            r"C:\Users\Alice\AppData\Local\Programs\Peebify Launcher\games\Reverse 1999",
+        );
+
+        assert!(!fits_path_budget(too_deep, profile));
+        let message = path_budget_error(too_deep, profile).expect("a reason");
+        assert!(message.contains("Reverse: 1999"), "unhelpful: {message}");
+
+        let full = too_deep.join(RE1999_WORST_TAIL);
+        assert!(full.to_string_lossy().chars().count() > WINDOWS_MAX_PATH);
+    }
+
+    #[test]
+    fn a_short_folder_is_accepted_and_has_no_complaint() {
+        let profile = profile("re1999");
+        let fine = Path::new(r"C:\Users\Alice\Peebify Games\Reverse 1999");
+
+        assert!(fits_path_budget(fine, profile));
+        assert!(path_budget_error(fine, profile).is_none());
+        assert!(
+            fine.join(RE1999_WORST_TAIL)
+                .to_string_lossy()
+                .chars()
+                .count()
+                <= WINDOWS_MAX_PATH
+        );
+    }
+
+    #[test]
+    fn a_trailing_separator_does_not_change_the_verdict() {
+        let profile = profile("re1999");
+        let limit = max_install_root_len(profile);
+        let exact = "a".repeat(limit);
+
+        assert!(fits_path_budget(Path::new(&exact), profile));
+        assert!(fits_path_budget(Path::new(&format!("{exact}\\")), profile));
+        assert!(!fits_path_budget(Path::new(&format!("{exact}a")), profile));
+    }
+
+    #[test]
+    fn characters_outside_the_bmp_count_as_two_path_units() {
+        let profile = profile("re1999");
+        let limit = max_install_root_len(profile);
+        let ascii = "a".repeat(limit - 1);
+        let with_emoji = format!("{ascii}\u{1F600}");
+
+        assert_eq!(root_len(Path::new(&with_emoji)), limit + 1);
+        assert!(!fits_path_budget(Path::new(&with_emoji), profile));
+        assert!(path_budget_error(Path::new(&with_emoji), profile).is_some());
+        assert!(fits_path_budget(Path::new(&format!("{ascii}\u{e9}")), profile));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_root_is_not_searched_below() {
+        assert!(is_volume_root(Path::new(r"C:\")));
+        assert!(is_volume_root(Path::new(r"D:\")));
+        assert!(is_volume_root(Path::new(r"\\server\share\")));
+        assert!(!is_volume_root(Path::new(r"C:\Games")));
+        assert!(!is_volume_root(Path::new(r"D:\Games\Wuthering Waves")));
+
+        assert_eq!(find_game_install_root(Path::new(r"C:\"), "no-such-game.exe", 4), None);
+        let validation =
+            validate_game_path_for_profile(r"C:\", profile("re1999"));
+        assert!(!validation.is_valid);
+        assert_eq!(validation.error.as_deref(), Some(WHOLE_DRIVE));
+    }
+
+    #[test]
+    fn a_game_below_the_picked_folder_is_still_found() {
+        let root = std::env::temp_dir().join(format!("peebify-locate-{}", uuid::Uuid::new_v4()));
+        let game = root.join("Games").join("Game");
+        std::fs::create_dir_all(&game).unwrap();
+        std::fs::write(game.join("game.exe"), b"x").unwrap();
+
+        let found = find_game_install_root(&root, "game.exe", 4);
+        let direct = find_game_install_root(&game, "game.exe", 4);
+        let too_shallow = find_game_install_root(&root, "game.exe", 1);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(found, Some(game.clone()));
+        assert_eq!(direct, Some(game));
+        assert_eq!(too_shallow, None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1191,34 +1618,6 @@ mod tests {
         }
         assert_eq!(InstallMode::of(&json!({})), InstallMode::Default);
         assert_eq!(InstallMode::of(&json!({ "installMode": "hoyoplay" })), InstallMode::Unknown);
-    }
-
-    #[test]
-    fn managed_flag_reads_the_profile() {
-        assert!(is_managed(profile("wuwa")));
-        assert!(!is_managed(profile("gf1")));
-        assert!(!is_managed(&json!({})));
-        assert!(!is_managed(&json!({ "supportsManagedInstall": "true" })));
-    }
-
-    #[test]
-    fn install_mode_is_optional_text() {
-        assert_eq!(install_mode(profile("nte")), Some("netease"));
-        assert_eq!(install_mode(profile("genshin")), Some("sophon"));
-        assert_eq!(install_mode(&json!({})), None);
-        assert_eq!(install_mode(&json!({ "installMode": 3 })), None);
-    }
-
-    #[test]
-    fn list_profiles_reports_managed_state() {
-        let list = list_profiles();
-        let gf1 = list
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["id"] == "gf1")
-            .unwrap();
-        assert_eq!(gf1["supportsManagedInstall"], Value::Bool(false));
     }
 
     #[test]
@@ -1241,5 +1640,110 @@ mod tests {
             std::path::Path::new(r"D:\Games\NTEGlobalGame.exe")
         ));
         assert!(hidden_front_end(profile("hsr")).is_empty());
+    }
+
+    fn dir_for<'a>(dirs: &'a [(&'static str, PathBuf)], kind: &str) -> Option<&'a std::path::Path> {
+        dirs.iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, dir)| dir.as_path())
+    }
+
+    #[test]
+    fn a_game_folder_is_offered_next_to_the_launcher_and_under_the_profile() {
+        let dirs = default_install_dirs(profile("wuwa"));
+
+        assert_eq!(dirs.len(), 3, "tests do not run from a protected root");
+        assert!(dir_for(&dirs, "launcher")
+            .expect("a launcher folder")
+            .ends_with(Path::new("games").join("Wuthering Waves")));
+        assert!(dir_for(&dirs, "user-home")
+            .expect("a profile folder")
+            .ends_with(Path::new("Peebify Games").join("Wuthering Waves")));
+        assert!(dir_for(&dirs, "system-drive")
+            .expect("a drive-root folder")
+            .ends_with(Path::new("Peebify Games").join("Wuthering Waves")));
+    }
+
+    #[test]
+    fn a_name_windows_cannot_use_is_stripped_the_same_way_on_both_sides() {
+        let dirs = default_install_dirs(profile("gf2"));
+
+        let launcher = dir_for(&dirs, "launcher").expect("a launcher folder");
+        assert!(
+            launcher.ends_with(Path::new("games").join("Girls' Frontline 2 Exilium")),
+            "unexpected folder: {}",
+            launcher.display()
+        );
+    }
+
+    #[test]
+    fn a_game_that_needs_room_is_not_offered_the_deepest_folder_first() {
+        let profile = profile("re1999");
+        let dirs = default_install_dirs(profile);
+
+        let launcher = dir_for(&dirs, "launcher").expect("a launcher folder");
+        if !fits_path_budget(launcher, profile) {
+            assert_ne!(
+                dirs[0].0,
+                "launcher",
+                "offered a folder the game cannot write from: {}",
+                launcher.display()
+            );
+        }
+        assert!(
+            fits_path_budget(dirs[0].1.as_path(), profile),
+            "the first choice has no room for the game's own paths: {}",
+            dirs[0].1.display()
+        );
+        assert!(
+            dirs.iter().any(|(kind, _)| *kind == "launcher"),
+            "detection can no longer find installs next to the launcher"
+        );
+    }
+
+    #[test]
+    fn nothing_is_adopted_from_a_folder_that_holds_no_game() {
+        let empty = std::env::temp_dir().join(format!(
+            "peebify-detect-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&empty).unwrap();
+
+        let validation = validate_game_path_for_profile(
+            &empty.to_string_lossy(),
+            profile("wuwa"),
+        );
+
+        let _ = std::fs::remove_dir_all(&empty);
+        assert!(!validation.is_valid);
+    }
+
+    #[test]
+    fn only_a_fresh_install_that_never_finished_blocks_adoption() {
+        let tmp = crate::backend::fs_util::TempDir::new("marker");
+        let dir = tmp.path().to_path_buf();
+        let nested = dir.join("Game");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert!(!is_unfinished_fresh_install(&dir, &nested));
+
+        std::fs::write(dir.join(".peebify-install"), r#"{"ownedDir": false}"#).unwrap();
+        assert!(!is_unfinished_fresh_install(&dir, &nested));
+
+        std::fs::write(dir.join(".peebify-install"), r#"{"ownedDir": true}"#).unwrap();
+        assert!(is_unfinished_fresh_install(&dir, &nested));
+
+        std::fs::remove_file(dir.join(".peebify-install")).unwrap();
+        std::fs::write(nested.join(".peebify-install"), r#"{"ownedDir": true}"#).unwrap();
+        assert!(is_unfinished_fresh_install(&dir, &nested));
+
+    }
+
+    #[test]
+    fn the_games_folder_matches_the_one_the_installer_spares() {
+        let installer = include_str!("../../../installer/src/consts.rs");
+        let declared = format!("pub const GAMES_DIR_NAME: &str = \"{GAMES_DIR_NAME}\";");
+        assert!(installer.contains(&declared));
     }
 }

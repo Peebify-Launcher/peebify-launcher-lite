@@ -10,10 +10,13 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
-use super::fs_util::fmt_io;
+use super::fs_util::{
+    fmt_io, is_same_or_inside, list_files, nearest_existing_dir, normalize_path as normalized,
+};
+use super::fs_util::dialog::Pick;
 use super::queue::{Phase, Update};
-use super::state::BackendState;
-use super::{err_response, game_path, game_profiles, ok_response, ok_with, process_utils};
+use super::BackendState;
+use super::{err_response, game_profiles, ok_response, ok_with, process_utils};
 
 const STREAM_THRESHOLD: u64 = 64 * 1024 * 1024;
 const ERROR_ACCESS_DENIED: i32 = 5;
@@ -25,7 +28,6 @@ pub(super) const LAUNCHER_PAYLOAD: &str =
 const REMOVE_RETRY_BUDGET_MS: u64 = 5_000;
 const REMOVE_RETRY_DELAY_MS: u64 = 100;
 const REMOVE_RETRIES_PER_FILE: u32 = 3;
-const MAX_REPORTED_FAILURES: usize = 50;
 const MOVE_CANCELLED: &str = "Move cancelled.";
 const REMOVING_OLD_COPY: &str = "Removing the old copy";
 const MOVE_REPORT_INTERVAL: Duration = Duration::from_millis(120);
@@ -118,10 +120,6 @@ fn remember_leftovers(profile_id: &str, dir: &Path) {
     folders.push((profile_id.to_string(), dir.to_path_buf()));
 }
 
-fn nearest_existing_folder(dir: &Path) -> Option<PathBuf> {
-    dir.ancestors().find(|p| p.is_dir()).map(Path::to_path_buf)
-}
-
 pub async fn open_leftover_folder(target_game_id: Option<&str>) -> Value {
     let profile = match named_known_profile(target_game_id) {
         Ok(profile) => profile,
@@ -133,10 +131,10 @@ pub async fn open_leftover_folder(target_game_id: Option<&str>) -> Value {
         .iter()
         .find(|(id, _)| id == profile_id)
         .map(|(_, dir)| dir.clone());
-    let Some(dir) = recorded.as_deref().and_then(nearest_existing_folder) else {
+    let Some(dir) = recorded.as_deref().and_then(nearest_existing_dir) else {
         if let Some(root) = recorded
             .as_deref()
-            .and_then(|dir| super::file_channels::drive_root(&dir.to_string_lossy()))
+            .and_then(|dir| super::fs_util::drive_root(&dir.to_string_lossy()))
             .filter(|root| !Path::new(root).is_dir())
         {
             return err_response(format!(
@@ -145,16 +143,10 @@ pub async fn open_leftover_folder(target_game_id: Option<&str>) -> Value {
         }
         return err_response("The leftover folder is gone.");
     };
-    match crate::backend::fs_util::dialog::open_path(json!({ "path": dir.to_string_lossy() })).await {
-        Ok(_) => ok_response(),
+    match super::fs_util::dialog::open_folder(dir) {
+        Ok(()) => ok_response(),
         Err(e) => err_response(e),
     }
-}
-
-fn normalized(path: &str) -> String {
-    path.replace('/', "\\")
-        .trim_end_matches('\\')
-        .to_lowercase()
 }
 
 fn resolved(path: &Path) -> String {
@@ -162,12 +154,6 @@ fn resolved(path: &Path) -> String {
         .map(|p| super::fs_util::plain_path(&p))
         .unwrap_or_else(|_| path.to_string_lossy().into_owned());
     normalized(&real)
-}
-
-fn is_same_or_inside(child: &str, parent: &str) -> bool {
-    let child = normalized(child);
-    let parent = normalized(parent);
-    !parent.is_empty() && (child == parent || child.starts_with(&format!("{parent}\\")))
 }
 
 fn is_nested(a: &str, b: &str) -> bool {
@@ -178,12 +164,12 @@ fn in_launcher_payload(path: &str, launcher: &str) -> bool {
     is_same_or_inside(path, launcher)
         && !is_same_or_inside(
             path,
-            &format!("{launcher}\\{}", super::file_channels::GAMES_DIR_NAME),
+            &format!("{launcher}\\{}", super::game_profiles::GAMES_DIR_NAME),
         )
 }
 
 pub(super) fn inside_launcher_payload(path: &Path) -> bool {
-    let launcher = super::file_channels::launcher_dir();
+    let launcher = super::game_profiles::launcher_dir();
     if launcher.as_os_str().is_empty() {
         return false;
     }
@@ -247,7 +233,7 @@ impl Protected {
             .filter_map(|name| env(name))
             .collect();
 
-        let launcher = super::file_channels::launcher_dir();
+        let launcher = super::game_profiles::launcher_dir();
         if !launcher.as_os_str().is_empty() {
             exact.push(launcher.join("games").to_string_lossy().into_owned());
             keep.push(launcher.to_string_lossy().into_owned());
@@ -272,15 +258,7 @@ impl Protected {
 fn is_shared_folder(app: &AppHandle, profile_id: &str, path: &str) -> bool {
     let config = app.state::<BackendState>().config.clone();
     let mut protected = Protected::current();
-    for other in game_profiles::GAME_IDS.iter().filter(|id| **id != profile_id) {
-        if let Some(other_path) = config
-            .get(&format!("games.{other}.gamePath"))
-            .as_str()
-            .filter(|p| !p.is_empty())
-        {
-            protected.keep.push(other_path.to_string());
-        }
-    }
+    protected.keep.extend(other_game_paths(&config, profile_id));
     protected.refuses(&resolved(Path::new(path))) || protected.refuses(path)
 }
 
@@ -367,7 +345,7 @@ fn pending_move_key(profile_id: &str) -> String {
 }
 
 fn record_pending_move(app: &AppHandle, profile_id: &str, from: &Path, to: &Path) {
-    super::config_channels::set_config_value(
+    super::config::set_config_value(
         app,
         &pending_move_key(profile_id),
         json!({
@@ -380,7 +358,7 @@ fn record_pending_move(app: &AppHandle, profile_id: &str, from: &Path, to: &Path
 }
 
 fn clear_pending_move(app: &AppHandle, profile_id: &str) {
-    super::config_channels::set_config_value(app, &pending_move_key(profile_id), Value::Null);
+    super::config::set_config_value(app, &pending_move_key(profile_id), Value::Null);
     app.state::<BackendState>().config.flush();
 }
 
@@ -497,10 +475,10 @@ pub(super) async fn recover_interrupted_moves(app: &AppHandle) {
         .unwrap_or(Recovery::Keep);
         match recovery {
             Recovery::Adopt(path) => {
-                super::config_channels::set_config_value(app, &format!("games.{id}.gamePath"), json!(path));
+                super::config::set_config_value(app, &format!("games.{id}.gamePath"), json!(path));
             }
             Recovery::OldCopy(dir) => {
-                super::config_channels::set_config_value(app, &old_copy_key(id), json!(dir.to_string_lossy()));
+                super::config::set_config_value(app, &old_copy_key(id), json!(dir.to_string_lossy()));
             }
             Recovery::Keep => {}
         }
@@ -551,7 +529,7 @@ async fn finish_old_copy_cleanup(app: &AppHandle) {
         .unwrap_or(Some(false));
         let Some(deletable) = deletable else {
             log::info!("Startup: the old copy of {id} at {} is already gone.", from.display());
-            super::config_channels::set_config_value(app, &key, Value::Null);
+            super::config::set_config_value(app, &key, Value::Null);
             app.state::<BackendState>().config.flush();
             continue;
         };
@@ -585,7 +563,7 @@ async fn finish_old_copy_cleanup(app: &AppHandle) {
             );
             None
         };
-        super::config_channels::set_config_value(app, &key, Value::Null);
+        super::config::set_config_value(app, &key, Value::Null);
         app.state::<BackendState>().config.flush();
 
         let warning = match &failures {
@@ -629,19 +607,14 @@ pub async fn pick_move_destination(
     profile: &'static Value,
     old_path: &str,
 ) -> Result<Result<PathBuf, Value>, String> {
-    let dialog_result = crate::backend::fs_util::dialog::show_open(
+    let picked = super::fs_util::dialog::pick_folder(
         app,
-        json!({
-            "title": format!("Select New {} Location", game_profiles::display_name(profile)),
-            "directory": true
-        }),
+        Pick {
+            title: format!("Select New {} Location", game_profiles::display_name(profile)),
+            ..Pick::default()
+        },
     )
     .await?;
-    let picked = dialog_result["filePaths"]
-        .as_array()
-        .and_then(|a| a.first())
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
     let Some(picked) = picked else {
         return Ok(Err(json!({
             "success": false,
@@ -671,7 +644,7 @@ pub async fn pick_move_destination(
             "A \"{folder_name}\" folder already exists at that location."
         ))));
     }
-    if let Some(too_deep) = game_path::path_budget_error(&new_path, profile) {
+    if let Some(too_deep) = game_profiles::path_budget_error(&new_path, profile) {
         return Ok(Err(err_response(too_deep)));
     }
     Ok(Ok(new_path))
@@ -765,8 +738,8 @@ fn sync_copied(dest: &Path) -> std::io::Result<()> {
 
 fn same_volume(a: &Path, b: &Path) -> bool {
     match (
-        super::file_channels::drive_root(&a.to_string_lossy()),
-        super::file_channels::drive_root(&b.to_string_lossy()),
+        super::fs_util::drive_root(&a.to_string_lossy()),
+        super::fs_util::drive_root(&b.to_string_lossy()),
     ) {
         (Some(a), Some(b)) => a.eq_ignore_ascii_case(&b),
         _ => false,
@@ -857,11 +830,11 @@ fn transfer(
     let Scan { files, links, total: total_bytes } = scan;
     check_cancel()?;
 
-    super::download_engine::ensure_disk_space(
+    super::engine::ensure_disk_space(
         new_path,
         total_bytes,
         1.0,
-        super::download_engine::HEADROOM_INSTALL,
+        super::engine::HEADROOM_INSTALL,
     )?;
     let largest = files.iter().map(|(_, size)| *size).max().unwrap_or(0);
     if let Some(hint) = super::fs_util::fat_limit_message(new_path, largest) {
@@ -991,30 +964,6 @@ fn remove_with_retry(path: &Path, budget_ms: &mut u64) -> Result<(), String> {
     }
 }
 
-fn reported_failures(mut failures: Vec<Value>) -> Vec<Value> {
-    failures.truncate(MAX_REPORTED_FAILURES);
-    failures
-}
-
-fn list_files(dir: &Path, files: &mut Vec<(PathBuf, u64)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        log::warn!("Cannot read {}", dir.display());
-        return;
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let is_dir = entry
-            .file_type()
-            .map(|t| t.is_dir() && !t.is_symlink())
-            .unwrap_or(false);
-        if is_dir {
-            list_files(&entry.path(), files);
-        } else {
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            files.push((entry.path(), size));
-        }
-    }
-}
-
 fn remove_root(root: &Path) -> Result<(), String> {
     for i in 0..5 {
         match std::fs::remove_dir_all(root) {
@@ -1032,8 +981,7 @@ fn remove_root(root: &Path) -> Result<(), String> {
 }
 
 fn remove_old_copy(root: &Path) -> Vec<Value> {
-    let mut files = Vec::new();
-    list_files(root, &mut files);
+    let files = list_files(root);
     let mut failures: Vec<Value> = Vec::new();
     let mut budget_ms = REMOVE_RETRY_BUDGET_MS;
     for (file, _) in &files {
@@ -1114,7 +1062,7 @@ pub async fn run_move(
         old_path.display(),
         new_path.display()
     );
-    let _power = super::perf::TransferGuard::acquire();
+    let _power = super::platform::TransferGuard::acquire();
     let started = Instant::now();
     record_pending_move(app, &profile_id, &old_path, &new_path);
 
@@ -1205,7 +1153,7 @@ pub async fn run_move(
         }
     };
 
-    super::config_channels::set_config_value(
+    super::config::set_config_value(
         app,
         &format!("games.{profile_id}.gamePath"),
         json!(new_path.to_string_lossy()),
@@ -1256,7 +1204,7 @@ pub async fn run_move(
             new_path.display(),
             started.elapsed().as_secs_f64(),
             moved.files,
-            super::progress::gib(moved.bytes as f64),
+            peebify_transfer::progress::gib(moved.bytes as f64),
             failures.len()
         );
     }
@@ -1313,13 +1261,24 @@ pub async fn run_move(
     ok_with(json!({
         "newPath": new_path.to_string_lossy(),
         "warning": warning,
-        "failureCount": failures.len(),
-        "failures": reported_failures(failures),
     }))
 }
 
 // ------------ Uninstall Game ------------
 // Deletes the game's files, forgets its saved install path and removes its mods, and reports anything that could not be deleted.
+fn publish_uninstall_progress(app: &AppHandle, game_id: &str, update: impl Into<Update>, payload: Value) {
+    let mut merged = json!({ "gameId": game_id });
+    if let (Some(map), Value::Object(extra)) = (merged.as_object_mut(), payload) {
+        map.extend(extra);
+    }
+    super::queue::publish(app, "uninstall-progress", update, merged);
+}
+
+fn clear_install_record(app: &AppHandle, profile_id: &str) {
+    super::config::set_config_value(app, &format!("games.{profile_id}.gamePath"), json!(""));
+    super::file_channels::clear_pending_install(app, profile_id);
+}
+
 pub async fn uninstall_game(app: &AppHandle, target_game_id: Option<&str>) -> Value {
     let profile = match named_known_profile(target_game_id) {
         Ok(profile) => profile,
@@ -1331,13 +1290,7 @@ pub async fn uninstall_game(app: &AppHandle, target_game_id: Option<&str>) -> Va
     let game_path = game_path.as_str().unwrap_or("").to_string();
 
     let send_progress = |update: Update, payload: Value| {
-        let mut merged = json!({ "gameId": profile_id });
-        if let (Some(map), Value::Object(extra)) = (merged.as_object_mut(), payload) {
-            for (k, v) in extra {
-                map.insert(k, v);
-            }
-        }
-        super::queue::publish(app, "uninstall-progress", update, merged);
+        publish_uninstall_progress(app, &profile_id, update, payload)
     };
 
     if game_path.is_empty() {
@@ -1361,13 +1314,8 @@ pub async fn uninstall_game(app: &AppHandle, target_game_id: Option<&str>) -> Va
                 ));
             }
             log::info!("Uninstall ({profile_id}): discarding the unfinished install at {pending_path}.");
-            let discard_path = PathBuf::from(&pending_path);
-            let discard_id = profile_id.clone();
-            let (files, bytes) = tauri::async_runtime::spawn_blocking(move || {
-                super::download_engine::discard_partial_install_for(&discard_path, &discard_id)
-            })
-            .await
-            .unwrap_or((0, 0));
+            let (files, bytes) =
+                super::file_channels::discard_partial_install(Path::new(&pending_path), &profile_id).await;
             log::info!(
                 "Uninstall ({profile_id}): discarded {files} unfinished download file(s), {:.2} GB.",
                 bytes as f64 / 1e9
@@ -1382,14 +1330,9 @@ pub async fn uninstall_game(app: &AppHandle, target_game_id: Option<&str>) -> Va
     }
     if !Path::new(&game_path).exists() {
         let name = game_profiles::display_name(profile);
-        let offline_root = super::file_channels::drive_root(&game_path)
+        let offline_root = super::fs_util::drive_root(&game_path)
             .filter(|root| !Path::new(root).is_dir());
-        super::config_channels::set_config_value(
-            app,
-            &format!("games.{profile_id}.gamePath"),
-            json!(""),
-        );
-        super::file_channels::clear_pending_install(app, &profile_id);
+        clear_install_record(app, &profile_id);
         send_progress(
             Phase::Downloading.into(),
             json!({ "percentage": 0 }),
@@ -1456,12 +1399,7 @@ pub async fn uninstall_game(app: &AppHandle, target_game_id: Option<&str>) -> Va
             return err_response(message);
         }
         log::info!("Uninstall ({profile_id}): handed the Steam copy (app {app_id}) to Steam and removed it from the library.");
-        super::config_channels::set_config_value(
-            app,
-            &format!("games.{profile_id}.gamePath"),
-            json!(""),
-        );
-        super::file_channels::clear_pending_install(app, &profile_id);
+        clear_install_record(app, &profile_id);
         super::mods::remove_game_mods(app, profile).await;
         send_progress(
             Phase::Done.into(),
@@ -1493,12 +1431,7 @@ pub async fn uninstall_game(app: &AppHandle, target_game_id: Option<&str>) -> Va
             game_profiles::display_name(profile)
         );
         log::warn!("Uninstall ({profile_id}): refused to delete {game_path} ({real_path}).");
-        super::config_channels::set_config_value(
-            app,
-            &format!("games.{profile_id}.gamePath"),
-            json!(""),
-        );
-        super::file_channels::clear_pending_install(app, &profile_id);
+        clear_install_record(app, &profile_id);
         super::mods::remove_game_mods(app, profile).await;
         remember_leftovers(&profile_id, Path::new(&game_path));
         send_progress(
@@ -1539,18 +1472,11 @@ pub async fn uninstall_game(app: &AppHandle, target_game_id: Option<&str>) -> Va
         let app = app_for_task;
         let profile_id = profile_id_task;
         let send = |payload: Value| {
-            let mut merged = json!({ "gameId": profile_id });
-            if let (Some(map), Value::Object(extra)) = (merged.as_object_mut(), payload) {
-                for (k, v) in extra {
-                    map.insert(k, v);
-                }
-            }
-            super::queue::publish(&app, "uninstall-progress", Phase::Downloading, merged);
+            publish_uninstall_progress(&app, &profile_id, Phase::Downloading, payload)
         };
 
         send(json!({ "percentage": 0 }));
-        let mut files: Vec<(PathBuf, u64)> = Vec::new();
-        list_files(&game_path_buf, &mut files);
+        let files = list_files(&game_path_buf);
         let total_files = files.len();
 
         let mut failures: Vec<Value> = Vec::new();
@@ -1598,11 +1524,7 @@ pub async fn uninstall_game(app: &AppHandle, target_game_id: Option<&str>) -> Va
                 "Uninstall ({profile_id}) failed after {:.1} s: {e}",
                 started.elapsed().as_secs_f64()
             );
-            super::config_channels::set_config_value(
-                app,
-                &format!("games.{profile_id}.gamePath"),
-                json!(""),
-            );
+            super::config::set_config_value(app, &format!("games.{profile_id}.gamePath"), json!(""));
             send_progress(
                 Phase::Error.into(),
                 json!({ "percentage": 100, "status": "error", "error": e.to_string() }),
@@ -1611,17 +1533,12 @@ pub async fn uninstall_game(app: &AppHandle, target_game_id: Option<&str>) -> Va
         }
     };
 
-    super::config_channels::set_config_value(
-        app,
-        &format!("games.{profile_id}.gamePath"),
-        json!(""),
-    );
-    super::file_channels::clear_pending_install(app, &profile_id);
+    clear_install_record(app, &profile_id);
     super::mods::remove_game_mods(app, profile).await;
 
     log::info!(
         "Uninstall {profile_id}: removed {deleted} of {total_files} files ({:.2} GB) in {:.1} s, {} failures.",
-        super::progress::gib(removed_bytes as f64),
+        peebify_transfer::progress::gib(removed_bytes as f64),
         started.elapsed().as_secs_f64(),
         failures.len()
     );
@@ -1647,12 +1564,7 @@ pub async fn uninstall_game(app: &AppHandle, target_game_id: Option<&str>) -> Va
 
     if let Some(summary) = summary {
         log::warn!("Uninstall ({profile_id}): {summary}");
-        return ok_with(json!({
-            "failureCount": failures.len(),
-            "failures": reported_failures(failures),
-            "warning": summary,
-            "path": game_path,
-        }));
+        return ok_with(json!({ "warning": summary, "path": game_path }));
     }
 
     log::info!("Game ({profile_id}) uninstalled successfully ({deleted} files).");
@@ -1670,13 +1582,13 @@ mod tests {
         let root = std::env::temp_dir().join(format!("peebify-leftovers-{}", std::process::id()));
         let kept = root.join("Wuthering Waves");
         std::fs::create_dir_all(&kept).unwrap();
-        assert_eq!(nearest_existing_folder(&kept), Some(kept.clone()));
+        assert_eq!(nearest_existing_dir(&kept), Some(kept.as_path()));
         assert_eq!(
-            nearest_existing_folder(&kept.join("Client").join("Binaries")),
-            Some(kept.clone())
+            nearest_existing_dir(&kept.join("Client").join("Binaries")),
+            Some(kept.as_path())
         );
         std::fs::remove_dir_all(&kept).unwrap();
-        assert_eq!(nearest_existing_folder(&kept), Some(root.clone()));
+        assert_eq!(nearest_existing_dir(&kept), Some(root.as_path()));
         let _ = std::fs::remove_dir_all(&root);
     }
 

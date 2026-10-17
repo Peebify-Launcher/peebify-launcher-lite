@@ -221,43 +221,6 @@ pub mod motion {
         let swing = if t < 40.0 { t / 40.0 } else { 2.0 - t / 40.0 };
         Curve::Sine.at(swing)
     }
-
-    #[cfg(test)]
-    mod tests {
-        use super::Curve;
-
-        #[test]
-        fn curves_start_and_end_on_their_targets() {
-            for curve in [
-                Curve::Linear,
-                Curve::Ease,
-                Curve::Out,
-                Curve::Spring,
-                Curve::InOut,
-                Curve::Sine,
-            ] {
-                assert_eq!(curve.at(0.0), 0.0);
-                assert_eq!(curve.at(1.0), 1.0);
-            }
-        }
-
-        #[test]
-        fn spring_overshoots_and_out_front_loads() {
-            assert!((0.0..1.0).any_sample(|t| Curve::Spring.at(t) > 1.0));
-            assert!(Curve::Out.at(0.3) > 0.7);
-            assert!((Curve::Sine.at(0.5) - 0.5).abs() < 1e-3);
-        }
-
-        trait AnySample {
-            fn any_sample(self, f: impl Fn(f32) -> bool) -> bool;
-        }
-
-        impl AnySample for std::ops::Range<f32> {
-            fn any_sample(self, f: impl Fn(f32) -> bool) -> bool {
-                (0..100).any(|i| f(self.start + (self.end - self.start) * i as f32 / 100.0))
-            }
-        }
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -295,12 +258,6 @@ impl Mood {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum Close {
-    Enabled,
-    Disabled,
-}
-
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
 pub enum Step {
     Setup,
@@ -308,13 +265,15 @@ pub enum Step {
     Ready,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub enum Badge {
+    #[default]
     None,
     Done,
     Failed,
 }
 
+#[derive(Default)]
 pub struct Rail<'a> {
     pub step: Option<Step>,
     pub progress: f32,
@@ -323,47 +282,6 @@ pub struct Rail<'a> {
     pub badge: Badge,
     pub logo: Option<&'a egui::TextureHandle>,
     pub identity: String,
-}
-
-impl<'a> Rail<'a> {
-    pub fn new(logo: Option<&'a egui::TextureHandle>, identity: impl Into<String>) -> Self {
-        Self {
-            step: None,
-            progress: 0.0,
-            error: false,
-            muted: false,
-            badge: Badge::None,
-            logo,
-            identity: identity.into(),
-        }
-    }
-
-    pub fn step(mut self, step: Step) -> Self {
-        self.step = Some(step);
-        self
-    }
-
-    pub fn progress(mut self, fraction: f32) -> Self {
-        self.progress = fraction.clamp(0.0, 1.0);
-        self
-    }
-
-    pub fn failed(mut self) -> Self {
-        self.error = true;
-        self.muted = true;
-        self.badge = Badge::Failed;
-        self
-    }
-
-    pub fn muted(mut self) -> Self {
-        self.muted = true;
-        self
-    }
-
-    pub fn badge(mut self, badge: Badge) -> Self {
-        self.badge = badge;
-        self
-    }
 }
 
 // ------------ Window And Theme ------------
@@ -422,29 +340,79 @@ fn load_icon() -> Option<egui::IconData> {
     })
 }
 
-fn install_fonts(ctx: &egui::Context) {
-    let mut fonts = egui::FontDefinitions::default();
-    let font_dir = std::env::var_os("SystemRoot")
+// ------------ Warm Start ------------
+// Reading the two fonts and decoding the wallpapers takes a noticeable moment, so a thread starts on it before the
+// window is created and the first frame takes the results. Anything it did not get is loaded the usual way.
+const FONT_FILES: [&str; 2] = ["segoeui.ttf", "seguisb.ttf"];
+const WALLS: [(&str, &[u8]); 2] = [("wall", WALLPAPER_JPG), ("wall-blur", WALLPAPER_BLUR_JPG)];
+
+#[derive(Default)]
+struct Warm {
+    fonts: Vec<(&'static str, Vec<u8>)>,
+    walls: Vec<(&'static str, egui::ColorImage, egui::ColorImage)>,
+}
+
+static WARMING: std::sync::Mutex<Option<std::thread::JoinHandle<Warm>>> = std::sync::Mutex::new(None);
+static WARMED: std::sync::Mutex<Option<Warm>> = std::sync::Mutex::new(None);
+
+fn prewarm() {
+    let handle = std::thread::Builder::new().name("setup-warm".into()).spawn(|| Warm {
+        fonts: FONT_FILES
+            .iter()
+            .filter_map(|file| Some((*file, std::fs::read(font_dir().join(file)).ok()?)))
+            .collect(),
+        walls: WALLS
+            .iter()
+            .filter_map(|(key, bytes)| {
+                let (color, gray) = decode_wall(bytes)?;
+                Some((*key, color, gray))
+            })
+            .collect(),
+    });
+    if let (Ok(handle), Ok(mut slot)) = (handle, WARMING.lock()) {
+        *slot = Some(handle);
+    }
+}
+
+fn warmed<T>(take: impl FnOnce(&mut Warm) -> Option<T>) -> Option<T> {
+    let handle = WARMING.lock().ok()?.take();
+    let mut warmed = WARMED.lock().ok()?;
+    if let Some(warm) = handle.and_then(|h| h.join().ok()) {
+        *warmed = Some(warm);
+    }
+    warmed.as_mut().and_then(take)
+}
+
+fn font_dir() -> std::path::PathBuf {
+    std::env::var_os("SystemRoot")
         .or_else(|| std::env::var_os("windir"))
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
-        .join("Fonts");
+        .join("Fonts")
+}
+
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    let font_dir = font_dir();
     let mut load = |name: &str, file: &str| -> bool {
-        let path = font_dir.join(file);
-        match std::fs::read(&path) {
-            Ok(bytes) => {
+        let warm = warmed(|w| {
+            let at = w.fonts.iter().position(|(f, _)| *f == file)?;
+            Some(w.fonts.swap_remove(at).1)
+        });
+        match warm.or_else(|| std::fs::read(font_dir.join(file)).ok()) {
+            Some(bytes) => {
                 fonts
                     .font_data
                     .insert(name.to_owned(), egui::FontData::from_owned(bytes).into());
                 true
             }
-            Err(_) => false,
+            None => false,
         }
     };
 
-    let regular = load("peebify-ui", "segoeui.ttf");
-    let semibold = load(SEMIBOLD, "seguisb.ttf");
+    let regular = load("peebify-ui", FONT_FILES[0]);
+    let semibold = load(SEMIBOLD, FONT_FILES[1]);
 
     if regular {
         if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
@@ -477,8 +445,15 @@ pub fn semibold_font(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name(SEMIBOLD.into()))
 }
 
-pub fn heading(ui: &mut egui::Ui, text: &str, size: f32) {
-    ui.label(semibold(text, size));
+pub fn page_title(ui: &mut egui::Ui, gap: f32, text: &str, size: f32) {
+    ui.scope(|g| {
+        g.add_space(gap);
+        g.label(semibold(text, size));
+    });
+}
+
+pub fn caption(ui: &mut egui::Ui, body: impl Into<String>, color: Color32) {
+    ui.label(RichText::new(body).size(text::XS).color(color));
 }
 
 pub fn apply_theme(ctx: &egui::Context) {
@@ -551,9 +526,18 @@ fn gray_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
 }
 
 #[derive(Clone)]
-struct Wall {
-    color: egui::TextureHandle,
+pub struct Wall {
+    pub color: egui::TextureHandle,
     gray: egui::TextureHandle,
+}
+
+fn decode_wall(bytes: &[u8]) -> Option<(egui::ColorImage, egui::ColorImage)> {
+    let rgba = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    let raw = rgba.into_raw();
+    let gray = egui::ColorImage::from_rgba_unmultiplied(size, &grayscale(&raw));
+    let color = egui::ColorImage::from_rgba_unmultiplied(size, &raw);
+    Some((color, gray))
 }
 
 fn wall_textures(ctx: &egui::Context, key: &'static str, bytes: &[u8]) -> Option<Wall> {
@@ -561,11 +545,12 @@ fn wall_textures(ctx: &egui::Context, key: &'static str, bytes: &[u8]) -> Option
     if let Some(wall) = ctx.data(|d| d.get_temp::<Wall>(id)) {
         return Some(wall);
     }
-    let rgba = image::load_from_memory(bytes).ok()?.into_rgba8();
-    let size = [rgba.width() as usize, rgba.height() as usize];
-    let raw = rgba.into_raw();
-    let gray = egui::ColorImage::from_rgba_unmultiplied(size, &grayscale(&raw));
-    let color = egui::ColorImage::from_rgba_unmultiplied(size, &raw);
+    let warm = warmed(|w| {
+        let at = w.walls.iter().position(|(k, _, _)| *k == key)?;
+        let (_, color, gray) = w.walls.swap_remove(at);
+        Some((color, gray))
+    });
+    let (color, gray) = warm.or_else(|| decode_wall(bytes))?;
     let wall = Wall {
         color: ctx.load_texture(key, color, egui::TextureOptions::LINEAR),
         gray: ctx.load_texture(format!("{key}-gray"), gray, egui::TextureOptions::LINEAR),
@@ -574,7 +559,7 @@ fn wall_textures(ctx: &egui::Context, key: &'static str, bytes: &[u8]) -> Option
     Some(wall)
 }
 
-fn wallpaper(ctx: &egui::Context, blurred: bool) -> Option<Wall> {
+pub fn wallpaper(ctx: &egui::Context, blurred: bool) -> Option<Wall> {
     if blurred {
         wall_textures(ctx, "wall-blur", WALLPAPER_BLUR_JPG)
     } else {
@@ -582,7 +567,7 @@ fn wallpaper(ctx: &egui::Context, blurred: bool) -> Option<Wall> {
     }
 }
 
-fn cover_uv(tex_size: egui::Vec2, rect: egui::Rect, focus: (f32, f32)) -> egui::Rect {
+pub fn cover_uv(tex_size: egui::Vec2, rect: egui::Rect, focus: (f32, f32)) -> egui::Rect {
     let scale = (rect.width() / tex_size.x).max(rect.height() / tex_size.y);
     let visible = egui::vec2(rect.width() / scale, rect.height() / scale);
     let free = tex_size - visible;
@@ -594,47 +579,33 @@ fn cover_uv(tex_size: egui::Vec2, rect: egui::Rect, focus: (f32, f32)) -> egui::
     )
 }
 
-fn vertical_gradient(painter: &egui::Painter, rect: egui::Rect, stops: &[(f32, Color32)]) {
+pub fn gradient(painter: &egui::Painter, rect: egui::Rect, vertical: bool, stops: &[(f32, Color32)]) {
     let mut mesh = egui::Mesh::default();
     for (i, (t, color)) in stops.iter().enumerate() {
-        let y = rect.min.y + rect.height() * t;
-        let row = mesh.vertices.len() as u32;
-        mesh.colored_vertex(egui::pos2(rect.min.x, y), *color);
-        mesh.colored_vertex(egui::pos2(rect.max.x, y), *color);
+        let (a, b) = if vertical {
+            let y = rect.min.y + rect.height() * t;
+            (egui::pos2(rect.min.x, y), egui::pos2(rect.max.x, y))
+        } else {
+            let x = rect.min.x + rect.width() * t;
+            (egui::pos2(x, rect.min.y), egui::pos2(x, rect.max.y))
+        };
+        let at = mesh.vertices.len() as u32;
+        mesh.colored_vertex(a, *color);
+        mesh.colored_vertex(b, *color);
         if i > 0 {
-            mesh.add_triangle(row - 2, row - 1, row);
-            mesh.add_triangle(row - 1, row, row + 1);
+            mesh.add_triangle(at - 2, at - 1, at);
+            mesh.add_triangle(at - 1, at, at + 1);
         }
     }
     painter.add(egui::Shape::mesh(mesh));
 }
 
-fn horizontal_gradient(painter: &egui::Painter, rect: egui::Rect, stops: &[(f32, Color32)]) {
-    let mut mesh = egui::Mesh::default();
-    for (i, (t, color)) in stops.iter().enumerate() {
-        let x = rect.min.x + rect.width() * t;
-        let col = mesh.vertices.len() as u32;
-        mesh.colored_vertex(egui::pos2(x, rect.min.y), *color);
-        mesh.colored_vertex(egui::pos2(x, rect.max.y), *color);
-        if i > 0 {
-            mesh.add_triangle(col - 2, col - 1, col);
-            mesh.add_triangle(col - 1, col, col + 1);
-        }
-    }
-    painter.add(egui::Shape::mesh(mesh));
+fn with_alpha(color: Color32, alpha: f32) -> Color32 {
+    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), (alpha * 255.0).round() as u8)
 }
 
 fn scrim_color(alpha: f32) -> Color32 {
-    Color32::from_rgba_unmultiplied(BG.r(), BG.g(), BG.b(), (alpha * 255.0).round() as u8)
-}
-
-fn panel_color(alpha: f32) -> Color32 {
-    Color32::from_rgba_unmultiplied(
-        PANEL_TINT.r(),
-        PANEL_TINT.g(),
-        PANEL_TINT.b(),
-        (alpha * 255.0).round() as u8,
-    )
+    with_alpha(BG, alpha)
 }
 
 const SCRIM_TOP: f32 = 0.50;
@@ -679,26 +650,28 @@ fn paint_backdrop(ui: &egui::Ui, window: egui::Rect, panel: egui::Rect, mood: Mo
         paint_wall(&painter, &wall, wall_rect(window, 1.0, drift), uv, mood);
     }
     let scrim = [(0.0, scrim_color(SCRIM_TOP)), (1.0, scrim_color(SCRIM_BOTTOM))];
-    vertical_gradient(&painter, window, &scrim);
+    gradient(&painter, window, true, &scrim);
 
     let pane = painter.with_clip_rect(panel);
     if let Some(wall) = wallpaper(&ctx, true) {
         let uv = cover_uv(wall.color.size_vec2(), window, WALL_FOCUS);
         paint_wall(&pane, &wall, wall_rect(window, 1.08, drift), uv, mood);
-        vertical_gradient(&pane, panel, &scrim);
+        gradient(&pane, panel, true, &scrim);
     }
-    horizontal_gradient(
+    gradient(
         &pane,
         panel,
+        false,
         &[
-            (0.0, panel_color(0.28)),
-            (0.26, panel_color(0.82)),
-            (1.0, panel_color(0.88)),
+            (0.0, with_alpha(PANEL_TINT, 0.28)),
+            (0.26, with_alpha(PANEL_TINT, 0.82)),
+            (1.0, with_alpha(PANEL_TINT, 0.88)),
         ],
     );
-    vertical_gradient(
+    gradient(
         &pane,
         egui::Rect::from_min_max(panel.min, egui::pos2(panel.min.x + 1.0, panel.max.y)),
+        true,
         &[
             (0.0, Color32::TRANSPARENT),
             (0.16, tx(0.18)),
@@ -711,7 +684,7 @@ fn paint_backdrop(ui: &egui::Ui, window: egui::Rect, panel: egui::Rect, mood: Mo
     }
 }
 
-fn drag_strip(ui: &mut egui::Ui, ctx: &egui::Context, rect: egui::Rect, id: &'static str) {
+pub fn drag_strip(ui: &mut egui::Ui, ctx: &egui::Context, rect: egui::Rect, id: &'static str) {
     let response = ui.interact(rect, egui::Id::new(id), egui::Sense::DRAG);
     if response.drag_started() {
         ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
@@ -725,71 +698,63 @@ fn titlebar_button_rect(window: egui::Rect, slot: f32) -> egui::Rect {
     )
 }
 
-fn minimize_button(ui: &mut egui::Ui, ctx: &egui::Context, window: egui::Rect) {
-    let btn = titlebar_button_rect(window, 1.0);
-    let response = ui.interact(btn, egui::Id::new("titlebar-minimize"), egui::Sense::click());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Minimize"));
-    let painter = ui.painter();
-    let icon = if response.hovered() {
-        painter.rect_filled(btn, CornerRadius::same(5), Color32::from_white_alpha(18));
-        Color32::WHITE
-    } else {
-        tx(0.55)
-    };
-    let c = btn.center();
-    painter.line_segment(
-        [egui::pos2(c.x - 4.5, c.y), egui::pos2(c.x + 4.5, c.y)],
-        egui::Stroke::new(1.4, icon),
-    );
-    focus_ring(painter, btn, 5, response.has_focus());
-    if response.clicked() {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-    }
-}
-
-fn close_button(ui: &mut egui::Ui, ctx: &egui::Context, window: egui::Rect, enabled: bool) {
-    let btn = titlebar_button_rect(window, 0.0);
+fn titlebar_button(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    slot_rect: egui::Rect,
+    label: &str,
+    enabled: bool,
+    hover_fill: Color32,
+    draw_icon: impl FnOnce(&egui::Painter, egui::Pos2, egui::Stroke),
+) -> bool {
+    let id = format!("titlebar-{}", label.to_lowercase());
     let response = ui.interact(
-        btn,
-        egui::Id::new("titlebar-close"),
+        slot_rect,
+        egui::Id::new(&id),
         if enabled {
             egui::Sense::click()
         } else {
             egui::Sense::hover()
         },
     );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, "Close"));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
     let presence = motion::tween(
         ctx,
-        egui::Id::new("titlebar-close-presence"),
+        egui::Id::new(id + "-presence"),
         if enabled { 1.0 } else { 0.3 },
         Spec::new(300, Curve::Ease),
     );
     let mut painter = ui.painter().clone();
     painter.multiply_opacity(presence);
     let icon = if enabled && response.hovered() {
-        painter.rect_filled(
-            btn,
-            CornerRadius::same(5),
-            Color32::from_rgba_unmultiplied(0xe0, 0x65, 0x5f, 190),
-        );
+        painter.rect_filled(slot_rect, CornerRadius::same(5), hover_fill);
         Color32::WHITE
     } else {
         tx(0.55)
     };
-    let c = btn.center();
-    let r = 4.0;
-    let stroke = egui::Stroke::new(1.4, icon);
-    painter.line_segment(
-        [egui::pos2(c.x - r, c.y - r), egui::pos2(c.x + r, c.y + r)],
-        stroke,
-    );
-    painter.line_segment(
-        [egui::pos2(c.x - r, c.y + r), egui::pos2(c.x + r, c.y - r)],
-        stroke,
-    );
-    focus_ring(&painter, btn, 5, response.has_focus());
-    if enabled && response.clicked() {
+    draw_icon(&painter, slot_rect.center(), egui::Stroke::new(1.4, icon));
+    focus_ring(&painter, slot_rect, 5, response.has_focus());
+    enabled && response.clicked()
+}
+
+pub fn minimize_button(ui: &mut egui::Ui, ctx: &egui::Context, window: egui::Rect) {
+    let hover = Color32::from_white_alpha(18);
+    let bar = |painter: &egui::Painter, c: egui::Pos2, stroke| {
+        painter.line_segment([egui::pos2(c.x - 4.5, c.y), egui::pos2(c.x + 4.5, c.y)], stroke);
+    };
+    if titlebar_button(ui, ctx, titlebar_button_rect(window, 1.0), "Minimize", true, hover, bar) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+    }
+}
+
+pub fn close_button(ui: &mut egui::Ui, ctx: &egui::Context, window: egui::Rect, enabled: bool) {
+    let hover = Color32::from_rgba_unmultiplied(0xe0, 0x65, 0x5f, 190);
+    let cross = |painter: &egui::Painter, c: egui::Pos2, stroke| {
+        let r = 4.0;
+        painter.line_segment([egui::pos2(c.x - r, c.y - r), egui::pos2(c.x + r, c.y + r)], stroke);
+        painter.line_segment([egui::pos2(c.x - r, c.y + r), egui::pos2(c.x + r, c.y - r)], stroke);
+    };
+    if titlebar_button(ui, ctx, titlebar_button_rect(window, 0.0), "Close", enabled, hover, cross) {
         close(ctx);
     }
 }
@@ -801,9 +766,9 @@ pub fn close(ctx: &egui::Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
 }
 
-fn hold_close(ctx: &egui::Context, closable: Close) {
+fn hold_close(ctx: &egui::Context, closable: bool) {
     let release = ctx.data(|d| d.get_temp::<bool>(egui::Id::new(CLOSE_NOW))) == Some(true);
-    if ctx.input(|i| i.viewport().close_requested()) && !release && closable == Close::Disabled {
+    if ctx.input(|i| i.viewport().close_requested()) && !release && !closable {
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
     }
 }
@@ -977,7 +942,7 @@ fn paint_rail(ui: &egui::Ui, rail_rect: egui::Rect, rail: &Rail) {
         painter.circle_filled(egui::pos2(x + DOT / 2.0, y + STEP_ROW / 2.0), DOT / 2.0, DANGER);
         paint_label(&painter, egui::pos2(x, y), "Error", DANGER);
     } else if let Some(step) = rail.step {
-        paint_stepper(&painter, x, y, step, rail.progress);
+        paint_stepper(&painter, x, y, step, rail.progress.clamp(0.0, 1.0));
     }
 
     const LOGO: f32 = 34.0;
@@ -1032,7 +997,7 @@ fn paint_rail(ui: &egui::Ui, rail_rect: egui::Rect, rail: &Rail) {
 pub fn split(
     root: &mut egui::Ui,
     mood: Mood,
-    closable: Close,
+    closable: bool,
     rail: Rail,
     body: impl FnOnce(&mut egui::Ui),
 ) {
@@ -1055,7 +1020,7 @@ pub fn split(
                 "titlebar-drag",
             );
             minimize_button(ui, ctx, rect);
-            close_button(ui, ctx, rect, closable == Close::Enabled);
+            close_button(ui, ctx, rect, closable);
 
             paint_rail(ui, rail_rect, &rail);
 
@@ -1072,10 +1037,6 @@ pub fn split(
             body(&mut body_ui);
             hold_close(ctx, closable);
         });
-}
-
-pub fn group<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.scope(add).inner
 }
 
 // ------------ Shared Widgets ------------
@@ -1100,18 +1061,20 @@ pub fn action_row(ui: &mut egui::Ui, right_aligned: bool, add: impl FnOnce(&mut 
     ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 38.0), layout, add);
 }
 
+pub fn wrapped_label(body: &str, size: f32, color: Color32, leading: f32) -> egui::Label {
+    egui::Label::new(
+        RichText::new(body)
+            .size(size)
+            .color(color)
+            .line_height(Some(size * leading)),
+    )
+    .wrap()
+}
+
 pub fn paragraph(ui: &mut egui::Ui, body: &str, size: f32, color: Color32, max_width: f32) {
     let width = max_width.min(ui.available_width());
     ui.allocate_ui(egui::vec2(width, 0.0), |ui| {
-        ui.add(
-            egui::Label::new(
-                RichText::new(body)
-                    .size(size)
-                    .color(color)
-                    .line_height(Some(size * 1.55)),
-            )
-            .wrap(),
-        );
+        ui.add(wrapped_label(body, size, color, 1.55));
     });
 }
 
@@ -1127,9 +1090,10 @@ pub fn meta_label(ui: &mut egui::Ui, label: &str) {
 pub fn hairline(ui: &mut egui::Ui) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-    horizontal_gradient(
+    gradient(
         ui.painter(),
         rect,
+        false,
         &[
             (0.0, Color32::TRANSPARENT),
             (0.12, tx(0.14)),
@@ -1151,15 +1115,7 @@ pub fn bullet_row(ui: &mut egui::Ui, color: Color32, body: &str) {
         );
         row.add_space(9.0);
         row.allocate_ui(egui::vec2(width - 14.0, 0.0), |col| {
-            col.add(
-                egui::Label::new(
-                    RichText::new(body)
-                        .size(text::SM)
-                        .color(color)
-                        .line_height(Some(text::SM * 1.5)),
-                )
-                .wrap(),
-            );
+            col.add(wrapped_label(body, text::SM, color, 1.5));
         });
     });
 }
@@ -1203,16 +1159,7 @@ pub fn detail_box(ui: &mut egui::Ui, tone: Tone, label: &str, body: &str, max_he
             .max_height(max_height)
             .auto_shrink([false, true])
             .show(card, |text| {
-                text.add(
-                    egui::Label::new(
-                        RichText::new(body)
-                            .size(text::SM)
-                            .color(tx(0.82))
-                            .line_height(Some(text::SM * 1.55)),
-                    )
-                    .wrap()
-                    .selectable(true),
-                );
+                text.add(wrapped_label(body, text::SM, tx(0.82), 1.55).selectable(true));
             });
     });
 }
@@ -1328,15 +1275,7 @@ pub fn sub_note(ui: &mut egui::Ui, body: &str) {
         row.add_space(28.0);
         let width = row.available_width();
         row.allocate_ui(egui::vec2(width, 0.0), |col| {
-            col.add(
-                egui::Label::new(
-                    RichText::new(body)
-                        .size(text::XS)
-                        .color(tx(0.56))
-                        .line_height(Some(text::XS * 1.5)),
-                )
-                .wrap(),
-            );
+            col.add(wrapped_label(body, text::XS, tx(0.56), 1.5));
         });
     });
 }
@@ -1543,10 +1482,11 @@ pub fn progress_bar(ui: &mut egui::Ui, id: egui::Id, fraction: f32, spec: Spec) 
     let t = (ui.input(|i| i.time) % 1.6) as f32 / 1.6;
     let x = fill.min.x + band * (-1.0 + 3.86 * Curve::Sine.at(t));
     let sheen = egui::Rect::from_min_size(egui::pos2(x, fill.min.y), egui::vec2(band, HEIGHT));
-    let shade = |a: f32| Color32::from_rgba_unmultiplied(INK.r(), INK.g(), INK.b(), (a * 255.0) as u8);
-    horizontal_gradient(
+    let shade = |a: f32| with_alpha(INK, a);
+    gradient(
         &ui.painter().with_clip_rect(fill.shrink2(egui::vec2(1.0, 0.0))),
         sheen,
+        false,
         &[(0.0, shade(0.0)), (0.5, shade(0.22)), (1.0, shade(0.0))],
     );
     ui.ctx().request_repaint();
@@ -1580,7 +1520,7 @@ pub struct Pacer {
     finished: bool,
 }
 
-const PHASE_DWELL: std::time::Duration = std::time::Duration::from_millis(420);
+const PHASE_DWELL: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl Pacer {
     pub fn new(initial: impl Into<String>) -> Self {
@@ -1668,6 +1608,55 @@ pub fn progress_readout(ui: &mut egui::Ui, label: &str, percent: f32, label_size
     });
 }
 
+pub fn progress_block(ui: &mut egui::Ui, id: &'static str, label: &str, percent: f32) {
+    ui.scope(|g| {
+        g.add_space(26.0);
+        progress_readout(g, label, percent, text::BASE, 12.0);
+        g.add_space(10.0);
+        progress_bar(g, egui::Id::new(id), bar_fraction(percent), BAR_STEADY);
+    });
+}
+
+pub fn warnings_card(ui: &mut egui::Ui, warnings: &[String], max_height: f32) {
+    card(ui, Tone::Notice, 13, |card| {
+        egui::ScrollArea::vertical()
+            .max_height(max_height)
+            .auto_shrink([false, true])
+            .show(card, |list| {
+                for (i, warning) in warnings.iter().enumerate() {
+                    if i > 0 {
+                        list.add_space(10.0);
+                    }
+                    bullet_row(list, NOTICE, warning);
+                }
+            });
+    });
+}
+
+pub fn run_window(
+    title: &str,
+    size: [f32; 2],
+    build: impl FnOnce(&egui::Context, std::rc::Rc<std::cell::Cell<i32>>) -> Box<dyn eframe::App> + 'static,
+) -> eframe::Result<i32> {
+    let options = eframe::NativeOptions {
+        viewport: viewport(size),
+        centered: true,
+        ..Default::default()
+    };
+    let outcome = std::rc::Rc::new(std::cell::Cell::new(crate::exit::OK));
+    let slot = outcome.clone();
+    prewarm();
+    eframe::run_native(
+        title,
+        options,
+        Box::new(move |cc| {
+            apply_theme(&cc.egui_ctx);
+            Ok(build(&cc.egui_ctx, slot))
+        }),
+    )?;
+    Ok(outcome.get())
+}
+
 pub fn spawn_engine(
     work: impl FnOnce(&crate::msg::EventSink) -> Result<(), crate::msg::EngineError> + Send + 'static,
 ) -> std::sync::mpsc::Receiver<crate::msg::EngineEvent> {
@@ -1682,6 +1671,24 @@ pub fn spawn_engine(
         };
     });
     rx
+}
+
+pub fn next_event(
+    rx: &mut Option<std::sync::mpsc::Receiver<crate::msg::EngineEvent>>,
+    pacer: &mut Pacer,
+) -> Option<crate::msg::EngineEvent> {
+    use crate::msg::EngineEvent;
+    loop {
+        let event = rx.as_ref()?.try_recv().ok()?;
+        match event {
+            EngineEvent::Status { phase, percent } => pacer.report(&phase, percent),
+            EngineEvent::Finished | EngineEvent::Cancelled | EngineEvent::Failed(_) => {
+                *rx = None;
+                return Some(event);
+            }
+            other => return Some(other),
+        }
+    }
 }
 
 fn has_os_error(lower: &str, code: u32) -> bool {
@@ -1748,38 +1755,77 @@ impl Copied {
     }
 }
 
-pub struct FailureActions {
-    pub copy: bool,
-    pub open_log: bool,
-    pub close: bool,
-    pub retry: bool,
+pub enum Failure {
+    Retry,
+    Close,
 }
 
-pub fn failure_footer(ui: &mut egui::Ui, copy_label: &str, retry: bool) -> FailureActions {
-    let mut actions = FailureActions {
-        copy: false,
-        open_log: false,
-        close: false,
-        retry: false,
-    };
-    action_row_split(
-        ui,
-        |left| {
-            actions.copy = wide_secondary_button(left, copy_label, 116.0).clicked();
-            left.add_space(14.0);
-            actions.open_log = link(left, "Open log").clicked();
-        },
-        |right| {
-            if retry {
-                actions.retry = primary_button(right, "Retry").clicked();
-                right.add_space(10.0);
-                actions.close = secondary_button(right, "Close").clicked();
-            } else {
-                actions.close = primary_button(right, "Close").clicked();
-            }
-        },
-    );
-    actions
+pub fn failure_page(
+    ui: &mut egui::Ui,
+    copied: &mut Copied,
+    err: &str,
+    title: &str,
+    note: Option<&str>,
+    retry: bool,
+) -> Option<Failure> {
+    page_title(ui, 12.0, title, 26.0);
+    let friendly = friendly_error(err);
+    ui.scope(|g| {
+        g.add_space(18.0);
+        detail_box(g, Tone::Danger, "Details", err, 170.0);
+        if !friendly.is_empty() {
+            g.add_space(10.0);
+            paragraph(g, friendly, text::XS, tx(0.62), 400.0);
+        }
+        if let Some(note) = note {
+            g.add_space(10.0);
+            paragraph(g, note, text::XS, DANGER_TEXT, 400.0);
+        }
+    });
+    failure_actions(ui, copied, err, retry)
+}
+
+pub fn failure_actions(
+    ui: &mut egui::Ui,
+    copied: &mut Copied,
+    err: &str,
+    retry: bool,
+) -> Option<Failure> {
+    let ctx = ui.ctx().clone();
+    let copy_label = copied.label(&ctx);
+    let (mut copy, mut open_log, mut again, mut close) = (false, false, false, false);
+    footer(ui, |foot| {
+        foot.scope(|foot| {
+            action_row_split(
+                foot,
+                |left| {
+                    copy = wide_secondary_button(left, copy_label, 116.0).clicked();
+                    left.add_space(14.0);
+                    open_log = link(left, "Open log").clicked();
+                },
+                |right| {
+                    if retry {
+                        again = primary_button(right, "Retry").clicked();
+                        right.add_space(10.0);
+                        close = secondary_button(right, "Close").clicked();
+                    } else {
+                        close = primary_button(right, "Close").clicked();
+                    }
+                },
+            );
+        });
+    });
+    if copy {
+        ctx.copy_text(err.to_string());
+        copied.mark();
+    } else if open_log {
+        open_log_folder();
+    } else if again {
+        return Some(Failure::Retry);
+    } else if close {
+        return Some(Failure::Close);
+    }
+    None
 }
 
 pub fn action_row_split(

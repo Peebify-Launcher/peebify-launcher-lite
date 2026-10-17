@@ -1,11 +1,8 @@
 // ------------ Game Maintenance ------------
-// The per-game section of Settings, Games. Covers auto-update and update checks, repair and verify, opening
-// folders, the install location, and moving or removing the game.
-import { useEffect, useState, type ReactNode } from "react";
+// The per-game part of Settings, Games: updates, repair, folders and removal, the voice packs, and FPS unlock.
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   Wrench,
-  FolderOpen,
-  Images,
   FolderInput,
   Trash2,
   Cpu,
@@ -17,11 +14,15 @@ import {
   Rocket,
   Power,
   CalendarClock,
+  ListChecks,
+  Volume2,
+  Gauge,
+  MonitorOff,
+  Target,
 } from "lucide-react";
-import type { GameId } from "../../types/game";
-import { supportsQuickRepair } from "../../data/games";
+import { type GameId, type GraphicsApi, type ResourceQuality, GRAPHICS_APIS, supportsQuickRepair } from "../../data/games";
 import {
-  JOB_ACTIVE_BLOCKER,
+  jobActiveBlocker,
   qualityLabel,
   useGameActions,
   useModsForceDx11,
@@ -29,77 +30,71 @@ import {
 } from "../../lib/gameActions";
 import { fmtBytes } from "../../lib/format";
 import { useCustomizationStore } from "../../store/customizationStore";
-import { useNotificationStore } from "../../store/notificationStore";
+import { useNotificationStore } from "../../store/notifications";
 import { useGamesStore } from "../../store/gamesStore";
-import { iconFallback, iconSrcFor } from "../../lib/customMedia";
 import { verifyNeedsRepairFirst } from "../../lib/download";
-import { FpsUnlockPanel } from "./FpsUnlockPanel";
-import { VoicePackPanel } from "./VoicePackPanel";
-import { SettingsGroup, GroupLabel } from "../ui/SettingsGroup";
-import { SettingsExpander } from "../ui/SettingsExpander";
+import { SettingsGroup, SettingCard } from "../ui/panels";
+import { SettingsExpander } from "./SettingRow";
 import {
   repairGame,
   verifyGameIntegrity,
-  openGameFolder,
-  openScreenshotFolder,
   getGameConfig,
-  setGameUpdatePref,
   setCustomLauncher,
-  getInstallPathHealth,
   setConfigValue,
   defaultGraphicsApi,
   RESOURCE_QUALITY_OPTIONS,
   downloadEnqueue,
-  getAppliedVoicePacks,
   DEFAULT_VOICE_PACK,
   VOICE_PACK_OPTIONS,
   type GameUpdatePrefs,
-  type GraphicsApi,
-  type ResourceQuality,
   type VoicePackLanguage,
+  setContentPacks,
+  type ContentPack,
+  setFpsUnlock,
+  onFpsUnlockStatus,
+  onGameStopped,
+  type FpsUnlock,
+  type FpsUnlockPatch,
+  type FpsUnlockState,
 } from "../../lib/ipc";
-import { SettingCard } from "../ui/SettingCard";
-import { ActionButton } from "../ui/ActionButton";
-import { Toggle } from "../ui/Toggle";
-import { SegmentedControl } from "../ui/SegmentedControl";
-import { TooltipPortal, useAnchoredTip } from "../ui/Tooltip";
+import { ActionButton, Toggle, SegmentedControl } from "../ui/controls";
+import { Hint } from "../ui/Tooltip";
+import { fetchRemembered, reads, recall, rememberAnswer, useRemembered } from "../../lib/launcherHooks";
+import { t, type TKey } from "../../lib/i18n";
+import { useT } from "../../lib/useT";
+import { Collapse } from "../../lib/motion";
+import { useTauriEvent } from "../../lib/hooks";
+import { Slider } from "../ui/Slider";
 
-function ButtonHint({ tip, children }: { tip: string; children: ReactNode }) {
-  const hint = useAnchoredTip<HTMLSpanElement>("bottom");
-  return (
-    <span ref={hint.anchorRef} {...hint.bind} className="inline-flex">
-      {children}
-      {hint.shown && (
-        <TooltipPortal x={hint.pos.x} y={hint.pos.y} placement="bottom">
-          {tip}
-        </TooltipPortal>
-      )}
-    </span>
-  );
-}
+// ------------ Maintenance ------------
+// The per-game section of Settings, Games. Covers auto-update and update checks, repair and verify, opening
+// folders, the install location, and moving or removing the game.
+type GameConfig = Awaited<ReturnType<typeof getGameConfig>>;
 
-const SCHEDULE_OPTS = [
-  { value: "off", label: "Never" },
-  { value: "daily", label: "Daily" },
-  { value: "weekly", label: "Weekly" },
-];
-
-const GRAPHICS_API_OPTS = [
-  { value: "dx11", label: "DX11" },
-  { value: "dx12", label: "DX12" },
+const SCHEDULE_OPTS: { value: string; label: TKey; check?: TKey }[] = [
+  { value: "off", label: "maintenance.schedule.never" },
+  {
+    value: "daily",
+    label: "maintenance.schedule.daily",
+    check: "maintenance.autoUpdateSummary.dailyCheck",
+  },
+  {
+    value: "weekly",
+    label: "maintenance.schedule.weekly",
+    check: "maintenance.autoUpdateSummary.weeklyCheck",
+  },
 ];
 
 function qualitySizes(sizes: ReturnType<typeof useResourceQuality>["sizes"]): string {
   if (!sizes) return "";
   const parts = RESOURCE_QUALITY_OPTIONS.flatMap(({ value }) => {
     const size = sizes[value];
-    return size ? [`${qualityLabel(value)} ${fmtBytes(size.installBytes)}`] : [];
+    return size
+      ? [t("maintenance.qualitySize", { quality: qualityLabel(value), size: fmtBytes(size.installBytes) })]
+      : [];
   });
   return parts.length ? ` ${parts.join(" · ")}.` : "";
 }
-
-const CUSTOM_LAUNCHER_OVERRIDES =
-  "Not used while another program starts the game. Add these arguments in that program instead.";
 
 const NO_PREFS: GameUpdatePrefs = {
   autoUpdate: false,
@@ -107,9 +102,8 @@ const NO_PREFS: GameUpdatePrefs = {
   autoUpdateSchedule: "off",
 };
 
-type PathHealth = Awaited<ReturnType<typeof getInstallPathHealth>> & { path?: string };
-
 export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
+  const t = useT();
   const {
     game,
     managed,
@@ -130,54 +124,43 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
   const modsForceDx11 = useModsForceDx11(activeId);
   const api = useCustomizationStore((s) => s.graphicsApi[activeId]) ?? defaultGraphicsApi(activeId);
   const setGraphicsApi = useCustomizationStore((s) => s.setGraphicsApi);
-  const resourceQuality = useResourceQuality(
-    activeId,
-    { installed, steamCopy, jobActive },
-    { sizes: true },
-  );
+  const resourceQuality = useResourceQuality(activeId, { installed, jobActive }, { sizes: true });
   const voicePack = useCustomizationStore((s) => s.voicePack[activeId]) ?? DEFAULT_VOICE_PACK;
   const setVoicePack = useCustomizationStore((s) => s.setVoicePack);
-  const gameIcons = useCustomizationStore((s) => s.gameIcons);
   const push = useNotificationStore((s) => s.push);
   const toast = useNotificationStore((s) => s.toast);
 
   const maintainable = installed && managed;
   const moveBlocker = jobActive
-    ? JOB_ACTIVE_BLOCKER
+    ? jobActiveBlocker()
     : running && installed && !steamCopy
-      ? `Close ${game.name} first.`
+      ? t("maintenance.closeGameFirst", { game: game.name })
       : null;
   const quickRepairable = supportsQuickRepair(activeId);
 
-  const [health, setHealth] = useState<PathHealth | null>(null);
   const [healthTick, setHealthTick] = useState(0);
-  useEffect(() => {
-    let alive = true;
-    setHealth(null);
-    if (installed) {
-      void getInstallPathHealth(activeId).then((h) => {
-        if (alive) setHealth(h);
-      });
-    }
-    return () => {
-      alive = false;
-    };
-  }, [activeId, installed, jobActive, healthTick]);
+  const health = useRemembered(
+    installed ? reads.installPathHealth(activeId) : null,
+    [activeId, installed, jobActive, healthTick],
+  );
   const pathProblem =
     health && (health.missing || health.tooDeep || health.notWritable) ? health.message : "";
   const installPath = installed ? (health?.path ?? "") : "";
 
-  const [loadedPrefs, setLoadedPrefs] = useState<{ gameId: GameId; prefs: GameUpdatePrefs } | null>(
-    null,
-  );
+  const [loadedPrefs, setLoadedPrefs] = useState<{ gameId: GameId; prefs: GameUpdatePrefs } | null>(() => {
+    const cfg = recall(reads.gameConfig(activeId));
+    return cfg ? { gameId: activeId, prefs: cfg.prefs } : null;
+  });
   const prefsReady = loadedPrefs?.gameId === activeId;
   const prefs = loadedPrefs?.prefs ?? NO_PREFS;
-  const [launchArgs, setLaunchArgs] = useState("");
-  const [savedArgs, setSavedArgs] = useState("");
-  const [customLauncher, setCustomLauncherPath] = useState("");
+  const [launchArgs, setLaunchArgs] = useState(() => recall(reads.gameConfig(activeId))?.launchArgs ?? "");
+  const [savedArgs, setSavedArgs] = useState(launchArgs);
+  const [customLauncher, setCustomLauncherPath] = useState(
+    () => recall(reads.gameConfig(activeId))?.customLauncher ?? "",
+  );
   useEffect(() => {
     let alive = true;
-    void getGameConfig(activeId).then((cfg) => {
+    void fetchRemembered(reads.gameConfig(activeId)).then((cfg) => {
       if (!alive) return;
       setLoadedPrefs({ gameId: activeId, prefs: cfg.prefs });
       setLaunchArgs(cfg.launchArgs);
@@ -189,43 +172,43 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
     };
   }, [activeId]);
 
+  const rememberConfig = (change: (cfg: GameConfig) => GameConfig) => {
+    const read = reads.gameConfig(activeId);
+    const cfg = recall(read);
+    if (cfg) rememberAnswer(read, change(cfg));
+  };
+
   const updatePref = (key: keyof GameUpdatePrefs, value: boolean | string) => {
     if (!prefsReady) return;
     setLoadedPrefs((p) =>
       p && p.gameId === activeId ? { ...p, prefs: { ...p.prefs, [key]: value } } : p,
     );
-    void setGameUpdatePref(activeId, key, value);
+    rememberConfig((cfg) => ({ ...cfg, prefs: { ...cfg.prefs, [key]: value } }));
+    void setConfigValue(`games.${activeId}.${key}`, value);
   };
 
   const chooseCustomLauncher = (pick: boolean) => {
     void setCustomLauncher(activeId, pick).then((path) => {
-      if (path !== undefined) setCustomLauncherPath(path);
+      if (path === undefined) return;
+      setCustomLauncherPath(path);
+      rememberConfig((cfg) => ({ ...cfg, customLauncher: path }));
     });
   };
 
-  const [appliedVoices, setAppliedVoices] = useState<string[] | null>(null);
-  useEffect(() => {
-    let alive = true;
-    setAppliedVoices(null);
-    if (installed && managed && game.voicePackChoice && !jobActive) {
-      void getAppliedVoicePacks(activeId).then((languages) => {
-        if (alive) setAppliedVoices(languages);
-      });
-    }
-    return () => {
-      alive = false;
-    };
-  }, [activeId, installed, managed, game.voicePackChoice, jobActive]);
+  const appliedVoices = useRemembered(
+    installed && managed && game.voicePackChoice && !jobActive ? reads.appliedVoicePacks(activeId) : null,
+    [activeId, installed, managed, game.voicePackChoice, jobActive],
+  );
 
-  const voicePending =
-    !steamCopy && !!appliedVoices && appliedVoices.length > 0 && !appliedVoices.includes(voicePack);
+  const voicePending = !!appliedVoices && appliedVoices.length > 0 && !appliedVoices.includes(voicePack);
 
   const applyVoicePack = () => {
     const label = VOICE_PACK_OPTIONS.find((o) => o.value === voicePack)?.label ?? voicePack;
     void downloadEnqueue(activeId, () =>
       push({
-        title: `Applying the ${label} voice pack`,
-        text: "Downloading it now and removing the old one. Track it on Downloads.",
+        type: "progress",
+        title: t("maintenance.voicePack.applyingTitle", { language: label }),
+        text: t("maintenance.voicePack.applyingText"),
       }),
     );
   };
@@ -239,14 +222,16 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
     const trimmed = launchArgs.trim();
     if (trimmed === savedArgs) return;
     setSavedArgs(trimmed);
+    rememberConfig((cfg) => ({ ...cfg, launchArgs: trimmed }));
     void setConfigValue(`games.${activeId}.launchArgs`, trimmed);
   };
 
   const verifyIntegrity = async () => {
     const result = await verifyGameIntegrity(activeId, () =>
       toast({
-        title: `Checking ${game.name}`,
-        text: "Validating installed files. Track it on Downloads.",
+        type: "progress",
+        title: t("maintenance.verify.checkingTitle", { game: game.name }),
+        text: t("maintenance.verify.checkingText"),
       }),
     );
     if (!result) return;
@@ -254,36 +239,30 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
     if (broken === 0) {
       push({
         type: "success",
-        title: `${game.name} is intact`,
-        text: result.message ?? "Every installed file matches the game manifest.",
+        title: t("maintenance.verify.intactTitle", { game: game.name }),
+        text: result.message ?? t("maintenance.verify.intactText"),
       });
       return;
     }
-    const summary =
-      result.message ??
-      `${broken} file${broken === 1 ? " needs" : "s need"} repair. A full repair re-downloads ${broken === 1 ? "it" : "them"}.`;
-    if (steamCopy) {
-      push({
-        type: "warning",
-        title: `${game.name} has broken files`,
-        text: `${summary} Repair this Steam copy with Verify integrity of game files in Steam.`,
-      });
-      return;
-    }
+    const summary = result.message ?? t("maintenance.verify.brokenSummary", { count: broken });
     const updateReplaces =
       result.updatePending ?? useGamesStore.getState().updates.includes(activeId);
     if (updateReplaces && !verifyNeedsRepairFirst(result.message)) {
       push({
         type: "info",
-        title: `${game.name} has an update`,
+        title: t("maintenance.verify.updateTitle", { game: game.name }),
         text:
           (result.updatePending && result.message) ||
-          `${broken} file${broken === 1 ? " differs" : "s differ"} from the latest version. The update replaces ${broken === 1 ? "it" : "them"}.`,
+          t("maintenance.verify.updateText", { count: broken }),
         action: {
-          label: "Update",
+          label: t("common.update"),
           run: () =>
             void downloadEnqueue(activeId, () =>
-              push({ title: `Updating ${game.name}`, text: "Track it on Downloads." }),
+              push({
+                type: "progress",
+                title: t("maintenance.verify.updatingTitle", { game: game.name }),
+                text: t("maintenance.verify.trackOnDownloads"),
+              }),
             ),
         },
       });
@@ -291,100 +270,81 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
     }
     push({
       type: "warning",
-      title: `${game.name} has broken files`,
+      title: t("maintenance.verify.brokenTitle", { game: game.name }),
       text: summary,
       action: {
-        label: "Full repair",
+        label: t("maintenance.verify.fullRepair"),
         run: () =>
           void repairGame(activeId, false).then((queued) => {
             if (!queued) return;
             push({
-              title: `Repairing ${game.name}`,
-              text: "Replacing the broken files. Track it on Downloads.",
+              type: "progress",
+              title: t("maintenance.verify.repairingTitle", { game: game.name }),
+              text: t("maintenance.verify.repairingText"),
             });
           }),
       },
     });
   };
 
-  const scheduleLabel = SCHEDULE_OPTS.find((o) => o.value === prefs.autoUpdateSchedule)?.label;
+  const scheduleCheck = SCHEDULE_OPTS.find((o) => o.value === prefs.autoUpdateSchedule)?.check;
+  const scheduleOptions = SCHEDULE_OPTS.map((o) => ({ value: o.value, label: t(o.label) }));
   const autoUpdateSummary = !installed
-    ? "Install the game first"
+    ? t("maintenance.autoUpdateSummary.installFirst")
     : !managed
-      ? "Handled by the game's own launcher"
+      ? t("maintenance.autoUpdateSummary.ownLauncher")
       : !loadedPrefs
         ? "\u00a0"
         : !prefs.autoUpdate
-          ? "Off"
+          ? t("maintenance.autoUpdateSummary.off")
           : [
-              prefs.autoUpdateOnStartup ? "Checks on startup" : null,
-              prefs.autoUpdateSchedule !== "off" ? `${scheduleLabel} check` : null,
-              "Checks after you play",
+              prefs.autoUpdateOnStartup ? t("maintenance.autoUpdateSummary.checksOnStartup") : null,
+              prefs.autoUpdateSchedule !== "off" && scheduleCheck ? t(scheduleCheck) : null,
             ]
               .filter(Boolean)
-              .join(" · ");
+              .join(" · ") || t("maintenance.autoUpdateSummary.on");
 
   return (
     <div className="flex flex-col gap-7">
-      <div>
-        <GroupLabel label="Selected game" />
-        <div className="flex items-center gap-[10px] rounded-ui border border-white/[0.08] bg-white/[0.03] py-[6px] pl-[6px] pr-4">
-          <img
-            src={iconSrcFor(activeId, gameIcons)}
-            onError={iconFallback(activeId)}
-            alt=""
-            className="h-[42px] w-[42px] shrink-0 rounded-[10px] object-cover"
-          />
-          <div className="min-w-0">
-            <div className="truncate text-[15px] font-semibold text-white">{game.name}</div>
-            <div className="mt-px text-[12px] text-white/55">
-              {managed
-                ? "Managed by Peebify"
-                : "Managed by its own launcher, which handles repair and updates"}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <SettingsGroup label="Maintenance">
+      <SettingsGroup label={t("maintenance.groups.maintenance")}>
         <SettingsExpander
           icon={<RefreshCw size={18} />}
-          title={`Auto-update ${game.name}`}
+          title={t("maintenance.autoUpdate.title", { game: game.name })}
           summary={autoUpdateSummary}
-          description="Checks for updates and downloads them when the game is closed."
+          description={t("maintenance.autoUpdate.description")}
           disabled={!maintainable}
           control={
             <Toggle
               checked={prefs.autoUpdate && maintainable}
               disabled={!maintainable || !prefsReady}
-              ariaLabel="Auto-update this game"
+              ariaLabel={t("maintenance.autoUpdate.ariaLabel")}
               onChange={(v) => updatePref("autoUpdate", v)}
             />
           }
         >
           <SettingCard
             icon={<Power size={18} />}
-            title="Check on startup"
-            description="Look for an update for this game when the launcher opens."
+            title={t("maintenance.checkOnStartup.title")}
+            description={t("maintenance.checkOnStartup.description")}
             disabled={!prefs.autoUpdate || !prefsReady}
             control={
               <Toggle
                 checked={prefs.autoUpdateOnStartup}
                 disabled={!prefs.autoUpdate || !prefsReady}
-                ariaLabel="Check on startup"
+                ariaLabel={t("maintenance.checkOnStartup.title")}
                 onChange={(v) => updatePref("autoUpdateOnStartup", v)}
               />
             }
           />
           <SettingCard
             icon={<CalendarClock size={18} />}
-            title="Scheduled check"
-            description="How often to look for an update while the launcher is open."
+            title={t("maintenance.scheduledCheck.title")}
+            description={t("maintenance.scheduledCheck.description")}
             disabled={!prefs.autoUpdate || !prefsReady}
             control={
               <SegmentedControl
-                ariaLabel="Scheduled check"
-                options={SCHEDULE_OPTS}
+                ariaLabel={t("maintenance.scheduledCheck.title")}
+                options={scheduleOptions}
                 value={prefs.autoUpdateSchedule}
                 onChange={(v) => updatePref("autoUpdateSchedule", v)}
               />
@@ -394,63 +354,36 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
 
         <SettingCard
           icon={<Wrench size={18} />}
-          title="Repair and verify"
+          title={t("maintenance.repair.title")}
           description={
-            maintainable && jobActive
-              ? JOB_ACTIVE_BLOCKER
-              : maintainable && steamCopy
-                ? "This is the Steam copy, so repair it with Verify integrity of game files in Steam."
-                : "Replace broken or missing game files, or check them without changing anything."
+            maintainable && jobActive ? jobActiveBlocker() : t("maintenance.repair.description")
           }
           disabled={!maintainable}
           control={
             <div className="flex gap-2">
               {quickRepairable && (
-                <ButtonHint tip="Checks file sizes against the local manifest">
-                  <ActionButton onClick={quickRepair} disabled={!maintainable || steamCopy || jobActive}>
-                    Quick
+                <Hint tip={t("maintenance.repair.quickTip")}>
+                  <ActionButton onClick={quickRepair} disabled={!maintainable || jobActive}>
+                    {t("maintenance.repair.quick")}
                   </ActionButton>
-                </ButtonHint>
+                </Hint>
               )}
-              <ButtonHint tip="Hashes every file and re-downloads what is broken">
+              <Hint tip={t("maintenance.repair.fullTip")}>
                 <ActionButton
                   onClick={confirmFullRepair}
-                  disabled={!maintainable || steamCopy || jobActive}
+                  disabled={!maintainable || jobActive}
                 >
-                  Full
+                  {t("maintenance.repair.full")}
                 </ActionButton>
-              </ButtonHint>
-              <ButtonHint tip="Reports problems without changing any files">
+              </Hint>
+              <Hint tip={t("maintenance.repair.verifyTip")}>
                 <ActionButton
                   onClick={() => void verifyIntegrity()}
                   disabled={!maintainable || jobActive}
                 >
-                  Verify
+                  {t("maintenance.repair.verify")}
                 </ActionButton>
-              </ButtonHint>
-            </div>
-          }
-        />
-
-        <SettingCard
-          icon={<FolderOpen size={18} />}
-          title="Open folders"
-          description="Jump to the game's install folder or the captures Peebify saved for it."
-          control={
-            <div className="flex gap-2">
-              <ActionButton
-                onClick={() => void openGameFolder(activeId)}
-                disabled={!installed}
-                icon={<FolderOpen size={15} />}
-              >
-                Game
-              </ActionButton>
-              <ActionButton
-                onClick={() => void openScreenshotFolder(activeId)}
-                icon={<Images size={15} />}
-              >
-                Screenshots
-              </ActionButton>
+              </Hint>
             </div>
           }
         />
@@ -458,22 +391,19 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
         <SettingCard
           danger={!!pathProblem && !moveBlocker}
           icon={<FolderInput size={18} />}
-          title="Install location"
+          title={t("maintenance.location.title")}
           description={
             moveBlocker ||
             pathProblem ||
             (installed && steamCopy
-              ? "Steam manages this copy. Move it from Steam under Properties, Installed Files, then use Locate to point Peebify at the new folder."
-              : "Move the game to another folder, or point Peebify at a copy you installed or moved by hand.")
+              ? t("maintenance.location.steamCopy")
+              : t("maintenance.location.description"))
           }
           detail={
             installPath && (
-              <p
-                className="mt-1 max-w-[56ch] truncate font-mono text-[11.5px] text-white/55"
-                title={installPath}
-              >
+              <Hint tip={installPath} className="mt-1 block max-w-[56ch] truncate font-mono text-[11.5px] text-white/55">
                 {installPath}
-              </p>
+              </Hint>
             )
           }
           control={
@@ -482,13 +412,13 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
                 onClick={confirmMove}
                 disabled={!installed || steamCopy || !!moveBlocker || !!health?.missing}
               >
-                Move…
+                {t("maintenance.location.move")}
               </ActionButton>
               <ActionButton
                 onClick={() => void locate().then(() => setHealthTick((t) => t + 1))}
                 disabled={jobActive}
               >
-                Locate…
+                {t("maintenance.location.locate")}
               </ActionButton>
             </div>
           }
@@ -497,22 +427,22 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
         {game.voicePackChoice && (
           <SettingCard
             icon={<Languages size={18} />}
-            title="Voice-over language"
+            title={t("maintenance.voiceLanguage.title")}
             description={
               voicePending
-                ? "Not applied yet. Apply now downloads the new voice pack and removes the old one."
-                : "Applies on the next update."
+                ? t("maintenance.voiceLanguage.pending")
+                : t("maintenance.voiceLanguage.description")
             }
             disabled={!installed}
             control={
               <div className="flex items-center gap-2">
                 {voicePending && (
                   <ActionButton onClick={applyVoicePack} disabled={jobActive || running}>
-                    Apply now
+                    {t("maintenance.voiceLanguage.applyNow")}
                   </ActionButton>
                 )}
                 <SegmentedControl
-                  ariaLabel="Voice-over language"
+                  ariaLabel={t("maintenance.voiceLanguage.title")}
                   options={VOICE_PACK_OPTIONS}
                   value={voicePack}
                   onChange={(v) => setVoicePack(activeId, v as VoicePackLanguage)}
@@ -525,23 +455,23 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
         <VoicePackPanel gameId={activeId} />
       </SettingsGroup>
 
-      <SettingsGroup label="Launch options">
+      <SettingsGroup label={t("maintenance.groups.launchOptions")}>
         {game.graphicsApiChoice && (
           <SettingCard
             icon={<Cpu size={18} />}
-            title="DirectX"
+            title="DirectX" // i18n-ignore
             description={
               customLauncher
-                ? CUSTOM_LAUNCHER_OVERRIDES
+                ? t("maintenance.customLauncherOverrides")
                 : modsForceDx11
-                  ? `Mods are on for ${game.name} and only work with DirectX 11, so it always launches with that. Turn mods off to pick again.`
-                  : "Force a specific Graphics API (DX11/DX12) onto a game."
+                  ? t("maintenance.directx.modsForceDx11", { game: game.name })
+                  : t("maintenance.directx.description")
             }
             disabled={!installed || modsForceDx11 || !!customLauncher}
             control={
               <SegmentedControl
-                ariaLabel="DirectX version"
-                options={GRAPHICS_API_OPTS}
+                ariaLabel={t("maintenance.directx.ariaLabel")}
+                options={GRAPHICS_APIS}
                 value={modsForceDx11 ? "dx11" : api}
                 onChange={(v) => setGraphicsApi(activeId, v as GraphicsApi)}
               />
@@ -551,26 +481,40 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
         {game.resourceQualityChoice && (
           <SettingCard
             icon={<Layers size={18} />}
-            title="Resource quality"
+            title={t("maintenance.resourceQuality.title")}
             description={
               customLauncher
-                ? CUSTOM_LAUNCHER_OVERRIDES
+                ? t("maintenance.customLauncherOverrides")
                 : resourceQuality.pending
-                  ? `${resourceQuality.installedLabel} is installed. Apply now downloads the ${qualityLabel(resourceQuality.quality)} files and removes the ${resourceQuality.installedLabel} ones.`
-                  : `Higher quality looks sharper but takes more disk space${
-                      installed ? "" : ". This is the quality that gets installed"
-                    }.${qualitySizes(resourceQuality.sizes)}`
+                  ? t("maintenance.resourceQuality.pending", {
+                      installed: resourceQuality.installedLabel,
+                      quality: qualityLabel(resourceQuality.quality),
+                    })
+                  : (installed
+                      ? t("maintenance.resourceQuality.description")
+                      : t("maintenance.resourceQuality.descriptionNotInstalled")) +
+                    qualitySizes(resourceQuality.sizes)
             }
             disabled={!!customLauncher}
             control={
               <div className="flex items-center gap-2">
                 {resourceQuality.pending && (
                   <ActionButton onClick={resourceQuality.apply} disabled={jobActive || running}>
-                    Apply now
+                    {t("maintenance.voiceLanguage.applyNow")}
                   </ActionButton>
                 )}
+                {installed && (
+                  <Hint tip={t("maintenance.resourceQuality.checkTip")}>
+                    <ActionButton
+                      onClick={() => void resourceQuality.check()}
+                      disabled={jobActive || running || resourceQuality.checking}
+                    >
+                      {t("maintenance.resourceQuality.checkButton")}
+                    </ActionButton>
+                  </Hint>
+                )}
                 <SegmentedControl
-                  ariaLabel="Resource quality"
+                  ariaLabel={t("maintenance.resourceQuality.title")}
                   options={RESOURCE_QUALITY_OPTIONS}
                   value={resourceQuality.quality}
                   onChange={(v) => resourceQuality.setQuality(v as ResourceQuality)}
@@ -582,18 +526,18 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
         {steam?.isSteamInstall && (
           <SettingCard
             icon={<Gamepad2 size={18} />}
-            title="Launch through Steam"
+            title={t("maintenance.steam.title")}
             description={
               steam.steamFound
-                ? `This is the Steam copy of ${game.name}. Starting it through Steam keeps the overlay, controller settings and Steam playtime working.`
-                : `This is the Steam copy of ${game.name}, but Steam itself couldn't be found on this PC, so the game is started directly.`
+                ? t("maintenance.steam.found", { game: game.name })
+                : t("maintenance.steam.notFound", { game: game.name })
             }
             disabled={!steam.steamFound}
             control={
               <Toggle
                 checked={steam.launchViaSteam && steam.steamFound}
                 disabled={!steam.steamFound}
-                ariaLabel="Launch through Steam"
+                ariaLabel={t("maintenance.steam.title")}
                 onChange={setLaunchViaSteam}
               />
             }
@@ -602,11 +546,11 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
         {game.fpsUnlock && <FpsUnlockPanel gameId={activeId} gameName={game.name} />}
         <SettingCard
           icon={<TerminalSquare size={18} />}
-          title="Custom launch arguments"
+          title={t("maintenance.launchArgs.title")}
           description={
             customLauncher
-              ? CUSTOM_LAUNCHER_OVERRIDES
-              : "Extra command-line arguments added when the game starts. Wrap an argument in quotes if it contains spaces."
+              ? t("maintenance.customLauncherOverrides")
+              : t("maintenance.launchArgs.description")
           }
           disabled={!!customLauncher}
           control={
@@ -615,8 +559,8 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
               value={launchArgs}
               disabled={!!customLauncher}
               spellCheck={false}
-              placeholder="e.g. -popupwindow"
-              aria-label="Custom launch arguments"
+              placeholder={t("maintenance.launchArgs.placeholder")}
+              aria-label={t("maintenance.launchArgs.title")}
               onChange={(e) => setLaunchArgs(e.target.value)}
               onBlur={saveLaunchArgs}
               onKeyDown={(e) => {
@@ -628,36 +572,36 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
         />
         <SettingCard
           icon={<Rocket size={18} />}
-          title="Start the game with another program"
+          title={t("maintenance.customLauncher.title")}
           description={
             customLauncher
-              ? `${customLauncher}. Peebify's launch arguments, DirectX and quality choices aren't passed to it.`
-              : "This replaces Peebify Launcher's normal behavior so that an external program can launch the game."
+              ? t("maintenance.customLauncher.chosen", { path: customLauncher })
+              : t("maintenance.customLauncher.description")
           }
           control={
             <div className="flex items-center gap-2">
               <ActionButton onClick={() => chooseCustomLauncher(true)}>
-                {customLauncher ? "Change…" : "Choose…"}
+                {customLauncher ? t("maintenance.customLauncher.change") : t("maintenance.customLauncher.choose")}
               </ActionButton>
               <ActionButton disabled={!customLauncher} onClick={() => chooseCustomLauncher(false)}>
-                Clear
+                {t("maintenance.customLauncher.clear")}
               </ActionButton>
             </div>
           }
         />
       </SettingsGroup>
 
-      <SettingsGroup label="Danger zone" danger>
+      <SettingsGroup label={t("maintenance.groups.dangerZone")} danger>
         <SettingCard
           icon={<Trash2 size={18} />}
-          title={partial ? "Discard download" : "Uninstall game"}
+          title={partial ? t("maintenance.uninstall.discardTitle") : t("maintenance.uninstall.uninstallTitle")}
           description={
             ((installed || partial) && uninstallBlocker) ||
             (partial
-              ? "Delete the files an unfinished install left behind. Playtime and settings are kept."
+              ? t("maintenance.uninstall.partial")
               : steamCopy
-                ? "Hands the uninstall to Steam and removes the game from Peebify. Playtime and settings are kept."
-                : "Permanently delete the installed game files. Playtime and settings are kept.")
+                ? t("maintenance.uninstall.steamCopy")
+                : t("maintenance.uninstall.description"))
           }
           danger
           control={
@@ -666,11 +610,341 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
               onClick={() => void confirmUninstall()}
               disabled={(!installed && !partial) || !!uninstallBlocker}
             >
-              {partial ? "Discard" : "Uninstall"}
+              {partial ? t("maintenance.uninstall.discard") : t("common.uninstall")}
             </ActionButton>
           }
         />
       </SettingsGroup>
     </div>
+  );
+}
+
+// ------------ Voice Packs ------------
+// Lets you pick which spoken languages to install for a game. Only appears for games that offer voice packs. A
+// newly picked pack downloads on the next update, or right away if the game is installed.
+const knownSupport = new Map<string, boolean>();
+
+const knownPacks = (gameId: string) => {
+  const list = recall(reads.contentPacks(gameId));
+  return list && !list.error ? list : null;
+};
+
+function VoicePackPanel({ gameId }: { gameId: string }) {
+  const t = useT();
+  const [packs, setPacks] = useState<ContentPack[] | null>(() => {
+    const known = knownPacks(gameId);
+    return known?.supported ? known.packs : null;
+  });
+  const [loading, setLoading] = useState(() => !knownPacks(gameId));
+  const [failed, setFailed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const seq = useRef(0);
+
+  const load = useCallback(() => {
+    const id = ++seq.current;
+    const read = reads.contentPacks(gameId);
+    const known = knownPacks(gameId);
+    setPacks(known?.supported ? known.packs : null);
+    setLoading(!known);
+    setFailed(false);
+    void fetchRemembered(read).then((r) => {
+      if (id !== seq.current) return;
+      knownSupport.set(gameId, r.supported);
+      setPacks(r.supported && !r.error ? r.packs : null);
+      setFailed(r.error);
+      setLoading(false);
+    });
+  }, [gameId]);
+
+  useEffect(() => {
+    const s = seq;
+    load();
+    return () => {
+      s.current++;
+    };
+  }, [load]);
+
+  if (loading) {
+    if (!knownSupport.get(gameId)) return null;
+    return (
+      <SettingCard
+        icon={<Languages size={18} />}
+        title={t("common.voicePacks")}
+        description={t("settings.voicePacks.loading")}
+      />
+    );
+  }
+
+  if (failed) {
+    return (
+      <SettingCard
+        icon={<Languages size={18} />}
+        title={t("common.voicePacks")}
+        description={t("settings.voicePacks.loadFailed")}
+        control={
+          <ActionButton onClick={load} icon={<RefreshCw size={13} />}>
+            {t("common.retry")}
+          </ActionButton>
+        }
+      />
+    );
+  }
+
+  if (!packs || packs.length === 0) return null;
+
+  const selectedCount = packs.filter((p) => p.selected).length;
+
+  const apply = async (next: ContentPack[]) => {
+    const prev = packs;
+    setPacks(next);
+    setBusy(true);
+    try {
+      const chosen = next.filter((p) => p.selected).map((p) => p.tag);
+      const saved = await setContentPacks(gameId, chosen.length === next.length ? null : chosen);
+      if (saved) rememberAnswer(reads.contentPacks(gameId), { supported: true, packs: next, error: false });
+      else setPacks(prev);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggle = (tag: string, on: boolean) =>
+    void apply(packs.map((p) => (p.tag === tag ? { ...p, selected: on } : p)));
+
+  const total = packs.filter((p) => p.selected).reduce((sum, p) => sum + p.bytes, 0);
+
+  return (
+    <SettingsExpander
+      icon={<Languages size={18} />}
+      title={t("common.voicePacks")}
+      summary={
+        selectedCount === 0
+          ? t("settings.voicePacks.noneSelected")
+          : t("settings.voicePacks.selectedSummary", {
+              selected: selectedCount,
+              total: packs.length,
+              size: fmtBytes(total),
+            })
+      }
+      description={t("settings.voicePacks.description")}
+      control={
+        <ActionButton
+          onClick={() => void apply(packs.map((p) => ({ ...p, selected: true })))}
+          disabled={busy || selectedCount === packs.length}
+          icon={<ListChecks size={13} />}
+        >
+          {t("settings.voicePacks.selectAll")}
+        </ActionButton>
+      }
+    >
+      {packs.map((pack) => (
+        <SettingCard
+          key={pack.tag}
+          icon={<Volume2 size={18} />}
+          title={pack.language ?? pack.tag}
+          description={
+            pack.language
+              ? t("settings.voicePacks.packDetailsTagged", {
+                  tag: pack.tag,
+                  size: fmtBytes(pack.bytes),
+                  count: pack.files,
+                })
+              : t("settings.voicePacks.packDetails", { size: fmtBytes(pack.bytes), count: pack.files })
+          }
+          control={
+            <Toggle
+              checked={pack.selected}
+              disabled={busy}
+              ariaLabel={pack.language ?? pack.tag}
+              onChange={(v) => toggle(pack.tag, v)}
+            />
+          }
+        />
+      ))}
+    </SettingsExpander>
+  );
+}
+
+// ------------ FPS Unlock ------------
+// The frame rate unlock settings for games that cap at 60. Has the on/off switch, a target frame rate, a lower
+// cap while tabbed out and a live status while the game starts. Only appears for games that support it.
+const MIN_FPS = 30;
+const MAX_FPS = 360;
+const FPS_STEP = 10;
+const FPS_TICKS = [String(MIN_FPS), String(MAX_FPS)];
+
+const BACKGROUND_PRESETS = ["off", "10", "30", "60"];
+
+const STATUS: Partial<Record<FpsUnlockState, { label: TKey; tone: "accent" | "danger" }>> = {
+  launching: { label: "settings.fpsUnlock.status.launching", tone: "accent" },
+  attaching: { label: "settings.fpsUnlock.status.attaching", tone: "accent" },
+  locating: { label: "settings.fpsUnlock.status.locating", tone: "accent" },
+  ready: { label: "settings.fpsUnlock.status.ready", tone: "accent" },
+  failed: { label: "common.failed", tone: "danger" },
+};
+
+function StatusPill({ state }: { state: FpsUnlockState }) {
+  const t = useT();
+  const status = STATUS[state];
+  if (!status) return null;
+  const danger = status.tone === "danger";
+  return (
+    <span
+      className="rounded-full px-[8px] py-[3px] text-[10px] font-medium uppercase tracking-[0.08em]"
+      style={
+        danger
+          ? {
+              background: "rgba(239,68,68,0.14)",
+              color: "#fca5a5",
+              border: "1px solid rgba(239,68,68,0.28)",
+            }
+          : {
+              background: "rgba(var(--accent-b-rgb), 0.14)",
+              color: "var(--accent-text)",
+              border: "1px solid rgba(var(--accent-b-rgb), 0.28)",
+            }
+      }
+    >
+      {t(status.label)}
+    </span>
+  );
+}
+
+function FpsUnlockPanel({ gameId, gameName }: { gameId: string; gameName: string }) {
+  const t = useT();
+  const [loaded, setLoaded] = useState<{ gameId: string; config: FpsUnlock } | null>(null);
+  const shown = loaded?.gameId === gameId ? loaded.config : recall(reads.fpsUnlock(gameId));
+  const ready = shown !== null;
+
+  const setConfig = (change: (current: FpsUnlock) => FpsUnlock) =>
+    setLoaded((current) => {
+      const base = current?.gameId === gameId ? current.config : recall(reads.fpsUnlock(gameId));
+      return base ? { gameId, config: change(base) } : current;
+    });
+
+  useEffect(() => {
+    let alive = true;
+    void fetchRemembered(reads.fpsUnlock(gameId)).then((next) => {
+      if (alive) setLoaded({ gameId, config: next });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [gameId]);
+
+  useTauriEvent(onFpsUnlockStatus, (status) => {
+    if (status.gameId !== gameId) return;
+    const attached = status.state !== "idle" && status.state !== "failed";
+    setConfig((current) => ({
+      ...current,
+      session: { state: status.state, error: status.error },
+      appliesNextLaunch: attached ? false : current.appliesNextLaunch,
+    }));
+  });
+
+  useTauriEvent(onGameStopped, (id) => {
+    if (id !== gameId) return;
+    setConfig((current) => ({ ...current, appliesNextLaunch: false }));
+  });
+
+  if (ready && !shown.supported) return null;
+  const config = shown?.supported ? shown : null;
+  const enabled = !!config?.enabled;
+
+  const update = (patch: FpsUnlockPatch) => {
+    setConfig((current) => ({ ...current, ...patch }));
+    if (shown) rememberAnswer(reads.fpsUnlock(gameId), { ...shown, ...patch });
+    void setFpsUnlock(gameId, patch).then((appliesNextLaunch) => {
+      if (appliesNextLaunch === undefined) return;
+      setConfig((current) => ({ ...current, appliesNextLaunch }));
+    });
+  };
+
+  const setTargetFps = (value: number) => {
+    const clamped = Math.min(Math.max(value, MIN_FPS), MAX_FPS);
+    if (clamped !== config?.targetFps) update({ targetFps: clamped });
+  };
+
+  const failure =
+    ready && config?.session.state === "failed" ? config.session.error : null;
+
+  return (
+    <>
+      <SettingCard
+        icon={<Gauge size={18} />}
+        title={t("settings.fpsUnlock.title")}
+        badge={ready && config ? <StatusPill state={config.session.state} /> : undefined}
+        description={t("settings.fpsUnlock.description", { game: gameName })}
+        control={
+          <Toggle
+            checked={enabled}
+            disabled={!ready}
+            ariaLabel={t("settings.fpsUnlock.title")}
+            onChange={(on) => update({ enabled: on })}
+          />
+        }
+      />
+
+      <Collapse open={!!config && enabled}>
+        {config && (
+          <div className="bg-black/[0.14]">
+            {failure && (
+              <div className="px-5 py-3">
+                <p className="text-[12.5px] leading-snug text-danger-soft">{failure}</p>
+              </div>
+            )}
+
+            {ready && config.appliesNextLaunch && (
+              <div className="px-5 py-3">
+                <p className="text-[12.5px] leading-snug text-white/55">
+                  {t("settings.fpsUnlock.nextLaunch", { game: gameName })}
+                </p>
+              </div>
+            )}
+
+            <SettingCard
+              icon={<Target size={18} />}
+              title={t("settings.fpsUnlock.capTitle")}
+              description={t("settings.fpsUnlock.capDescription")}
+              disabled={!ready}
+              control={
+                <Slider
+                  min={MIN_FPS}
+                  max={MAX_FPS}
+                  step={FPS_STEP}
+                  value={config.targetFps}
+                  onChange={setTargetFps}
+                  unit={t("settings.fpsUnlock.fpsUnit")}
+                  ticks={FPS_TICKS}
+                  ariaLabel={t("settings.fpsUnlock.capTitle")}
+                />
+              }
+            />
+
+            <SettingCard
+              icon={<MonitorOff size={18} />}
+              title={t("settings.fpsUnlock.tabbedOut")}
+              description={t("settings.fpsUnlock.tabbedOutDescription")}
+              disabled={!ready}
+              control={
+                <SegmentedControl
+                  ariaLabel={t("settings.fpsUnlock.tabbedOutAria")}
+                  options={BACKGROUND_PRESETS.map((value) => ({
+                    value,
+                    label: value === "off" ? t("settings.fpsUnlock.noCap") : value,
+                  }))}
+                  value={config.powerSave ? String(config.backgroundFps) : "off"}
+                  onChange={(value) =>
+                    value === "off"
+                      ? update({ powerSave: false })
+                      : update({ powerSave: true, backgroundFps: Number(value) })
+                  }
+                />
+              }
+            />
+          </div>
+        )}
+      </Collapse>
+    </>
   );
 }

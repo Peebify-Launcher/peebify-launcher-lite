@@ -60,7 +60,7 @@ fn main() {
     };
     let from_launcher = Signal::open_or_create(SIGNAL_TO_HELPER).ok();
 
-    let mut registrations = Registrations::new();
+    let mut registrations = Registrations::default();
 
     hotkeys::allow_foreground(launcher_pid);
     registrations.sync(shared);
@@ -96,7 +96,7 @@ fn main() {
         registrations.sync(shared);
         if hotkeys::pump(shared) {
             hotkeys::allow_foreground(launcher_pid);
-            hotkeys::notify(&to_launcher);
+            to_launcher.raise();
         }
 
         shared.sample_seq.fetch_add(1, Ordering::Release);

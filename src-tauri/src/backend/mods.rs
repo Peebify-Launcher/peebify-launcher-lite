@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
-use super::state::BackendState;
+use super::fs_util::{self, dialog::Pick};
+use super::BackendState;
 use super::{arg_str, err_response, game_profiles, ok_response, ok_with, resolve_profile, xxmi};
 
 const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
@@ -38,7 +39,7 @@ fn progress_due(
     true
 }
 
-pub(super) fn publish_progress(app: &AppHandle, game_id: &str, message: &str, percent: f64) {
+pub(crate) fn publish_progress(app: &AppHandle, game_id: &str, message: &str, percent: f64) {
     let done = !(0.0..100.0).contains(&percent);
 
     if !progress_due(
@@ -63,7 +64,7 @@ pub(super) fn publish_progress(app: &AppHandle, game_id: &str, message: &str, pe
     );
 }
 
-pub(super) fn finish_progress(app: &AppHandle, game_id: &str, failed: bool) {
+pub(crate) fn finish_progress(app: &AppHandle, game_id: &str, failed: bool) {
     publish_progress(app, game_id, "", if failed { -1.0 } else { 100.0 });
 }
 
@@ -82,7 +83,7 @@ const LIBRARY_FILE: &str = "library.json";
 
 const ROOTS_KEY: &str = "_roots";
 
-const PARKED_KEY: &str = "_parked";
+pub(crate) const PARKED_KEY: &str = "_parked";
 
 const REPLACED_PREFIX: &str = ".peebify-old-";
 
@@ -97,7 +98,7 @@ fn mods_root(app: &AppHandle) -> PathBuf {
     state.user_data.join("mods")
 }
 
-fn toolchain_root(app: &AppHandle) -> PathBuf {
+pub(crate) fn toolchain_root(app: &AppHandle) -> PathBuf {
     let state = app.state::<BackendState>();
     xxmi::root(&state.config, &state.user_data)
 }
@@ -127,7 +128,7 @@ pub fn active_for(app: &AppHandle, profile_id: &str, profile: &Value) -> bool {
     xxmi::variant_installed(&toolchain_root(app), variant)
 }
 
-fn variant_for(profile: &Value) -> Result<String, String> {
+pub(crate) fn variant_for(profile: &Value) -> Result<String, String> {
     game_profiles::mod_variant(profile)
         .map(str::to_string)
         .ok_or_else(|| {
@@ -138,12 +139,12 @@ fn variant_for(profile: &Value) -> Result<String, String> {
         })
 }
 
-fn is_disabled_folder(name: &str) -> bool {
+pub(crate) fn is_disabled_folder(name: &str) -> bool {
     name.get(..DISABLED_MARK.len())
         .is_some_and(|p| p.eq_ignore_ascii_case(DISABLED_MARK))
 }
 
-pub(super) fn display_name_of(folder: &str) -> &str {
+pub(crate) fn display_name_of(folder: &str) -> &str {
     if is_disabled_folder(folder) {
         folder[DISABLED_MARK.len()..].trim_start_matches([' ', '_', '-'])
     } else {
@@ -179,7 +180,7 @@ fn stored_mod_id(meta: Option<&Value>) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-fn mod_id_of(game_id: &str, folder: &str, meta: Option<&Value>) -> String {
+pub(crate) fn mod_id_of(game_id: &str, folder: &str, meta: Option<&Value>) -> String {
     stored_mod_id(meta)
         .map(str::to_string)
         .unwrap_or_else(|| derived_mod_id(game_id, display_name_of(folder)))
@@ -232,7 +233,7 @@ fn library_path(app: &AppHandle) -> PathBuf {
 }
 
 fn library_root_key(app: &AppHandle) -> String {
-    comparable_path(&toolchain_root(app))
+    fs_util::normalize_path(&toolchain_root(app).to_string_lossy())
 }
 
 fn load_claimed_library(app: &AppHandle) -> Result<(Value, bool), String> {
@@ -242,7 +243,7 @@ fn load_claimed_library(app: &AppHandle) -> Result<(Value, bool), String> {
     Ok((library, claimed))
 }
 
-fn load_library(app: &AppHandle) -> Result<Value, String> {
+pub(crate) fn load_library(app: &AppHandle) -> Result<Value, String> {
     load_claimed_library(app).map(|(library, _)| library)
 }
 
@@ -324,78 +325,70 @@ fn pin_library_root(app: &AppHandle) {
     }
 }
 
-static LIBRARY_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+pub(crate) static LIBRARY_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
-fn write_library(app: &AppHandle, library: &Value) -> Result<(), String> {
+pub(crate) fn write_library(app: &AppHandle, library: &Value) -> Result<(), String> {
     let body = serde_json::to_string_pretty(library).map_err(|e| e.to_string())?;
     super::fs_util::write_atomic(&mods_root(app).join(LIBRARY_FILE), body.as_bytes())?;
     SIZING_FAILED.lock().clear();
     Ok(())
 }
 
-fn record_metadata(app: &AppHandle, game_id: &str, folder: &str, meta: Value) {
+fn update_library(app: &AppHandle, what: &str, edit: impl FnOnce(&mut Value) -> bool) {
     let _guard = LIBRARY_LOCK.lock();
+    update_library_locked(app, what, edit);
+}
+
+fn update_library_locked(app: &AppHandle, what: &str, edit: impl FnOnce(&mut Value) -> bool) {
     let mut library = match load_library(app) {
         Ok(library) => library,
         Err(e) => {
-            log::warn!("mods: could not record metadata for {folder}: {e}");
+            log::warn!("mods: could not {what}: {e}");
             return;
         }
     };
-    if !library[game_id].is_object() {
-        library[game_id] = json!({});
+    if edit(&mut library) {
+        if let Err(e) = write_library(app, &library) {
+            log::warn!("mods: could not {what}: {e}");
+        }
     }
-    library[game_id][folder] = meta;
-    if let Err(e) = write_library(app, &library) {
-        log::warn!("mods: could not record metadata for {folder}: {e}");
-    }
+}
+
+fn record_metadata(app: &AppHandle, game_id: &str, folder: &str, meta: Value) {
+    update_library(app, &format!("record metadata for {folder}"), |library| {
+        if !library[game_id].is_object() {
+            library[game_id] = json!({});
+        }
+        library[game_id][folder] = meta;
+        true
+    });
 }
 
 fn rename_metadata_locked(app: &AppHandle, game_id: &str, moves: &[Toggled]) {
     if moves.is_empty() {
         return;
     }
-    let mut library = match load_library(app) {
-        Ok(library) => library,
-        Err(e) => {
-            log::warn!("mods: could not re-key metadata for {game_id}: {e}");
-            return;
+    update_library_locked(app, &format!("re-key metadata for {game_id}"), |library| {
+        let Some(map) = library[game_id].as_object_mut() else {
+            return false;
+        };
+        let mut changed = false;
+        for m in moves {
+            if let Some(entry) = map.remove(&m.from) {
+                map.insert(m.to.clone(), entry);
+                changed = true;
+            }
         }
-    };
-    let Some(map) = library[game_id].as_object_mut() else {
-        return;
-    };
-    let mut changed = false;
-    for m in moves {
-        if let Some(entry) = map.remove(&m.from) {
-            map.insert(m.to.clone(), entry);
-            changed = true;
-        }
-    }
-    if changed {
-        if let Err(e) = write_library(app, &library) {
-            log::warn!("mods: could not re-key metadata for {game_id}: {e}");
-        }
-    }
+        changed
+    });
 }
 
 fn forget_metadata(app: &AppHandle, game_id: &str, folder: &str) {
-    let _guard = LIBRARY_LOCK.lock();
-    let mut library = match load_library(app) {
-        Ok(library) => library,
-        Err(e) => {
-            log::warn!("mods: could not forget the metadata of {folder}: {e}");
-            return;
-        }
-    };
-    let removed = library[game_id]
-        .as_object_mut()
-        .is_some_and(|map| map.remove(folder).is_some());
-    if removed {
-        if let Err(e) = write_library(app, &library) {
-            log::warn!("mods: could not forget the metadata of {folder}: {e}");
-        }
-    }
+    update_library(app, &format!("forget the metadata of {folder}"), |library| {
+        library[game_id]
+            .as_object_mut()
+            .is_some_and(|map| map.remove(folder).is_some())
+    });
 }
 
 const THUMBNAIL_CHECKED_KEY: &str = "thumbnailCheckedAt";
@@ -445,20 +438,9 @@ pub(super) fn set_mod_thumbnails(
     if thumbnails.is_empty() {
         return;
     }
-    let _guard = LIBRARY_LOCK.lock();
-    let mut library = match load_library(app) {
-        Ok(library) => library,
-        Err(e) => {
-            log::warn!("mods: could not save the thumbnails for {game_id}: {e}");
-            return;
-        }
-    };
-    if !apply_thumbnails(&mut library, game_id, thumbnails, chrono::Utc::now().timestamp()) {
-        return;
-    }
-    if let Err(e) = write_library(app, &library) {
-        log::warn!("mods: could not save the thumbnails for {game_id}: {e}");
-    }
+    update_library(app, &format!("save the thumbnails for {game_id}"), |library| {
+        apply_thumbnails(library, game_id, thumbnails, chrono::Utc::now().timestamp())
+    });
 }
 
 fn apply_thumbnails(
@@ -487,20 +469,6 @@ fn apply_thumbnails(
         changed = true;
     }
     changed
-}
-
-pub(crate) fn directory_size(path: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .map(|entry| match entry.metadata() {
-            Ok(meta) if meta.is_dir() => directory_size(&entry.path()),
-            Ok(meta) => meta.len(),
-            Err(_) => 0,
-        })
-        .sum()
 }
 
 fn size_of_meta(meta: Option<&Value>) -> Option<u64> {
@@ -535,7 +503,6 @@ struct Scan {
     mods: Vec<Value>,
     changed: bool,
     unmeasured: Vec<String>,
-    reassigned: Vec<(String, String)>,
     unreadable: Option<String>,
 }
 
@@ -634,17 +601,15 @@ fn assign_unique_ids(
     map: &mut serde_json::Map<String, Value>,
     folders: &[String],
     listed: bool,
-) -> (bool, Vec<(String, String)>) {
-    let mut used: std::collections::HashMap<String, String> = if listed {
-        std::collections::HashMap::new()
+) -> bool {
+    let mut used: std::collections::HashSet<String> = if listed {
+        std::collections::HashSet::new()
     } else {
         let present: std::collections::HashSet<&str> =
             folders.iter().map(String::as_str).collect();
         map.iter()
             .filter(|(folder, _)| !present.contains(folder.as_str()))
-            .filter_map(|(folder, meta)| {
-                stored_mod_id(Some(meta)).map(|id| (id.to_string(), folder.clone()))
-            })
+            .filter_map(|(_, meta)| stored_mod_id(Some(meta)).map(str::to_string))
             .collect()
     };
     let mut order: Vec<&String> = folders.iter().collect();
@@ -659,32 +624,20 @@ fn assign_unique_ids(
     });
 
     let mut changed = false;
-    let mut reassigned = Vec::new();
-    let mut members: std::collections::HashMap<String, std::collections::HashSet<String>> =
-        std::collections::HashMap::new();
     for folder in order {
         let stored = stored_mod_id(map.get(folder)).map(str::to_string);
         let wanted = stored
             .clone()
             .unwrap_or_else(|| derived_mod_id(game_id, display_name_of(folder)));
-        let keeper = used.get(&wanted).cloned();
-        let id = if keeper.is_some() {
+        let id = if used.contains(&wanted) {
             (0u32..)
                 .map(|attempt| folder_mod_id(game_id, folder, attempt))
-                .find(|id| !used.contains_key(id))
+                .find(|id| !used.contains(id))
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
         } else {
             wanted
         };
         if stored.as_deref() != Some(id.as_str()) {
-            if let (Some(old), Some(keeper)) = (stored, keeper.as_deref()) {
-                let shown = members.entry(old.clone()).or_insert_with(|| {
-                    std::collections::HashSet::from([display_name_of(keeper).to_lowercase()])
-                });
-                if shown.insert(display_name_of(folder).to_lowercase()) {
-                    reassigned.push((old, id.clone()));
-                }
-            }
             let entry = map
                 .entry(folder.clone())
                 .or_insert_with(|| json!({ "source": { "kind": "manual" } }));
@@ -694,9 +647,9 @@ fn assign_unique_ids(
             entry["modId"] = Value::String(id.clone());
             changed = true;
         }
-        used.insert(id, folder.clone());
+        used.insert(id);
     }
-    (changed, reassigned)
+    changed
 }
 
 fn scan_and_reconcile(game_id: &str, root: &str, mods_dir: &Path, library: &mut Value) -> Scan {
@@ -705,7 +658,6 @@ fn scan_and_reconcile(game_id: &str, root: &str, mods_dir: &Path, library: &mut 
     let mut changed = claim_game(library, game_id, root);
     let mut unmeasured = Vec::new();
     let mut mods = Vec::with_capacity(folders.len());
-    let mut reassigned = Vec::new();
 
     if !folders.is_empty() && !library[game_id].is_object() {
         library[game_id] = json!({});
@@ -715,9 +667,7 @@ fn scan_and_reconcile(game_id: &str, root: &str, mods_dir: &Path, library: &mut 
         if listed && rekey_renamed(map, &folders) {
             changed = true;
         }
-        let (ids_changed, moved) = assign_unique_ids(game_id, map, &folders, listed);
-        changed |= ids_changed;
-        reassigned = moved;
+        changed |= assign_unique_ids(game_id, map, &folders, listed);
         for folder in &folders {
             let meta = map.get(folder);
             if size_of_meta(meta).is_none() {
@@ -744,7 +694,6 @@ fn scan_and_reconcile(game_id: &str, root: &str, mods_dir: &Path, library: &mut 
         mods,
         changed,
         unmeasured,
-        reassigned,
         unreadable,
     }
 }
@@ -779,7 +728,7 @@ fn fill_sizes_in_background(app: &AppHandle, game_id: &str, mods_dir: PathBuf, f
         let sizes: Vec<(String, u64)> = tauri::async_runtime::spawn_blocking(move || {
             walked
                 .iter()
-                .map(|folder| (folder.clone(), directory_size(&mods_dir.join(folder))))
+                .map(|folder| (folder.clone(), super::fs_util::directory_size(&mods_dir.join(folder))))
                 .collect()
         })
         .await
@@ -1169,7 +1118,7 @@ fn check_unpack_budget(name: &str, unpacked: Unpacked, dirs: &[&Path]) -> Result
         ));
     }
     for dir in dirs {
-        super::download_engine::ensure_disk_space(dir, unpacked.bytes, 1.0, UNPACK_HEADROOM)?;
+        super::engine::ensure_disk_space(dir, unpacked.bytes, 1.0, UNPACK_HEADROOM)?;
     }
     Ok(())
 }
@@ -1222,19 +1171,6 @@ pub async fn install_archive(
     result
 }
 
-fn source_summary(source: &Value, archive_name: &str) -> String {
-    match (
-        source["kind"].as_str(),
-        source["gbModId"].as_u64(),
-        source["gbFileId"].as_u64(),
-    ) {
-        (Some("gamebanana"), Some(mod_id), Some(file_id)) => {
-            format!("GameBanana {mod_id}/{file_id}")
-        }
-        _ => archive_name.to_string(),
-    }
-}
-
 async fn extract_and_place(
     app: &AppHandle,
     game_id: &str,
@@ -1249,13 +1185,13 @@ async fn extract_and_place(
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "the archive".to_string());
-    let seven_zip = super::download_engine::resolve_bundled_7z_binary(app).await?;
+    let seven_zip = super::extract::resolve_bundled_7z_binary(app).await?;
     log::info!("Extracting {name} with {}", seven_zip.display());
     let unpacked = archive_unpacked_size(&seven_zip, archive)
         .await
         .map_err(|e| format!("Could not read {name}: {e}"))?;
     check_unpack_budget(&name, unpacked, &[staging, mods_dir])?;
-    super::download_engine::run_7z_extract(&seven_zip, archive, staging, |p| {
+    super::extract::run_7z_extract(&seven_zip, archive, staging, |p| {
         if let Some((message, from, to)) = options.progress {
             let percent = from + (to - from) * (p.clamp(0.0, 100.0) / 100.0);
             publish_progress(app, game_id, message, percent.clamp(1.0, 99.0));
@@ -1317,9 +1253,7 @@ async fn extract_and_place(
     }
 
     log::info!(
-        "mods: installed {:?} for {game_id} from {} ({total_bytes} bytes, {} ms)",
-        installed,
-        source_summary(&source, &name),
+        "mods: installed {installed:?} for {game_id} from {name} ({total_bytes} bytes, {} ms)",
         started.elapsed().as_millis()
     );
     Ok(installed)
@@ -1373,7 +1307,7 @@ fn place_extracted(
             take_back_placed(mods_dir, &placed);
             return Err(e);
         }
-        let size = directory_size(&target);
+        let size = super::fs_util::directory_size(&target);
         let relative = root_path
             .strip_prefix(staging)
             .map(|p| p.to_string_lossy().replace('\\', "/"))
@@ -1423,10 +1357,7 @@ pub(super) async fn mods_status(app: &AppHandle, args: &[Value]) -> Result<Value
             let variant = game_profiles::mod_variant(p)?;
             Some(json!({
                 "id": id,
-                "displayName": game_profiles::display_name(p),
                 "variant": variant,
-                "experimental": game_profiles::mod_is_experimental(p),
-                "forcesDx11": !game_profiles::mod_force_dx11_args(p).is_empty(),
                 "gameBananaId": game_profiles::mod_gamebanana_id(p),
                 "installed": xxmi::variant_installed(&root, variant),
                 "enabled": config.get(&format!("games.{id}.modsEnabled")) == Value::Bool(true),
@@ -1449,217 +1380,22 @@ pub(super) async fn mods_status(app: &AppHandle, args: &[Value]) -> Result<Value
         "gameEnabled": active_for(app, &profile_id, profile),
         "gameId": profile_id,
         "supportsMods": game_profiles::mod_config(profile).is_some(),
-        "unsupportedReason": Value::Null,
         "experimental": game_profiles::mod_is_experimental(profile),
         "forcesDx11": !game_profiles::mod_force_dx11_args(profile).is_empty(),
         "variant": variant,
         "toolchainInstalled": installed,
         "toolchainPath": root.to_string_lossy(),
-        "isDefault": comparable_path(&root)
-            == comparable_path(&xxmi::default_root(&app.state::<BackendState>().user_data)),
+        "isDefault": fs_util::same_path(
+            &root.to_string_lossy(),
+            &xxmi::default_root(&app.state::<BackendState>().user_data).to_string_lossy(),
+        ),
         "versions": Value::Object(versions),
-        "updates": variant
-            .map(|v| super::xxmi_update::updates_available(&root, &[xxmi::CORE_KEY, v]))
-            .unwrap_or_default(),
-        "autoUpdate": config.get("behavior.modsAutoUpdate") != Value::Bool(false),
+        "toolsInstalling": super::xxmi::installing(),
         "supportedGames": supported,
     })))
 }
 
-pub(super) async fn install_mod_toolchain(
-    app: &AppHandle,
-    args: &[Value],
-) -> Result<Value, String> {
-    if !master_enabled(app) {
-        return Ok(err_response("Turn on mod support first."));
-    }
-    let profile = resolve_profile(app, arg_str(args, 0));
-    let profile_id = game_profiles::profile_id(profile).to_string();
-    let variant = match variant_for(profile) {
-        Ok(v) => v,
-        Err(e) => return Ok(err_response(e)),
-    };
-    let root = toolchain_root(app);
-
-    let Some(_guard) = xxmi::try_lock_variant(&variant) else {
-        return Ok(err_response(
-            "The mod tools for this game are already installing.",
-        ));
-    };
-
-    publish_progress(
-        app,
-        &profile_id,
-        "Checking for the latest mod tools...",
-        1.0,
-    );
-
-    let result = {
-        let _update = super::xxmi_update::UPDATE_LOCK.lock().await;
-        let busy = if xxmi::core_installed(&root) {
-            super::xxmi_update::in_use_reason(app)
-        } else {
-            None
-        };
-        if let Some(reason) = busy {
-            finish_progress(app, &profile_id, true);
-            return Ok(err_response(reason));
-        }
-        xxmi::ensure_variant(app, &root, &variant, true, |package, percent| {
-            publish_progress(
-                app,
-                &profile_id,
-                &format!("Installing {}...", package.to_uppercase()),
-                percent.clamp(1.0, 99.0),
-            );
-        })
-        .await
-    };
-
-    match result {
-        Ok(changed) => {
-            finish_progress(app, &profile_id, false);
-            let versions = xxmi::installed_versions(&root);
-            Ok(ok_with(json!({
-                "variant": variant,
-                "changed": changed,
-                "version": versions.get(&variant).cloned().unwrap_or_default(),
-            })))
-        }
-        Err(e) => {
-            if e.starts_with(TOOLCHAIN_CHECK_FAILED) {
-                log::warn!("mods: toolchain update check failed: {e}");
-            } else {
-                log::error!("mods: toolchain install failed: {e}");
-            }
-            finish_progress(app, &profile_id, true);
-            Ok(err_response(e))
-        }
-    }
-}
-
-const TOOLCHAIN_CHECK_FAILED: &str = "Couldn't check the mod tools for updates";
-
-pub(super) async fn uninstall_mod_toolchain(
-    app: &AppHandle,
-    args: &[Value],
-) -> Result<Value, String> {
-    let root = toolchain_root(app);
-    let owns_root = root == xxmi::default_root(&app.state::<BackendState>().user_data);
-
-    let _update = super::xxmi_update::UPDATE_LOCK.lock().await;
-    if let Some(reason) = toolchain_busy_reason(app) {
-        return Ok(err_response(reason));
-    }
-    let busy = || err_response("The mod tools are busy. Try again in a moment.");
-
-    if let Some(game_id) = arg_str(args, 0) {
-        let profile = game_profiles::profile(game_id);
-        let Some(variant) = game_profiles::mod_variant(profile) else {
-            return Ok(err_response(format!(
-                "{} can't use mods.",
-                game_profiles::display_name(profile)
-            )));
-        };
-        let Some(_guards) = lock_packages(&[xxmi::CORE_KEY, variant]) else {
-            return Ok(busy());
-        };
-        let blocking_root = root.clone();
-        let blocking_variant = variant.to_string();
-        let result = match tauri::async_runtime::spawn_blocking(move || {
-            xxmi::uninstall_variant(&blocking_root, &blocking_variant, owns_root)
-        })
-        .await
-        .map_err(|e| e.to_string())
-        .and_then(|r| r)
-        {
-            Ok(result) => result,
-            Err(e) => return Ok(err_response(e)),
-        };
-        disable_mods_for_variant(app, Some(variant));
-        let swept = sweep_game_dirs_for(app, profile);
-        let kept_list: Vec<String> = if result.kept.is_empty() {
-            Vec::new()
-        } else {
-            vec![game_id.to_string()]
-        };
-        return Ok(ok_with(json!({
-            "keptMods": kept_list,
-            "sweptFiles": swept,
-            "leftovers": result.leftovers,
-        })));
-    }
-
-    let mut packages: Vec<&str> = vec![xxmi::CORE_KEY];
-    packages.extend(
-        game_profiles::GAME_IDS
-            .iter()
-            .filter_map(|id| game_profiles::mod_variant(game_profiles::profile(id))),
-    );
-    packages.sort_unstable();
-    packages.dedup();
-    let Some(_guards) = lock_packages(&packages) else {
-        return Ok(busy());
-    };
-    let blocking_root = root.clone();
-    let result = match tauri::async_runtime::spawn_blocking(move || {
-        xxmi::uninstall(&blocking_root, owns_root)
-    })
-    .await
-    .map_err(|e| e.to_string())
-    .and_then(|r| r)
-    {
-        Ok(result) => result,
-        Err(e) => return Ok(err_response(e)),
-    };
-    disable_mods_for_variant(app, None);
-    let swept = sweep_all_game_dirs(app);
-    Ok(ok_with(json!({
-        "keptMods": result.kept,
-        "sweptFiles": swept,
-        "leftovers": result.leftovers,
-    })))
-}
-
-fn lock_packages(packages: &[&str]) -> Option<Vec<xxmi::InstallGuard>> {
-    packages
-        .iter()
-        .map(|package| xxmi::try_lock_variant(package))
-        .collect()
-}
-
-fn toolchain_busy_reason(app: &AppHandle) -> Option<String> {
-    let state = app.state::<BackendState>();
-    for id in game_profiles::GAME_IDS {
-        let profile = game_profiles::profile(id);
-        if state.game.is_game_running_id(id) && active_for(app, id, profile) {
-            return Some(format!(
-                "Close {} before removing the mod tools.",
-                game_profiles::display_name(profile)
-            ));
-        }
-    }
-    xxmi::loader_active().then(|| {
-        "A modded game is still starting. Remove the mod tools once it has closed.".to_string()
-    })
-}
-
-fn disable_mods_for_variant(app: &AppHandle, variant: Option<&str>) {
-    for id in game_profiles::GAME_IDS {
-        let profile = game_profiles::profile(id);
-        let Some(v) = game_profiles::mod_variant(profile) else {
-            continue;
-        };
-        if variant.is_some_and(|want| want != v) {
-            continue;
-        }
-        app.state::<BackendState>()
-            .config
-            .set(&format!("games.{id}.modsEnabled"), json!(false));
-    }
-}
-
-pub(super) async fn set_game_mods_enabled(
+pub(crate) async fn set_game_mods_enabled(
     app: &AppHandle,
     args: &[Value],
 ) -> Result<Value, String> {
@@ -1677,56 +1413,21 @@ pub(super) async fn set_game_mods_enabled(
         .config
         .set(&format!("games.{profile_id}.modsEnabled"), json!(enabled));
 
-    let swept = if enabled {
-        Vec::new()
-    } else {
-        sweep_game_dirs_for(app, profile)
-    };
     log::info!(
         "mods: {} for {profile_id}",
         if enabled { "enabled" } else { "disabled" }
     );
-    Ok(ok_with(json!({ "enabled": enabled, "sweptFiles": swept })))
-}
-
-fn sweep_game_dirs_for(app: &AppHandle, profile: &Value) -> Vec<String> {
-    let profile_id = game_profiles::profile_id(profile);
-    let state = app.state::<BackendState>();
-    let Value::String(path) = state.config.get(&format!("games.{profile_id}.gamePath")) else {
-        return Vec::new();
-    };
-    if path.is_empty() {
-        return Vec::new();
-    }
-
-    let root = PathBuf::from(&path);
-    let mut dirs = vec![root.clone()];
-    if let Some(parent) = super::game_path::launch_executable_path(&root, profile).parent() {
-        if parent != root {
-            dirs.push(parent.to_path_buf());
-        }
-    }
-    xxmi::sweep_game_dirs(&dirs)
-}
-
-fn sweep_all_game_dirs(app: &AppHandle) -> Vec<String> {
-    game_profiles::GAME_IDS
-        .iter()
-        .map(|id| game_profiles::profile(id))
-        .filter(|p| game_profiles::mod_config(p).is_some())
-        .flat_map(|p| sweep_game_dirs_for(app, p))
-        .collect()
+    Ok(ok_with(json!({ "enabled": enabled })))
 }
 
 pub(super) async fn list_mods(app: &AppHandle, args: &[Value]) -> Result<Value, String> {
     let profile = resolve_profile(app, arg_str(args, 0));
     let profile_id = game_profiles::profile_id(profile).to_string();
     let Ok(variant) = variant_for(profile) else {
-        return Ok(ok_with(json!({ "mods": [], "supportsMods": false })));
+        return Ok(ok_with(json!({ "mods": [] })));
     };
 
-    let root = toolchain_root(app);
-    let mods_dir = xxmi::mods_dir(&root, &variant);
+    let mods_dir = xxmi::mods_dir(&toolchain_root(app), &variant);
     let scanned = {
         let app = app.clone();
         let profile_id = profile_id.clone();
@@ -1734,12 +1435,8 @@ pub(super) async fn list_mods(app: &AppHandle, args: &[Value]) -> Result<Value, 
         tauri::async_runtime::spawn_blocking(move || -> Result<Scan, String> {
             let _guard = LIBRARY_LOCK.lock();
             let (mut library, claimed) = load_claimed_library(&app)?;
-            let scan = scan_and_reconcile(&profile_id, &comparable_path(&root), &mods_dir, &mut library);
-            let profiles_follow = super::mod_profiles::split_mod_ids(&app, &profile_id, &scan.reassigned);
-            if let Err(e) = &profiles_follow {
-                log::warn!("mods: could not give {profile_id}'s profiles the new mod ids, so the library keeps the shared ones for now: {e}");
-            }
-            if (scan.changed || claimed) && profiles_follow.is_ok() {
+            let scan = scan_and_reconcile(&profile_id, &library_root_key(&app), &mods_dir, &mut library);
+            if scan.changed || claimed {
                 if let Err(e) = write_library(&app, &library) {
                     log::warn!("mods: could not reconcile the library for {profile_id}: {e}");
                 }
@@ -1766,13 +1463,7 @@ pub(super) async fn list_mods(app: &AppHandle, args: &[Value]) -> Result<Value, 
     if !scan.unmeasured.is_empty() {
         fill_sizes_in_background(app, &profile_id, mods_dir.clone(), scan.unmeasured);
     }
-    let mods = scan.mods;
-
-    Ok(ok_with(json!({
-        "mods": mods,
-        "supportsMods": true,
-        "modsPath": mods_dir.to_string_lossy(),
-    })))
+    Ok(ok_with(json!({ "mods": scan.mods })))
 }
 
 pub(super) async fn import_mod_archive(app: &AppHandle, args: &[Value]) -> Result<Value, String> {
@@ -1786,42 +1477,22 @@ pub(super) async fn import_mod_archive(app: &AppHandle, args: &[Value]) -> Resul
         Err(e) => return Ok(err_response(e)),
     };
 
-    let mut paths: Vec<String> = args
-        .get(1)
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut paths = super::mod_profiles::string_list(args.get(1));
     let from_renderer = !paths.is_empty();
 
     if paths.is_empty() {
-        let picked = crate::backend::fs_util::dialog::show_open(
+        paths = crate::backend::fs_util::dialog::pick_files(
             app,
-            json!({
-                "title": "Choose mod archives",
-                "multiple": true,
-                "filters": [{ "name": "Mod archive", "extensions": ["zip", "7z", "rar"] }],
-            }),
+            Pick {
+                title: "Choose mod archives".into(),
+                filters: &[("Mod archive", &["zip", "7z", "rar"])],
+                ..Pick::default()
+            },
         )
         .await?;
-        if picked["canceled"] == Value::Bool(true) {
+        if paths.is_empty() {
             return Ok(json!({ "success": false, "cancelled": true }));
         }
-        paths = picked["filePaths"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-    }
-
-    if paths.is_empty() {
-        return Ok(err_response("No archive was selected."));
     }
 
     let mut installed = Vec::new();
@@ -1926,7 +1597,7 @@ pub(super) struct Toggled {
     pub to: String,
 }
 
-pub(super) struct ModView {
+pub(crate) struct ModView {
     pub mod_id: String,
     pub folder: String,
     pub enabled: bool,
@@ -1936,22 +1607,7 @@ pub(super) struct ModView {
 // Toggling a mod renames its folder, which Windows can refuse while a file is in use, so it retries a few times.
 // This part also has the snapshot helpers other modules use, plus replace, bulk toggle and delete.
 fn rename_with_retry(from: &Path, to: &Path) -> Result<(), String> {
-    let mut last = String::new();
-    for attempt in 0..4 {
-        match std::fs::rename(from, to) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                last = e.to_string();
-                if e.kind() != std::io::ErrorKind::PermissionDenied {
-                    break;
-                }
-            }
-        }
-        if attempt < 3 {
-            std::thread::sleep(std::time::Duration::from_millis(80));
-        }
-    }
-    Err(last)
+    super::fs_util::retry_while_locked(|| std::fs::rename(from, to)).map_err(|e| e.to_string())
 }
 
 #[derive(Debug)]
@@ -2029,7 +1685,7 @@ pub(super) fn mod_ids_for_folders(
         .collect()
 }
 
-pub(super) struct GbEntry {
+pub(crate) struct GbEntry {
     pub folder: String,
     pub mod_id: String,
     pub name: String,
@@ -2040,7 +1696,7 @@ pub(super) struct GbEntry {
     pub enabled: bool,
 }
 
-pub(super) fn gamebanana_entries(app: &AppHandle, game_id: &str) -> Vec<GbEntry> {
+pub(crate) fn gamebanana_entries(app: &AppHandle, game_id: &str) -> Vec<GbEntry> {
     let Ok(mods_dir) = mods_dir_for(app, game_id) else {
         return Vec::new();
     };
@@ -2263,7 +1919,25 @@ fn swap_in(holder: &Path, folder: &str, old: &Path, new: &Path) -> Result<(), St
     Ok(())
 }
 
-pub(super) fn mods_dir_for(app: &AppHandle, game_id: &str) -> Result<PathBuf, String> {
+pub(super) fn storage_dir(app: &AppHandle, game_id: &str) -> Option<(PathBuf, usize, usize)> {
+    let dir = mods_dir_for(app, game_id).ok()?;
+    let (mut installed, mut enabled) = (0, 0);
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            installed += 1;
+            if !is_disabled_folder(&name) {
+                enabled += 1;
+            }
+        }
+    }
+    Some((dir, installed, enabled))
+}
+
+pub(crate) fn mods_dir_for(app: &AppHandle, game_id: &str) -> Result<PathBuf, String> {
     let variant = variant_for(game_profiles::profile(game_id))?;
     Ok(xxmi::mods_dir(&toolchain_root(app), &variant))
 }
@@ -2283,7 +1957,7 @@ pub(super) fn log_launch_state(app: &AppHandle, game_id: &str, profile: &Value) 
     );
 }
 
-pub(super) fn snapshot(app: &AppHandle, game_id: &str) -> Vec<ModView> {
+pub(crate) fn snapshot(app: &AppHandle, game_id: &str) -> Vec<ModView> {
     let Ok(mods_dir) = mods_dir_for(app, game_id) else {
         return Vec::new();
     };
@@ -2386,18 +2060,11 @@ pub(super) async fn set_mods_enabled_bulk(
     };
 
     let enabled = args.get(2) == Some(&Value::Bool(true));
-    let wanted: Vec<(String, bool)> = args
-        .get(1)
-        .and_then(Value::as_array)
-        .map(|folders| {
-            folders
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|f| !f.is_empty())
-                .map(|f| (f.to_string(), enabled))
-                .collect()
-        })
-        .unwrap_or_default();
+    let wanted: Vec<(String, bool)> = super::mod_profiles::string_list(args.get(1))
+        .into_iter()
+        .filter(|f| !f.is_empty())
+        .map(|f| (f, enabled))
+        .collect();
 
     if wanted.is_empty() {
         return Ok(err_response("No mods were specified."));
@@ -2577,7 +2244,7 @@ pub(super) async fn open_mods_folder(app: &AppHandle, args: &[Value]) -> Result<
             "The mod tools aren't installed yet, so there's no folder to open.",
         ));
     }
-    crate::backend::fs_util::dialog::open_path(json!({ "path": path.to_string_lossy() })).await?;
+    crate::backend::fs_util::dialog::open_folder(&path)?;
     Ok(ok_response())
 }
 
@@ -2594,20 +2261,16 @@ pub(super) async fn set_mods_path(app: &AppHandle, args: &[Value]) -> Result<Val
         ));
     }
 
-    let picked = crate::backend::fs_util::dialog::show_open(
+    let picked = crate::backend::fs_util::dialog::pick_folder(
         app,
-        json!({ "title": "Choose a folder for Peebify's mod tools", "directory": true }),
+        Pick {
+            title: "Choose a folder for Peebify's mod tools".into(),
+            ..Pick::default()
+        },
     )
     .await?;
-    if picked["canceled"] == Value::Bool(true) {
+    let Some(path) = picked.as_deref() else {
         return Ok(json!({ "success": false, "cancelled": true }));
-    }
-    let Some(path) = picked["filePaths"]
-        .as_array()
-        .and_then(|a| a.first())
-        .and_then(Value::as_str)
-    else {
-        return Ok(err_response("No folder was selected."));
     };
 
     let games: Vec<(String, PathBuf)> = game_profiles::GAME_IDS
@@ -2627,7 +2290,7 @@ pub(super) async fn set_mods_path(app: &AppHandle, args: &[Value]) -> Result<Val
         Ok(folder) => folder,
         Err(e) => return Ok(err_response(e)),
     };
-    if super::file_channels::is_protected_root(&folder) {
+    if super::game_profiles::is_protected_root(&folder) {
         return Ok(err_response(
             "Windows protects that folder. Pick one outside Program Files and the Windows folder.",
         ));
@@ -2643,17 +2306,6 @@ pub(super) async fn set_mods_path(app: &AppHandle, args: &[Value]) -> Result<Val
         .set("behavior.modsPath", Value::String(folder.clone()));
     log::info!("mods: toolchain path set to {folder} (picked {path})");
     Ok(ok_with(json!({ "path": folder })))
-}
-
-fn comparable_path(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('/', "\\")
-        .trim_end_matches('\\')
-        .to_lowercase()
-}
-
-fn path_within(inner: &str, outer: &str) -> bool {
-    inner == outer || inner.starts_with(&format!("{outer}\\"))
 }
 
 fn choose_toolchain_folder(
@@ -2675,22 +2327,21 @@ fn choose_toolchain_folder(
     } else {
         pick.to_path_buf()
     };
-    let target = comparable_path(&folder);
-    for (name, game) in games {
-        let game = comparable_path(game);
-        if !game.is_empty() && (path_within(&target, &game) || path_within(&game, &target)) {
-            return Err(format!(
-                "That folder overlaps the {name} install. Pick a folder outside your games for the mod tools."
-            ));
-        }
+    let target = folder.to_string_lossy();
+    let overlaps = |other: &Path| {
+        let other = other.to_string_lossy();
+        fs_util::is_same_or_inside(&target, &other) || fs_util::is_same_or_inside(&other, &target)
+    };
+    if let Some((name, _)) = games.iter().find(|(_, game)| overlaps(game)) {
+        return Err(format!(
+            "That folder overlaps the {name} install. Pick a folder outside your games for the mod tools."
+        ));
     }
-    if let Some(launcher) = launcher_dir.map(comparable_path).filter(|l| !l.is_empty()) {
-        if path_within(&target, &launcher) || path_within(&launcher, &target) {
-            return Err(
-                "That folder is part of Peebify's own install. Pick a different folder for the mod tools."
-                    .to_string(),
-            );
-        }
+    if launcher_dir.is_some_and(overlaps) {
+        return Err(
+            "That folder is part of Peebify's own install. Pick a different folder for the mod tools."
+                .to_string(),
+        );
     }
     Ok(folder)
 }
@@ -2727,25 +2378,16 @@ pub(super) async fn remove_game_mods(app: &AppHandle, profile: &Value) -> usize 
     .unwrap_or_default();
     super::mod_profiles::forget_mods(app, &profile_id, &removed_ids);
 
-    {
-        let _guard = LIBRARY_LOCK.lock();
-        match load_library(app) {
-            Ok(mut library) => {
-                if let Some(map) = library.as_object_mut() {
-                    map.remove(&profile_id);
-                }
-                if let Err(e) = write_library(app, &library) {
-                    log::warn!("mods: could not drop the library entries of {profile_id}: {e}");
-                }
-            }
-            Err(e) => log::warn!("mods: could not drop the library entries of {profile_id}: {e}"),
+    update_library(app, &format!("drop the library entries of {profile_id}"), |library| {
+        if let Some(map) = library.as_object_mut() {
+            map.remove(&profile_id);
         }
-    }
+        true
+    });
 
     log::info!("mods: removed {removed} mod(s) for {profile_id}");
     removed
 }
-
 
 // ------------ Mod Library Tests ------------
 // Unit tests for folder naming, archive roots and placement, progress throttling and the disabled-folder rules.
@@ -2779,7 +2421,7 @@ mod tests {
     }
 
     #[test]
-    fn progress_throttle_is_per_game() {
+    fn progress_throttle_is_per_game_and_never_holds_back_a_new_message() {
         let mut last = std::collections::BTreeMap::new();
         let start = std::time::Instant::now();
         assert!(progress_due(&mut last, "genshin", "a", false, start));
@@ -2789,17 +2431,7 @@ mod tests {
         assert!(progress_due(&mut last, "zzz", "a", true, start));
         assert!(!last.contains_key("zzz"));
         assert!(progress_due(&mut last, "zzz", "a", false, start));
-    }
-
-    #[test]
-    fn a_new_progress_message_is_never_throttled() {
-        let mut last = std::collections::BTreeMap::new();
-        let start = std::time::Instant::now();
-        assert!(progress_due(&mut last, "genshin", "Downloading X…", false, start));
-        assert!(!progress_due(&mut last, "genshin", "Downloading X…", false, start));
-        assert!(progress_due(&mut last, "genshin", "Verifying X…", false, start));
-        assert!(!progress_due(&mut last, "genshin", "Verifying X…", false, start));
-        assert!(progress_due(&mut last, "genshin", "Installing X…", false, start));
+        assert!(progress_due(&mut last, "zzz", "b", false, start));
     }
 
     #[cfg(windows)]
@@ -2870,16 +2502,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn comparable_path(path: &Path) -> String {
+        fs_util::normalize_path(&path.to_string_lossy())
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("peebify-mods-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    #[test]
-    fn a_drive_root_is_refused() {
-        assert!(choose_toolchain_folder(Path::new("D:\\"), &[], None).is_err());
     }
 
     #[test]
@@ -2909,6 +2540,7 @@ mod tests {
             dir.join(xxmi::OWN_SUBFOLDER)
         );
         assert!(choose_toolchain_folder(&dir, &[], Some(&dir)).is_err());
+        assert!(choose_toolchain_folder(Path::new("D:\\"), &[], None).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3203,7 +2835,6 @@ mod tests {
         assert_ne!(ids["Keqing"], ids["DISABLED_Keqing"]);
         assert_eq!(ids["Keqing"], derived_mod_id("genshin", "Keqing"));
         assert!(scan.changed);
-        assert!(scan.reassigned.is_empty());
         assert_eq!(
             library["genshin"]["DISABLED_Keqing"]["modId"],
             ids["DISABLED_Keqing"].as_str()
@@ -3219,7 +2850,7 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_stored_id_is_split_once_and_reported() {
+    fn a_shared_stored_id_is_split_once() {
         let (dir, root, mods) = mods_dir_with(
             "split-ids",
             &["Keqing", "DISABLED Keqing", "Raiden", "DISABLED Raiden", "Ellen"],
@@ -3246,14 +2877,9 @@ mod tests {
         assert_ne!(ids["Raiden"], ids["DISABLED Keqing"]);
         assert_ne!(ids["DISABLED Raiden"], shared);
         assert_ne!(ids["DISABLED Raiden"], ids["Raiden"]);
-        assert_eq!(scan.reassigned, vec![(shared.clone(), ids["Raiden"].clone())]);
         assert!(scan.changed);
 
-        let mut unsaved = original.clone();
-        let repeat = scan_and_reconcile("genshin", &root, &mods, &mut unsaved);
-        assert_eq!(repeat.reassigned, scan.reassigned);
         let after = scan_and_reconcile("genshin", &root, &mods, &mut library);
-        assert!(after.reassigned.is_empty());
         assert!(!after.changed);
         assert_eq!(ids_by_folder(&after), ids);
         let _ = std::fs::remove_dir_all(&dir);
@@ -3276,7 +2902,6 @@ mod tests {
         assert_eq!(ids["DISABLED Keqing"], "u1");
         assert_ne!(ids["Keqing"], "u1");
         assert_ne!(ids["Ellen"], "u1");
-        assert_eq!(scan.reassigned, vec![("u1".to_string(), ids["Ellen"].clone())]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3288,27 +2913,6 @@ mod tests {
         assert_eq!(claim_folder(&dir, "keqing").unwrap(), "keqing (3)");
         assert_eq!(claim_folder(&dir, "Ellen").unwrap(), "Ellen");
         assert!(dir.join("Ellen").is_dir());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_mod_is_placed_only_into_the_folder_it_claimed() {
-        let dir = scratch("claimed");
-        let mods = dir.join("Mods");
-        std::fs::create_dir_all(&mods).unwrap();
-        let first = claim_folder(&mods, "Keqing").unwrap();
-        let second = claim_folder(&mods, "Keqing").unwrap();
-        assert_eq!((first.as_str(), second.as_str()), ("Keqing", "Keqing (2)"));
-
-        let source = dir.join("staging").join("Keqing");
-        std::fs::create_dir_all(source.join("textures")).unwrap();
-        std::fs::write(source.join("mod.ini"), b"[x]").unwrap();
-        std::fs::write(source.join("textures").join("a.dds"), b"data").unwrap();
-        place_mod(&source, &mods.join(&second)).unwrap();
-        assert!(mods.join(&second).join("mod.ini").is_file());
-        assert!(mods.join(&second).join("textures").join("a.dds").is_file());
-        assert!(!source.exists());
-        assert!(copy_dir(&dir.join("staging"), &mods.join(&first)).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

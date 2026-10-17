@@ -14,7 +14,7 @@ vi.mock("../lib/ipc", () => ({
     return path.includes("locked") ? { ok: false, error: "locked" } : { ok: true };
   }),
 }));
-vi.mock("./notificationStore", () => ({
+vi.mock("./notifications", () => ({
   useNotificationStore: { getState: () => ({ push }) },
 }));
 

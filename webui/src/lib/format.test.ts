@@ -130,11 +130,8 @@ describe("fmtRelativeDays", () => {
   it("counts calendar days in local time rather than 24 hour spans", () => {
     const at = (d: number, h: number) => new Date(2026, 2, d, h).getTime();
     const secs = (ms: number) => ms / 1000;
-    // 23:00 last night seen at 09:00 is only ten hours old but was yesterday.
     expect(fmtRelativeDays(secs(at(14, 23)), at(15, 9))).toBe("yesterday");
-    // Earlier the same day.
     expect(fmtRelativeDays(secs(at(15, 0)), at(15, 23))).toBe("today");
-    // 30 hours old but two calendar days back.
     expect(fmtRelativeDays(secs(at(13, 23)), at(15, 5))).toBe("2d ago");
   });
 });

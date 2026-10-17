@@ -1,11 +1,19 @@
 // ------------ Toast Layer ------------
 // The small pop-up messages that appear for a few seconds when something happens. They pause while hovered or
-// focused, and errors stay a bit longer. Clicking one opens the notification panel.
-import { useEffect, useRef, type FocusEvent } from "react";
+// focused, and errors stay a bit longer. Clicking one opens the notification panel. Each one buds out of the
+// notification bell and goes back into it, so you can see where it went.
+import { useEffect, useRef, useState, type FocusEvent } from "react";
 import { AnimatePresence, m } from "framer-motion";
 import { X } from "lucide-react";
-import { useNotificationStore, type Notification } from "../../store/notificationStore";
-import { NOTIF_ICONS, NOTIF_ICON_COLORS } from "../../lib/notifIcons";
+import { springDrip, springPour, useReducedMotionSafe } from "../../lib/motion";
+import { notificationBellRef } from "./WindowControls";
+import {
+  useNotificationStore,
+  type Notification,
+  NOTIF_ICONS,
+  NOTIF_ICON_COLORS,
+} from "../../store/notifications";
+import { useT } from "../../lib/useT";
 
 const TOAST_MS = 5000;
 const ERROR_TOAST_MS = 8000;
@@ -15,7 +23,25 @@ type OpenHandler = (id: string) => void;
 
 const openPanel: OpenHandler = () => useNotificationStore.getState().setOpen(true);
 
+function bellOffset(): { x: number; y: number; scale: number; opacity: number } | null {
+  const bell = notificationBellRef.current?.getBoundingClientRect();
+  if (!bell || bell.width === 0) return null;
+  return {
+    x: bell.left + bell.width / 2 - (window.innerWidth - COLUMN_RIGHT),
+    y: bell.top + bell.height / 2 - COLUMN_TOP,
+    scale: 0.12,
+    opacity: 0,
+  };
+}
+
+const COLUMN_RIGHT = 14;
+const COLUMN_TOP = 56;
+const SLIDE_IN = { opacity: 0, x: 24 };
+
 function Toast({ n, onOpen }: { n: Notification; onOpen: OpenHandler }) {
+  const t = useT();
+  const reduce = useReducedMotionSafe();
+  const [from] = useState(() => (reduce ? null : bellOffset()));
   const duration = n.type === "error" ? ERROR_TOAST_MS : TOAST_MS;
   const timer = useRef<number | undefined>(undefined);
   const remaining = useRef(duration);
@@ -64,9 +90,23 @@ function Toast({ n, onOpen }: { n: Notification; onOpen: OpenHandler }) {
   return (
     <m.div
       layout
-      initial={{ opacity: 0, x: 24 }}
-      animate={{ opacity: 1, x: 0, transition: { duration: 0.2, ease: "easeOut" } }}
-      exit={{ opacity: 0, x: 24, transition: { duration: 0.18 } }}
+      style={{ transformOrigin: "100% 0%" }}
+      initial={from ?? SLIDE_IN}
+      animate={{
+        opacity: 1,
+        x: 0,
+        y: 0,
+        scale: 1,
+        transition: from
+          ? { default: springDrip, opacity: { duration: 0.14 } }
+          : { duration: 0.2, ease: "easeOut" },
+      }}
+      exit={{
+        ...(from ?? SLIDE_IN),
+        transition: from
+          ? { default: springPour, opacity: { duration: 0.18, delay: 0.16 } }
+          : { duration: 0.18 },
+      }}
       onMouseEnter={() => hold(hovered, true)}
       onMouseLeave={() => hold(hovered, false)}
       onFocus={() => hold(focused, true)}
@@ -101,7 +141,7 @@ function Toast({ n, onOpen }: { n: Notification; onOpen: OpenHandler }) {
       </div>
       <button
         onClick={() => useNotificationStore.getState().dismissToast(n.id)}
-        aria-label="Dismiss"
+        aria-label={t("common.dismiss")}
         className="grid h-[22px] w-[22px] shrink-0 place-items-center self-start rounded-md text-white/45 transition-colors hover:bg-white/10 hover:text-white"
       >
         <X size={12} />

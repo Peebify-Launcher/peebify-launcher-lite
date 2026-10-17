@@ -50,7 +50,7 @@ pub struct OverlayShared {
 pub const HOTKEY_TOGGLE: usize = 0;
 pub const HOTKEY_SHOT: usize = 1;
 pub const HOTKEY_RECORD: usize = 2;
-pub const HOTKEY_COUNT: usize = 4;
+pub const HOTKEY_COUNT: usize = 3;
 
 const _: () = assert!(core::mem::size_of::<OverlayShared>() <= SECTION_SIZE);
 
@@ -68,8 +68,8 @@ const _: () = {
     assert!(core::mem::offset_of!(OverlayShared, helper_protocol) == 20);
     assert!(core::mem::offset_of!(OverlayShared, _reserved_game_hwnd) == 24);
     assert!(core::mem::offset_of!(OverlayShared, stop) == 32);
-    assert!(core::mem::offset_of!(OverlayShared, _reserved_reload_epoch) == 72);
-    assert!(core::mem::offset_of!(OverlayShared, hotkey_epoch) == 76);
+    assert!(core::mem::offset_of!(OverlayShared, _reserved_reload_epoch) == 64);
+    assert!(core::mem::offset_of!(OverlayShared, hotkey_epoch) == 68);
 };
 
 impl OverlayShared {

@@ -1,39 +1,35 @@
 // ------------ XXMI Mod Loader ------------
 // The modding toolchain behind the Mods tab: one shared core (the 3DMigoto loader) plus a
 // package per game (GIMI, SRMI, ZZMI, WWMI, HIMI, EFMI). It installs and updates them,
-// keeps their settings file in order and starts the loader just before a game launches.
+// keeps their settings file in order, lets players change a few loader options, and starts the loader just before a
+// game launches. A background updater keeps the packages current.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+use peebify_helpers::mods::{describe_exit, Mode, EXE_NAME, EXIT_OK, EXIT_STOPPED, STOP_ALL_EVENT};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
-use super::{fs_util, game_profiles, http, process_utils, xxmi_update};
-use peebify_helpers::mods::{describe_exit, Mode, EXE_NAME, EXIT_OK, EXIT_STOPPED, STOP_ALL_EVENT};
+use super::extract::{resolve_7z_binary, run_7z_extract};
+use super::{
+    arg_str, err_response, fs_util, game_profiles, http, ok_with, process_utils, resolve_profile,
+    BackendState,
+};
 
 pub const LOADER_DLL: &str = "3dmloader.dll";
 pub const CORE_KEY: &str = "xxmi";
-pub const LOADER_LOG: &str = "loader.log";
 pub const VERSION_FILE: &str = "VERSION.txt";
-pub const OWNED_FILE: &str = "peebify-owned.json";
 pub const OWN_SUBFOLDER: &str = "Peebify XXMI";
 
 const CORE_LIBS: [&str; 2] = ["d3d11.dll", "d3dcompiler_47.dll"];
 const CORE_FILES: [&str; 3] = [LOADER_DLL, "d3d11.dll", "d3dcompiler_47.dll"];
-const LEGACY_FILES: [&str; 3] = ["Peebify Mod Loader.exe", "3dmloader.exe", "3dmloader.sha256"];
 
 const PRESERVE_ON_UPDATE: [&str; 3] = ["Mods", "ShaderCache", "d3dx_user.ini"];
-const KEEP_ON_UNINSTALL: [&str; 2] = ["Mods", "d3dx_user.ini"];
-const RUNTIME_LEFTOVERS: [&str; 5] = [
-    "Mods",
-    "d3dx_user.ini",
-    "ShaderCache",
-    "d3d11_log.txt",
-    "d3d11_profile_log.txt",
-];
 const XCMD_FILE: [&str; 2] = ["Core", "auto_update.xcmd"];
 const XCMD_ROOTS: [&str; 2] = ["Core", "ShaderFixes"];
 const ORPHAN_GRACE: Duration = Duration::from_secs(3);
@@ -48,7 +44,7 @@ const WATCH_SLACK: Duration = Duration::from_secs(240);
 
 // ------------ Folders And Records ------------
 // Where the toolchain lives on disk, which GitHub repo each package comes from, and the
-// small records of installed versions and files Peebify placed itself.
+// small record of installed versions.
 const PACKAGES: [(&str, &str); 7] = [
     (CORE_KEY, "SpectrumQT/XXMI-Libs-Package"),
     ("gimi", "SilentNightSound/GIMI-Package"),
@@ -116,190 +112,19 @@ pub fn installed_versions(root: &Path) -> BTreeMap<String, String> {
     out
 }
 
-pub(super) fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
-    let tmp = path.with_file_name(name);
-    let written = std::fs::File::create(&tmp).and_then(|mut file| {
-        file.write_all(bytes)?;
-        file.sync_all()
-    });
-    let result = written.and_then(|_| {
-        fs_util::finalize_replace(&tmp, path).map_err(std::io::Error::other)
-    });
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
-}
-
 fn write_versions(root: &Path, versions: &BTreeMap<String, String>) -> Result<(), String> {
     let body: String = versions.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
-    write_replacing(&root.join(VERSION_FILE), body.as_bytes())
-        .map_err(|e| format!("Could not write {VERSION_FILE}: {e}"))
-}
-
-fn read_owned(root: &Path) -> BTreeMap<String, BTreeSet<String>> {
-    std::fs::read_to_string(root.join(OWNED_FILE))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
-}
-
-fn write_owned(root: &Path, owned: &BTreeMap<String, BTreeSet<String>>) -> Result<(), String> {
-    let text = serde_json::to_string_pretty(owned).map_err(|e| e.to_string())?;
-    write_replacing(&root.join(OWNED_FILE), text.as_bytes())
-        .map_err(|e| format!("Could not write {OWNED_FILE}: {e}"))
-}
-
-pub fn record_owned(root: &Path, package: &str, names: &[String]) -> Result<(), String> {
-    let mut owned = read_owned(root);
-    owned
-        .entry(package.to_string())
-        .or_default()
-        .extend(names.iter().filter(|n| is_plain_name(n)).cloned());
-    write_owned(root, &owned)
-}
-
-fn forget_owned(root: &Path, package: &str) {
-    let mut owned = read_owned(root);
-    if owned.remove(package).is_some() {
-        if let Err(e) = write_owned(root, &owned) {
-            log::warn!("xxmi: {e}");
-        }
-    }
-}
-
-fn is_plain_name(name: &str) -> bool {
-    let mut components = Path::new(name).components();
-    matches!(components.next(), Some(std::path::Component::Normal(_)))
-        && components.next().is_none()
-        && !name.contains(':')
+    fs_util::write_atomic(&root.join(VERSION_FILE), body.as_bytes())
 }
 
 pub fn is_toolchain_folder(dir: &Path) -> bool {
-    dir.join(VERSION_FILE).is_file() || dir.join(OWNED_FILE).is_file()
+    dir.join(VERSION_FILE).is_file()
 }
 
 pub fn record_version(root: &Path, package: &str, version: &str) -> Result<(), String> {
     let mut versions = installed_versions(root);
     versions.insert(package.to_string(), version.to_string());
     write_versions(root, &versions)
-}
-
-const GAME_DIR_LEGACY_FILES: [&str; 4] = [LEGACY_FILES[0], LEGACY_FILES[1], LEGACY_FILES[2], LOADER_DLL];
-const MIGOTO_GAME_FILES: [&str; 5] = [
-    "d3d11.dll",
-    "d3dcompiler_47.dll",
-    "d3dx.ini",
-    "d3dx_user.ini",
-    "d3dxdm.ini",
-];
-const MIGOTO_GAME_DIRS: [&str; 2] = ["ShaderFixes", "ShaderCache"];
-
-fn names_peebify(value: &str) -> bool {
-    let value = value.trim().trim_matches('"');
-    let name = value.rsplit(['\\', '/']).next().unwrap_or_default();
-    name.to_ascii_lowercase().contains("peebify")
-        || LEGACY_FILES
-            .iter()
-            .any(|legacy| legacy.eq_ignore_ascii_case(name))
-}
-
-fn peebify_placed_migoto(dir: &Path) -> bool {
-    let Ok(bytes) = std::fs::read(dir.join("d3dx.ini")) else {
-        return false;
-    };
-    LEGACY_FILES.iter().any(|name| dir.join(name).is_file())
-        || String::from_utf8_lossy(&bytes)
-            .lines()
-            .filter_map(ini_key_value)
-            .any(|(_, value)| names_peebify(value))
-}
-
-fn sweep_path(path: &Path, is_dir: bool, removed: &mut Vec<String>) -> bool {
-    if std::fs::symlink_metadata(path).is_err() {
-        return true;
-    }
-    let result = if is_dir {
-        std::fs::remove_dir_all(path)
-    } else {
-        std::fs::remove_file(path)
-    };
-    match result {
-        Ok(()) => {
-            removed.push(path.display().to_string());
-            true
-        }
-        Err(e) => {
-            log::warn!("xxmi: could not remove {}: {e}", path.display());
-            false
-        }
-    }
-}
-
-pub fn sweep_game_dirs(dirs: &[PathBuf]) -> Vec<String> {
-    let mut removed = Vec::new();
-    for dir in dirs {
-        if !dir.is_dir() {
-            continue;
-        }
-        let owned_migoto = peebify_placed_migoto(dir);
-        if !owned_migoto {
-            for name in GAME_DIR_LEGACY_FILES {
-                let path = dir.join(name);
-                if path.is_file() && std::fs::remove_file(&path).is_ok() {
-                    removed.push(path.display().to_string());
-                }
-            }
-            for name in MIGOTO_GAME_FILES {
-                let path = dir.join(name);
-                if path.is_file() {
-                    log::info!(
-                        "xxmi: left {} in place because Peebify did not put it there",
-                        path.display()
-                    );
-                }
-            }
-            for name in MIGOTO_GAME_DIRS {
-                let path = dir.join(name);
-                if path.is_dir() {
-                    log::info!(
-                        "xxmi: left {} in place because Peebify did not put it there",
-                        path.display()
-                    );
-                }
-            }
-            continue;
-        }
-        let mut payload_gone = true;
-        for name in MIGOTO_GAME_FILES.iter().filter(|name| **name != "d3dx.ini") {
-            payload_gone &= sweep_path(&dir.join(name), false, &mut removed);
-        }
-        for name in MIGOTO_GAME_DIRS {
-            let path = dir.join(name);
-            if path.is_dir() {
-                payload_gone &= sweep_path(&path, true, &mut removed);
-            }
-        }
-        if !payload_gone || !sweep_path(&dir.join("d3dx.ini"), false, &mut removed) {
-            continue;
-        }
-        for name in GAME_DIR_LEGACY_FILES {
-            let path = dir.join(name);
-            if path.is_file() {
-                sweep_path(&path, false, &mut removed);
-            }
-        }
-    }
-    if !removed.is_empty() {
-        log::info!(
-            "xxmi: removed {} stray file(s) from game folders",
-            removed.len()
-        );
-    }
-    removed
 }
 
 pub fn core_installed(root: &Path) -> bool {
@@ -311,192 +136,13 @@ pub fn variant_installed(root: &Path, variant: &str) -> bool {
 }
 
 pub fn boot(app: &AppHandle) {
-    let state = app.state::<super::state::BackendState>();
+    let state = app.state::<super::BackendState>();
     let root = root(&state.config, &state.user_data);
     tauri::async_runtime::spawn_blocking(move || super::mods::sweep_replaced_copies(&root));
     if stop_all_event().is_none() {
         log::warn!("xxmi: could not create the mod loader's shared stop event");
     }
-    xxmi_update::start_background(app);
-}
-
-// ------------ Uninstall ------------
-// Removes only what Peebify put there and keeps the player's Mods folder and settings.
-#[derive(Default, Debug)]
-pub struct Uninstalled {
-    pub kept: Vec<String>,
-    pub leftovers: Vec<String>,
-}
-
-fn remove_owned_path(path: &Path, leftovers: &mut Vec<String>) {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return;
-    };
-    let result = if meta.is_dir() {
-        std::fs::remove_dir_all(path)
-    } else {
-        std::fs::remove_file(path)
-    };
-    if let Err(e) = result {
-        log::warn!("xxmi: could not remove {}: {e}", path.display());
-        leftovers.push(path.display().to_string());
-    }
-}
-
-fn has_mods(dir: &Path) -> bool {
-    let mods = dir.join("Mods");
-    mods.is_dir() && std::fs::read_dir(&mods).map(|d| d.count()).unwrap_or(0) > 0
-}
-
-fn is_package_key(name: &str) -> bool {
-    PACKAGES.iter().any(|(key, _)| key.eq_ignore_ascii_case(name))
-}
-
-fn clear_variant_dir(
-    root: &Path,
-    variant: &str,
-    recorded: Option<&BTreeSet<String>>,
-    leftovers: &mut Vec<String>,
-) -> bool {
-    let dir = variant_dir(root, variant);
-    if !dir.is_dir() {
-        return false;
-    }
-    let kept = has_mods(&dir);
-    let names: Vec<String> = match recorded {
-        Some(recorded) => {
-            let mut names: BTreeSet<String> = recorded.clone();
-            names.extend(CORE_LIBS.iter().map(|n| n.to_string()));
-            if !kept {
-                names.extend(RUNTIME_LEFTOVERS.iter().map(|n| n.to_string()));
-            }
-            names.into_iter().collect()
-        }
-        None => match std::fs::read_dir(&dir) {
-            Ok(entries) => entries
-                .flatten()
-                .map(|e| e.file_name().to_string_lossy().to_string())
-                .collect(),
-            Err(e) => {
-                log::warn!("xxmi: could not read {}: {e}", dir.display());
-                leftovers.push(dir.display().to_string());
-                return kept;
-            }
-        },
-    };
-    for name in names {
-        if kept && KEEP_ON_UNINSTALL.iter().any(|k| k.eq_ignore_ascii_case(&name)) {
-            continue;
-        }
-        remove_owned_path(&dir.join(&name), leftovers);
-    }
-    if !kept && std::fs::remove_dir(&dir).is_err() && dir.is_dir() {
-        log::info!(
-            "xxmi: left {} in place because it holds files Peebify did not install",
-            dir.display()
-        );
-    }
-    kept
-}
-
-pub fn uninstall_variant(root: &Path, variant: &str, owns_root: bool) -> Result<Uninstalled, String> {
-    if !is_known_variant(variant) {
-        return Err(format!("Peebify has no mod loader called \"{variant}\"."));
-    }
-    let mut result = Uninstalled::default();
-    let owned = read_owned(root);
-    let mut versions = installed_versions(root);
-    let recorded = owned.get(variant);
-    if owns_root || recorded.is_some() || versions.contains_key(variant) {
-        let recorded = if owns_root { None } else { recorded };
-        if clear_variant_dir(root, variant, recorded, &mut result.leftovers) {
-            result.kept.push(variant.to_string());
-        }
-    }
-    forget_owned(root, variant);
-
-    if versions.remove(variant).is_some() {
-        if let Err(e) = write_versions(root, &versions) {
-            log::warn!("xxmi: {e}");
-        }
-    }
-
-    let any_variant_left = versions
-        .keys()
-        .any(|key| key != CORE_KEY && package_looks_installed(root, key));
-    if !any_variant_left {
-        let core = uninstall(root, owns_root)?;
-        result.leftovers.extend(core.leftovers);
-    }
-
-    log::info!(
-        "xxmi: uninstalled the {variant} toolchain, kept mods: {}, left behind: {}",
-        !result.kept.is_empty(),
-        result.leftovers.len()
-    );
-    Ok(result)
-}
-
-pub fn uninstall(root: &Path, owns_root: bool) -> Result<Uninstalled, String> {
-    let mut result = Uninstalled::default();
-    if !root.is_dir() {
-        return Ok(result);
-    }
-    let owned = read_owned(root);
-    let versions = installed_versions(root);
-
-    for (key, _) in PACKAGES.iter().filter(|(key, _)| *key != CORE_KEY) {
-        let recorded = owned.get(*key);
-        if !owns_root && recorded.is_none() && !versions.contains_key(*key) {
-            continue;
-        }
-        let recorded = if owns_root { None } else { recorded };
-        if clear_variant_dir(root, key, recorded, &mut result.leftovers) {
-            result.kept.push(key.to_string());
-        }
-    }
-
-    let mut names: BTreeSet<String> = CORE_FILES
-        .iter()
-        .chain(LEGACY_FILES.iter())
-        .chain(
-            [
-                VERSION_FILE,
-                LOADER_LOG,
-                OWNED_FILE,
-                xxmi_update::STATE_FILE,
-                xxmi_update::STAGING_DIR,
-            ]
-            .iter(),
-        )
-        .map(|n| n.to_string())
-        .collect();
-    if owns_root {
-        let entries =
-            std::fs::read_dir(root).map_err(|e| format!("Could not read {root:?}: {e}"))?;
-        names.extend(
-            entries
-                .flatten()
-                .map(|e| e.file_name().to_string_lossy().to_string())
-                .filter(|n| !is_package_key(n)),
-        );
-    } else if let Some(core) = owned.get(CORE_KEY) {
-        names.extend(
-            core.iter()
-                .filter(|n| is_plain_name(n) && !is_package_key(n) && !n.eq_ignore_ascii_case("Mods"))
-                .cloned(),
-        );
-    }
-    for name in names {
-        remove_owned_path(&root.join(name), &mut result.leftovers);
-    }
-
-    log::info!(
-        "xxmi: uninstalled the toolchain, kept mods for {:?}, left behind: {}",
-        result.kept,
-        result.leftovers.len()
-    );
-    Ok(result)
+    start_background(app);
 }
 
 // ------------ Install And Update ------------
@@ -542,69 +188,50 @@ pub async fn lock_variant_when_free(variant: &str, patience: Duration) -> Option
     }
 }
 
+pub fn supported_variants() -> Vec<&'static str> {
+    let mut variants: Vec<&'static str> = game_profiles::GAME_IDS
+        .iter()
+        .filter_map(|id| game_profiles::mod_variant(game_profiles::profile(id)))
+        .collect();
+    variants.sort_unstable();
+    variants.dedup();
+    variants
+}
+
+pub async fn finish_variant(root: &Path, variant: &str, force: bool) -> Result<(), String> {
+    let (link_root, link_variant) = (root.to_path_buf(), variant.to_string());
+    tauri::async_runtime::spawn_blocking(move || link_core_libs(&link_root, &link_variant, force))
+        .await
+        .map_err(|e| format!("Could not place the mod tools: {e}"))??;
+    std::fs::create_dir_all(mods_dir(root, variant))
+        .map_err(|e| format!("Could not create the Mods folder: {e}"))
+}
+
 pub async fn ensure_variant(
     app: &AppHandle,
     root: &Path,
     variant: &str,
-    check_updates: bool,
     mut on_percent: impl FnMut(&str, f64),
-) -> Result<bool, String> {
+) -> Result<(), String> {
     if !is_known_variant(variant) {
         return Err(format!("Peebify has no mod loader called \"{variant}\"."));
     }
 
     let installed = installed_versions(root);
     let mut changed = false;
-    let mut check_failed = None;
     for package in [CORE_KEY, variant] {
-        let present = installed.contains_key(package) && package_looks_installed(root, package);
-        if present && !check_updates {
+        if installed.contains_key(package) && package_looks_installed(root, package) {
             continue;
         }
-        let damaged = present
-            && package == CORE_KEY
-            && match xxmi_update::verify_integrity(root) {
-                Ok(_) => false,
-                Err(e) => {
-                    log::error!("xxmi: the core mod tools failed their checksum, reinstalling them: {e}");
-                    true
-                }
-            };
-        let release = match xxmi_update::check_package(root, package).await {
-            Ok(release) => release,
-            Err(e) if present && !damaged => {
-                log::warn!("xxmi: could not check {package} for updates: {e}");
-                check_failed.get_or_insert(e);
-                continue;
-            }
-            Err(e) if damaged => {
-                return Err(format!(
-                    "Couldn't download a fresh copy of the mod tools to repair them: {e}"
-                ));
-            }
-            Err(e) => return Err(e),
-        };
-        if present && !damaged && installed.get(package) == Some(&release.tag) {
-            continue;
-        }
-        xxmi_update::install_package(app, root, package, &release, |p| on_percent(package, p))
-            .await?;
+        let release = check_package(root, package).await?;
+        install_package(app, root, package, &release, |p| on_percent(package, p)).await?;
         changed = true;
     }
 
-    let (link_root, link_variant) = (root.to_path_buf(), variant.to_string());
-    tauri::async_runtime::spawn_blocking(move || link_core_libs(&link_root, &link_variant, changed))
-        .await
-        .map_err(|e| format!("Could not place the mod tools: {e}"))??;
-    std::fs::create_dir_all(mods_dir(root, variant))
-        .map_err(|e| format!("Could not create the Mods folder: {e}"))?;
-    if let Some(e) = check_failed.filter(|_| !changed) {
-        return Err(format!("Couldn't check the mod tools for updates: {e}"));
-    }
-    Ok(changed)
+    finish_variant(root, variant, changed).await
 }
 
-fn package_looks_installed(root: &Path, package: &str) -> bool {
+pub fn package_looks_installed(root: &Path, package: &str) -> bool {
     if package == CORE_KEY {
         core_installed(root)
     } else {
@@ -612,37 +239,12 @@ fn package_looks_installed(root: &Path, package: &str) -> bool {
     }
 }
 
-static SOURCE_DIGESTS: Mutex<Vec<(PathBuf, u64, std::time::SystemTime, String)>> =
-    Mutex::new(Vec::new());
-
-fn source_sha256(path: &Path, meta: &std::fs::Metadata) -> std::io::Result<String> {
-    let modified = meta.modified()?;
-    let len = meta.len();
-    if let Some((.., digest)) = SOURCE_DIGESTS
-        .lock()
-        .iter()
-        .find(|(p, l, m, _)| p == path && *l == len && *m == modified)
-    {
-        return Ok(digest.clone());
-    }
-    let digest = xxmi_update::file_sha256(path)?;
-    let mut cache = SOURCE_DIGESTS.lock();
-    cache.retain(|(p, ..)| p != path);
-    cache.push((path.to_path_buf(), len, modified, digest.clone()));
-    Ok(digest)
-}
-
 fn same_contents(source: &Path, target: &Path) -> bool {
     let (Ok(ms), Ok(mt)) = (std::fs::metadata(source), std::fs::metadata(target)) else {
         return false;
     };
-    if ms.len() != mt.len() {
-        return false;
-    }
-    match (source_sha256(source, &ms), xxmi_update::file_sha256(target)) {
-        (Ok(hs), Ok(ht)) => hs == ht,
-        _ => false,
-    }
+    ms.len() == mt.len()
+        && matches!((file_sha256(source), file_sha256(target)), (Ok(a), Ok(b)) if a == b)
 }
 
 fn link_core_libs(root: &Path, variant: &str, force: bool) -> Result<(), String> {
@@ -715,10 +317,9 @@ pub fn unwrap_single_dir(dir: &Path) -> PathBuf {
     dir.to_path_buf()
 }
 
-pub fn merge_dir(source: &Path, destination: &Path) -> Result<Vec<String>, String> {
+pub fn merge_dir(source: &Path, destination: &Path) -> Result<(), String> {
     let entries =
         std::fs::read_dir(source).map_err(|e| format!("Could not read {source:?}: {e}"))?;
-    let mut written = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy().to_string();
@@ -741,9 +342,8 @@ pub fn merge_dir(source: &Path, destination: &Path) -> Result<Vec<String>, Strin
             std::fs::copy(entry.path(), &target)
                 .map_err(|e| format!("Could not copy {name_str}: {e}"))?;
         }
-        written.push(name_str);
     }
-    Ok(written)
+    Ok(())
 }
 
 fn xcmd_delete_target(package_dir: &Path, value: &str) -> Result<PathBuf, String> {
@@ -768,22 +368,10 @@ fn xcmd_delete_target(package_dir: &Path, value: &str) -> Result<PathBuf, String
 }
 
 fn xcmd_commands(text: &str, section: &str) -> Vec<(String, String)> {
-    let mut current = String::new();
-    let mut commands = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            current = trimmed[1..trimmed.len() - 1].trim().to_string();
-            continue;
-        }
-        if !current.eq_ignore_ascii_case(section) {
-            continue;
-        }
-        if let Some((name, value)) = ini_key_value(line) {
-            commands.push((name.to_string(), value.to_string()));
-        }
-    }
-    commands
+    fs_util::ini_entries(text)
+        .filter(|(s, _, _)| s.eq_ignore_ascii_case(section))
+        .map(|(_, name, value)| (name.to_string(), value.to_string()))
+        .collect()
 }
 
 pub fn xcmd_path(package_dir: &Path) -> PathBuf {
@@ -829,83 +417,38 @@ pub fn run_update_commands(xcmd: &Path, section: &str, package_dir: &Path) -> us
 pub async fn download_to(
     url: &str,
     destination: &Path,
-    on_percent: impl FnMut(f64),
+    mut on_percent: impl FnMut(f64),
 ) -> Result<(), String> {
-    let on_percent = Mutex::new(on_percent);
-    http::with_retry(
-        || download_attempt(url, destination, &on_percent),
-        3,
-        1000,
-        "xxmi package download",
+    let job = http::ToolJob::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let refusal = |received: u64, announced: u64| {
+        if announced > MAX_PACKAGE_BYTES {
+            Some(format!("{url} is {announced} bytes, more than any mod tools package should be"))
+        } else if received > MAX_PACKAGE_BYTES {
+            Some(format!(
+                "{url} sent more than {MAX_PACKAGE_BYTES} bytes, more than any mod tools package should be"
+            ))
+        } else {
+            None
+        }
+    };
+    peebify_transfer::download_stream(
+        &http::shared_transfer(),
+        &job,
+        url,
+        destination,
+        &refusal,
+        &mut |written, announced| {
+            if announced > 0 {
+                on_percent((written as f64 / announced as f64) * 100.0);
+            }
+        },
     )
-    .await?
+    .await
+    .map(|_| ())
 }
 
 const MAX_PACKAGE_BYTES: u64 = 512 << 20;
 
-fn retryable_download_status(status: u16) -> bool {
-    status == 408 || status == 429 || (500..600).contains(&status)
-}
-
-async fn download_attempt<F: FnMut(f64)>(
-    url: &str,
-    destination: &Path,
-    on_percent: &Mutex<F>,
-) -> Result<Result<(), String>, String> {
-    use futures::StreamExt;
-    use tokio::io::AsyncWriteExt;
-
-    let response = http::download_client()
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("Download failed: {e}"))?;
-    let status = response.status().as_u16();
-    if status != 200 {
-        let error = format!("HTTP {status} downloading {url}");
-        return if retryable_download_status(status) {
-            Err(error)
-        } else {
-            Ok(Err(error))
-        };
-    }
-    let total = response.content_length().unwrap_or(0);
-    if total > MAX_PACKAGE_BYTES {
-        return Ok(Err(format!(
-            "{url} is {total} bytes, more than any mod tools package should be"
-        )));
-    }
-
-    let mut file = match tokio::fs::File::create(destination).await {
-        Ok(file) => file,
-        Err(e) => return Ok(Err(format!("Could not create {destination:?}: {e}"))),
-    };
-    let mut stream = response.bytes_stream();
-    let mut written: u64 = 0;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Download interrupted: {e}"))?;
-        if written.saturating_add(chunk.len() as u64) > MAX_PACKAGE_BYTES {
-            return Ok(Err(format!(
-                "{url} sent more than {MAX_PACKAGE_BYTES} bytes, more than any mod tools package should be"
-            )));
-        }
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| format!("Write failed: {e}"))?;
-        written += chunk.len() as u64;
-        if total > 0 {
-            (on_percent.lock())((written as f64 / total as f64) * 100.0);
-        }
-    }
-    file.flush()
-        .await
-        .map_err(|e| format!("Flush failed: {e}"))?;
-    Ok(Ok(()))
-}
-
-// ------------ Loader Ini Settings ------------
-// Writes Peebify's managed options into the loader's d3dx.ini and leaves any other line
-// the player edited alone.
 #[derive(Default)]
 pub struct IniOptions {
     pub target: String,
@@ -950,7 +493,7 @@ fn write_ini_entries(path: &Path, entries: &[(String, String, IniEntry)]) -> Res
     if updated == original {
         return Ok(false);
     }
-    write_replacing(path, updated.as_bytes()).map_err(|e| format!("Could not write d3dx.ini: {e}"))?;
+    fs_util::write_atomic(path, updated.as_bytes())?;
     Ok(true)
 }
 
@@ -1041,7 +584,7 @@ pub(super) fn stored_overrides(
     };
     map.iter()
         .filter_map(|(compound, value)| {
-            let sanitized = super::mod_ini::sanitize_stored(compound, value);
+            let sanitized = sanitize_stored(compound, value);
             if sanitized.is_none() {
                 log::warn!("Ignoring the saved mod loader setting \"{compound}\" for {game_id}: it is not a setting Peebify manages or its value is not valid.");
             }
@@ -1062,15 +605,6 @@ pub(super) fn apply_ini_overrides(
     write_ini_entries(&variant_dir.join("d3dx.ini"), &entries)
 }
 
-fn ini_key_value(line: &str) -> Option<(&str, &str)> {
-    let trimmed = line.trim();
-    if trimmed.starts_with(';') || trimmed.starts_with('#') {
-        return None;
-    }
-    let (k, v) = trimmed.split_once('=')?;
-    Some((k.trim(), v.trim()))
-}
-
 fn rewrite_ini(original: &str, managed: &[(String, String, IniEntry)]) -> String {
     let uses_crlf = original.contains("\r\n");
     let newline = if uses_crlf { "\r\n" } else { "\n" };
@@ -1079,13 +613,13 @@ fn rewrite_ini(original: &str, managed: &[(String, String, IniEntry)]) -> String
     for (section, key, entry) in managed {
         let value_safe = match entry {
             IniEntry::Set(value) | IniEntry::EnsureLine(value) => {
-                super::mod_ini::ini_text_is_safe(value)
+                ini_text_is_safe(value)
             }
             IniEntry::Unset => true,
         };
         if !value_safe
-            || !super::mod_ini::ini_text_is_safe(section)
-            || !super::mod_ini::ini_text_is_safe(key)
+            || !ini_text_is_safe(section)
+            || !ini_text_is_safe(key)
         {
             log::warn!("Skipped a d3dx.ini entry in [{}] because it contains a line break or a bracket.", section.escape_debug());
             continue;
@@ -1122,7 +656,7 @@ fn rewrite_ini(original: &str, managed: &[(String, String, IniEntry)]) -> String
         };
 
         let existing = (start + 1..section_end).find(|&i| {
-            ini_key_value(&lines[i])
+            fs_util::ini_key_value(&lines[i])
                 .map(|(k, _)| k.eq_ignore_ascii_case(key))
                 .unwrap_or(false)
         });
@@ -1142,7 +676,7 @@ fn rewrite_ini(original: &str, managed: &[(String, String, IniEntry)]) -> String
             (None, IniEntry::Unset) => {}
             (_, IniEntry::EnsureLine(value)) => {
                 let present = (start + 1..section_end).any(|i| {
-                    ini_key_value(&lines[i])
+                    fs_util::ini_key_value(&lines[i])
                         .map(|(k, v)| k.eq_ignore_ascii_case(key) && v.eq_ignore_ascii_case(value))
                         .unwrap_or(false)
                 });
@@ -1187,7 +721,7 @@ fn stop_all_event() -> Option<&'static process_utils::NamedEvent> {
 }
 
 fn loader_log_path(app: &AppHandle) -> PathBuf {
-    app.state::<super::state::BackendState>()
+    app.state::<super::BackendState>()
         .logs_dir
         .join("mod-loader.log")
 }
@@ -1284,24 +818,24 @@ pub async fn prepare_and_spawn(
                 "The mod tools for {variant} are still installing. Try again in a moment."
             ));
         };
-        let _update = match xxmi_update::UPDATE_LOCK.try_lock() {
+        let _update = match UPDATE_LOCK.try_lock() {
             Ok(update) => update,
             Err(_) => {
                 announce_tools_busy(app, &profile_id, &mut announced);
-                xxmi_update::UPDATE_LOCK.lock().await
+                UPDATE_LOCK.lock().await
             }
         };
-        ensure_variant(app, root, &variant, false, |package, percent| {
+        ensure_variant(app, root, &variant, |package, percent| {
             log::debug!("xxmi: {package} {percent:.0}%");
         })
         .await?;
         let verify_root = root.to_path_buf();
-        tauri::async_runtime::spawn_blocking(move || xxmi_update::verify_integrity(&verify_root))
+        tauri::async_runtime::spawn_blocking(move || verify_integrity(&verify_root))
             .await
             .map_err(|e| format!("Could not check the mod tools: {e}"))??
     };
 
-    let state = app.try_state::<super::state::BackendState>();
+    let state = app.try_state::<super::BackendState>();
     let overrides = state
         .as_ref()
         .map(|state| stored_overrides(&state.config, &profile_id))
@@ -1477,10 +1011,10 @@ fn watch_loader(
                 log::error!("xxmi: mod loader failed for {game_id}: {error} {detail}");
                 let display = game_profiles::display_name(game_profiles::profile(&game_id));
                 let game_running = app
-                    .try_state::<super::state::BackendState>()
+                    .try_state::<super::BackendState>()
                     .is_some_and(|state| state.game.is_game_running_id(&game_id));
                 let message = loader_failure_message(display, code, game_running);
-                super::notify::notify_if_backgrounded(&app, "Mods didn't load", &message);
+                super::platform::notify_if_backgrounded(&app, "Mods didn't load", &message);
                 let _ = app.emit(
                     "mods-load-failed",
                     json!({ "gameId": game_id, "error": error, "message": message }),
@@ -1518,7 +1052,7 @@ async fn displace_active_loader(app: &AppHandle, game_id: &str) {
     let error = "Another game with mods was launched before it finished starting.".to_string();
     log::warn!("xxmi: stopped the mod loader for {other} because {game_id} launched with mods");
     let message = format!("{display} will run without mods. {error}");
-    super::notify::notify_if_backgrounded(app, "Mods didn't load", &message);
+    super::platform::notify_if_backgrounded(app, "Mods didn't load", &message);
     let _ = app.emit(
         "mods-load-failed",
         json!({ "gameId": other, "error": error, "message": message }),
@@ -1549,8 +1083,937 @@ pub async fn kill_orphan_loader() {
     }
 }
 
+// ------------ Mod Loader Settings ------------
+// The few mod loader (d3dx.ini) options players can change from the UI, like the reload shortcut and the start
+// delay. Values are checked here, saved in the config and written into the loader's ini file.
+
+pub enum Kind {
+    Bool,
+    Millis { min: u32, max: u32 },
+    Key,
+}
+
+pub struct IniSetting {
+    pub id: &'static str,
+    pub section: &'static str,
+    pub key: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub kind: Kind,
+    pub shipped: &'static str,
+    pub mirrors: &'static [(&'static str, &'static str)],
+}
+
+pub const SETTINGS: &[IniSetting] = &[
+    IniSetting {
+        id: "reloadMods",
+        section: "Hunting",
+        key: "reload_fixes",
+        label: "Reload mods in game",
+        description:
+            "The mod loader's own shortcut. It re-reads every enabled mod without restarting the game.",
+        kind: Kind::Key,
+        shipped: "no_modifiers VK_F10",
+        mirrors: &[("Hunting", "reload_config")],
+    },
+    IniSetting {
+        id: "showWarnings",
+        section: "Logging",
+        key: "show_warnings",
+        label: "Show mod warnings in game",
+        description:
+            "Red text the mod loader prints on screen when a mod's ini has a problem. Off by default, because nearly all of it comes from the mods themselves.",
+        kind: Kind::Bool,
+        shipped: "0",
+        mirrors: &[],
+    },
+    IniSetting {
+        id: "injectionDelay",
+        section: "System",
+        key: "dll_initialization_delay",
+        label: "Mod library start delay",
+        description:
+            "How long the mod library waits inside the game before it starts, in milliseconds. Raise it if the game crashes on launch with mods on.",
+        kind: Kind::Millis { min: 0, max: 10000 },
+        shipped: "0",
+        mirrors: &[],
+    },
+];
+
+fn setting(id: &str) -> Option<&'static IniSetting> {
+    SETTINGS.iter().find(|s| s.id == id)
+}
+
+pub fn validate(spec: &IniSetting, raw: &str) -> Result<String, &'static str> {
+    match spec.kind {
+        Kind::Bool => match raw.trim() {
+            "true" | "1" => Ok("1".to_string()),
+            "false" | "0" => Ok("0".to_string()),
+            _ => Err("That setting is on or off."),
+        },
+        Kind::Millis { min, max } => raw
+            .trim()
+            .parse::<u32>()
+            .map(|n| n.clamp(min, max).to_string())
+            .map_err(|_| "That setting is a whole number of milliseconds."),
+        Kind::Key => accelerator_to_ini(raw).ok_or(
+            "The mod loader only takes Ctrl, Alt and Shift with a function key or a single letter.",
+        ),
+    }
+}
+
+pub fn ini_text_is_safe(text: &str) -> bool {
+    !text.contains(['\r', '\n', '[', ']'])
+}
+
+pub fn sanitize_stored(
+    compound: &str,
+    value: &Value,
+) -> Option<(&'static str, &'static str, String)> {
+    let (section, key) = compound.split_once('/')?;
+    let (section, key) = (section.trim(), key.trim());
+    let (spec, target) = SETTINGS.iter().find_map(|spec| {
+        std::iter::once((spec.section, spec.key))
+            .chain(spec.mirrors.iter().copied())
+            .find(|(s, k)| s.eq_ignore_ascii_case(section) && k.eq_ignore_ascii_case(key))
+            .map(|target| (spec, target))
+    })?;
+    let raw = match value {
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => u8::from(*b).to_string(),
+        Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    if !ini_text_is_safe(&raw) {
+        return None;
+    }
+    let normalized = match spec.kind {
+        Kind::Key => accelerator_to_ini(&ini_to_accelerator(&raw))?,
+        _ => validate(spec, &raw).ok()?,
+    };
+    Some((target.0, target.1, normalized))
+}
+
+const KEY_MODIFIERS: [(&str, &str); 3] = [("ctrl", "Ctrl"), ("alt", "Alt"), ("shift", "Shift")];
+
+pub fn accelerator_to_ini(text: &str) -> Option<String> {
+    let parts: Vec<&str> = text
+        .split('+')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let (key, mods) = parts.split_last()?;
+    let mut out: Vec<String> = Vec::new();
+    for m in mods {
+        let lower = m.to_lowercase();
+        if !KEY_MODIFIERS.iter().any(|(ini, _)| *ini == lower) {
+            return None;
+        }
+        out.push(lower);
+    }
+    if out.is_empty() {
+        out.push("no_modifiers".to_string());
+    }
+    let named = key.to_uppercase();
+    let key = if named.starts_with('F')
+        && named[1..]
+            .parse::<u8>()
+            .is_ok_and(|n| (1..=24).contains(&n))
+    {
+        format!("VK_{named}")
+    } else if named.len() == 1 && named.chars().all(|c| c.is_ascii_alphanumeric()) {
+        named
+    } else {
+        return None;
+    };
+    out.push(key);
+    Some(out.join(" "))
+}
+
+pub fn ini_to_accelerator(text: &str) -> String {
+    let mut mods: Vec<&str> = Vec::new();
+    let mut key = String::new();
+    for token in text.split_whitespace() {
+        let lower = token.to_lowercase();
+        match KEY_MODIFIERS.iter().find(|(ini, _)| *ini == lower) {
+            Some((_, label)) => mods.push(label),
+            None if lower == "no_modifiers" => {}
+            None => {
+                key = token
+                    .trim_start_matches("VK_")
+                    .trim_start_matches("vk_")
+                    .to_string()
+            }
+        }
+    }
+    mods.push(&key);
+    mods.join("+")
+}
+
+fn variant_for(app: &AppHandle, game_id: &str) -> Option<(String, std::path::PathBuf)> {
+    let state = app.state::<BackendState>();
+    let profile = game_profiles::profile(game_id);
+    let variant = game_profiles::mod_variant(profile)?.to_string();
+    let root = root(&state.config, &state.user_data);
+    Some((variant.clone(), root.join(&variant)))
+}
+
+pub(super) async fn mod_ini_settings(app: &AppHandle, args: &[Value]) -> Result<Value, String> {
+    let profile = resolve_profile(app, arg_str(args, 0));
+    let game_id = game_profiles::profile_id(profile).to_string();
+    let state = app.state::<BackendState>();
+
+    let Some((variant, dir)) = variant_for(app, &game_id) else {
+        return Ok(ok_with(json!({
+            "gameId": game_id,
+            "supported": false,
+            "toolchainInstalled": false,
+            "settings": Vec::<Value>::new(),
+        })));
+    };
+
+    let installed = variant_installed(&root(&state.config, &state.user_data), &variant);
+    let text = std::fs::read_to_string(dir.join("d3dx.ini")).unwrap_or_default();
+    let defaults = game_profiles::mod_ini_defaults(profile);
+
+    let rows: Vec<Value> = SETTINGS
+        .iter()
+        .map(|s| {
+            let shipped = defaults
+                .iter()
+                .find(|(section, key, _)| {
+                    section.eq_ignore_ascii_case(s.section) && key.eq_ignore_ascii_case(s.key)
+                })
+                .map(|(_, _, value)| value.as_str())
+                .unwrap_or(s.shipped);
+            let compound = format!("{}/{}", s.section, s.key);
+            let stored = state
+                .config
+                .get(&format!("games.{game_id}.modIni.{compound}"));
+            let stored = sanitize_stored(&compound, &stored).map(|(_, _, v)| v);
+            let value = stored
+                .or_else(|| fs_util::ini_value(&text, s.section, s.key))
+                .unwrap_or_else(|| shipped.to_string());
+            json!({
+                "id": s.id,
+                "label": s.label,
+                "description": s.description,
+                "kind": match s.kind {
+                    Kind::Bool => "bool",
+                    Kind::Millis { .. } => "millis",
+                    Kind::Key => "key",
+                },
+                "accelerator": matches!(s.kind, Kind::Key).then(|| ini_to_accelerator(&value)),
+                "defaultAccelerator": matches!(s.kind, Kind::Key)
+                    .then(|| ini_to_accelerator(shipped)),
+                "min": match s.kind { Kind::Millis { min, .. } => Some(min), _ => None },
+                "max": match s.kind { Kind::Millis { max, .. } => Some(max), _ => None },
+                "value": value,
+            })
+        })
+        .collect();
+
+    Ok(ok_with(json!({
+        "gameId": game_id,
+        "supported": true,
+        "toolchainInstalled": installed,
+        "settings": rows,
+    })))
+}
+
+pub(super) async fn set_mod_ini_setting(app: &AppHandle, args: &[Value]) -> Result<Value, String> {
+    let profile = resolve_profile(app, arg_str(args, 0));
+    let game_id = game_profiles::profile_id(profile).to_string();
+
+    let Some(id) = arg_str(args, 1) else {
+        return Ok(err_response("No setting was given."));
+    };
+    let Some(spec) = setting(id) else {
+        return Ok(err_response("That is not a mod loader setting."));
+    };
+    let Some(raw) = arg_str(args, 2) else {
+        return Ok(err_response("No value was given."));
+    };
+
+    let value = match validate(spec, raw) {
+        Ok(value) => value,
+        Err(message) => return Ok(err_response(message)),
+    };
+
+    let config = &app.state::<BackendState>().config;
+    for (section, key) in
+        std::iter::once((spec.section, spec.key)).chain(spec.mirrors.iter().copied())
+    {
+        config.set(
+            &format!("games.{game_id}.modIni.{section}/{key}"),
+            Value::String(value.clone()),
+        );
+    }
+
+    let applied = match variant_for(app, &game_id) {
+        Some((variant, dir)) => {
+            let state = app.state::<BackendState>();
+            let root = root(&state.config, &state.user_data);
+            if variant_installed(&root, &variant) {
+                let overrides = stored_overrides(&state.config, &game_id);
+                apply_ini_overrides(&dir, &overrides).unwrap_or(false)
+            } else {
+                false
+            }
+        }
+        None => false,
+    };
+
+    let _ = app.emit(
+        "mod-ini-changed",
+        json!({ "gameId": game_id, "settingId": spec.id, "value": value, "applied": applied }),
+    );
+
+    Ok(ok_with(json!({
+        "settingId": spec.id,
+        "value": value,
+        "applied": applied,
+    })))
+}
+
+// ------------ Mod Tools Updater ------------
+// Installs the XXMI mod loader packages for every supported game once mod support is on, and keeps them up to
+// date. It starts as soon as the launcher opens or mod support is switched on, then checks their GitHub
+// releases every five minutes, verifies each download's signature, and holds an install back while a modded
+// game is running, applying it once the game closes.
+
+pub const STATE_FILE: &str = "update-state.json";
+pub const STAGING_DIR: &str = ".staging";
+const CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const WATCH_TICK: Duration = Duration::from_secs(1);
+const RETRY_INTERVAL: Duration = Duration::from_secs(60);
+const OFFLINE: &str = "offline";
+const RATE_LIMIT_FALLBACK_SECS: i64 = 30 * 60;
+
+const SPECTRUM_KEY: &str = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEYac352uRGKZh6LOwK0fVDW/TpyECEfnRtUp+bP2PJPP63SWOkJ3a/d9pAnPfYezRVJ1hWjZtpRTT8HEAN/b4mWpJvqO43SAEV/1Q6vz9Rk/VvRV3jZ6B/tmqVnIeHKEb";
+const GIMI_KEY: &str = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAET5SWORxEdlJ3RXWIFiuwMX6oyZedz+DgaxtsbpWyxNQJDgIDj4uKLLJlvhRNpnkFEuQntgJKzJs0SpASBEguPOTE7VSnmp+x5uyDmsQsWzsRSAZip++a02jqR/K2j18H";
+const ZZMI_KEY: &str = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEb11GjbKQS6SmRe8TcIc5VMu5Ob3moo5v2YeD+s53xEe4bVPGcToUNLu3Jgqo0OwWZ4RsNy1nR0HId6pR09HedyEMifxebsyPT3T5PH82QozEXHQlTDySklWUfGItoOdf";
+const HIMI_KEY: &str = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEeigvK7REsX3f/vb+RRuFkZt/6VRbykI2oQcEU3IiI3N9s6jWqKkxAE2cTC9wKXDlkeSzlHjPxgzrTrKdqwkFzROMjw5T2LixFB5BYaT633aU/cCiHDbArIJ46+GrqemG";
+
+const PUBLIC_KEYS: [(&str, &str); 7] = [
+    ("xxmi", SPECTRUM_KEY),
+    ("gimi", GIMI_KEY),
+    ("srmi", SPECTRUM_KEY),
+    ("zzmi", ZZMI_KEY),
+    ("wwmi", SPECTRUM_KEY),
+    ("himi", HIMI_KEY),
+    ("efmi", SPECTRUM_KEY),
+];
+
+pub static UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static PENDING: AtomicBool = AtomicBool::new(false);
+static WAITING_LOGGED: AtomicBool = AtomicBool::new(false);
+static INSTALLING_NEW: AtomicBool = AtomicBool::new(false);
+
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PackageState {
+    pub etag: Option<String>,
+    pub latest_tag: Option<String>,
+    pub asset_name: Option<String>,
+    pub asset_url: Option<String>,
+    pub signature: Option<String>,
+    pub retry_after: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UpdateState {
+    pub packages: BTreeMap<String, PackageState>,
+    pub integrity: BTreeMap<String, String>,
+}
+
+static STATE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+fn load_state(root: &Path) -> Result<UpdateState, String> {
+    let Some(stored) = super::fs_util::read_json_store(&root.join(STATE_FILE))? else {
+        return Ok(UpdateState::default());
+    };
+    Ok(serde_json::from_value(stored).unwrap_or_else(|e| {
+        log::warn!("xxmi: {STATE_FILE} could not be parsed ({e}), so it is read as empty");
+        UpdateState::default()
+    }))
+}
+
+fn current_state(root: &Path) -> Result<UpdateState, String> {
+    let _guard = STATE_LOCK.lock();
+    load_state(root)
+}
+
+fn write_state(root: &Path, state: &UpdateState) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
+    fs_util::write_atomic(&root.join(STATE_FILE), text.as_bytes())
+}
+
+fn update_state(root: &Path, change: impl FnOnce(&mut UpdateState)) -> Result<(), String> {
+    let _guard = STATE_LOCK.lock();
+    let mut state = load_state(root)?;
+    change(&mut state);
+    write_state(root, &state)
+}
+
+fn update_package(root: &Path, package: &str, change: impl FnOnce(&mut PackageState)) {
+    if let Err(e) = update_state(root, |state| {
+        change(state.packages.entry(package.to_string()).or_default())
+    }) {
+        log::warn!("xxmi: could not record the {package} release check: {e}");
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Release {
+    pub tag: String,
+    pub asset_name: String,
+    pub download_url: String,
+    pub signature: Option<String>,
+}
+
+fn now() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+fn cached_release(state: &PackageState) -> Option<Release> {
+    Some(Release {
+        tag: state.latest_tag.clone()?,
+        asset_name: state.asset_name.clone()?,
+        download_url: state.asset_url.clone()?,
+        signature: state.signature.clone(),
+    })
+}
+
+pub fn parse_signature(body: &str) -> Option<String> {
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = PATTERN.get_or_init(|| {
+        regex::Regex::new(
+            r"(?m)^## Signature[\r\n]+- ((?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{4}|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==))\s*$",
+        )
+        .expect("signature pattern")
+    });
+    pattern
+        .captures(body)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+pub fn parse_release(package: &str, text: &str) -> Result<Release, String> {
+    let json: Value = serde_json::from_str(text)
+        .map_err(|e| format!("Invalid release JSON for {package}: {e}"))?;
+
+    let tag = json
+        .get("tag_name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("No tag_name in the latest {package} release"))?
+        .to_string();
+
+    let assets = json
+        .get("assets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("No assets in the latest {package} release"))?;
+
+    let asset = assets
+        .iter()
+        .find(|a| {
+            a.get("name")
+                .and_then(Value::as_str)
+                .map(|n| {
+                    let lower = n.to_ascii_lowercase();
+                    lower.ends_with(".zip") && lower.contains("package")
+                })
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| format!("The latest {package} release has no package zip"))?;
+
+    let asset_name = asset
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let download_url = asset
+        .get("browser_download_url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("The {package} package asset has no download URL"))?
+        .to_string();
+    let signature = json
+        .get("body")
+        .and_then(Value::as_str)
+        .and_then(parse_signature);
+
+    Ok(Release {
+        tag,
+        asset_name,
+        download_url,
+        signature,
+    })
+}
+
+fn rate_limit_reset(headers: &reqwest::header::HeaderMap) -> i64 {
+    if let Some(secs) = http::retry_after_secs(headers) {
+        return now() + secs as i64;
+    }
+    headers
+        .get("x-ratelimit-reset")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|reset| *reset > now())
+        .unwrap_or_else(|| now() + RATE_LIMIT_FALLBACK_SECS)
+}
+
+pub async fn check_package(root: &Path, package: &str) -> Result<Release, String> {
+    let repo = repo_for(package).ok_or_else(|| format!("Unknown mod package \"{package}\""))?;
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+
+    let entry = current_state(root)?
+        .packages
+        .remove(package)
+        .unwrap_or_default();
+
+    if let Some(until) = entry.retry_after.filter(|until| *until > now()) {
+        if let Some(cached) = cached_release(&entry) {
+            log::info!(
+                "xxmi: GitHub is rate limited for {} more s, using the cached {package} release",
+                until - now()
+            );
+            return Ok(cached);
+        }
+        return Err(format!(
+            "GitHub is rate limiting release checks for another {} minutes.",
+            ((until - now()) / 60).max(1)
+        ));
+    }
+
+    let mut request = http::client()
+        .get(&url)
+        .header("Accept", "application/vnd.github+json");
+    if let Some(etag) = entry.etag.as_deref().filter(|e| !e.is_empty()) {
+        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("Request error: {e}"))?;
+    let status = response.status().as_u16();
+
+    match status {
+        304 => {
+            update_package(root, package, |stored| stored.retry_after = None);
+            cached_release(&entry).ok_or_else(|| format!("GitHub said the {package} release was unchanged, but nothing was cached."))
+        }
+        200 => {
+            let etag = response
+                .headers()
+                .get(reqwest::header::ETAG)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let text = http::read_text_capped(response, &url, http::MAX_FEED_RESPONSE).await?;
+            let release = parse_release(package, &text)?;
+            update_package(root, package, |stored| {
+                stored.etag = etag;
+                stored.latest_tag = Some(release.tag.clone());
+                stored.asset_name = Some(release.asset_name.clone());
+                stored.asset_url = Some(release.download_url.clone());
+                stored.signature = release.signature.clone();
+                stored.retry_after = None;
+            });
+            log::info!(
+                "xxmi: {package} {} resolves to asset \"{}\"",
+                release.tag,
+                release.asset_name
+            );
+            Ok(release)
+        }
+        403 | 429 => {
+            let until = rate_limit_reset(response.headers());
+            update_package(root, package, |stored| stored.retry_after = Some(until));
+            let cached = cached_release(&entry);
+            log::warn!(
+                "xxmi: GitHub rate limited the {package} check (HTTP {status}), retrying after {} s",
+                until - now()
+            );
+            cached.ok_or_else(|| {
+                "GitHub is rate limiting release checks right now. Try again in a while.".to_string()
+            })
+        }
+        other => Err(format!("HTTP {other} for {url}")),
+    }
+}
+
+pub fn public_key_for(package: &str) -> Option<&'static str> {
+    PUBLIC_KEYS
+        .iter()
+        .find(|(key, _)| *key == package)
+        .map(|(_, key)| *key)
+}
+
+pub fn verify_signature(package: &str, bytes: &[u8], signature: &str) -> Result<(), String> {
+    let key_text = public_key_for(package)
+        .ok_or_else(|| format!("Peebify has no publisher key for the {package} package."))?;
+    verify_with_key(package, key_text, bytes, signature)
+}
+
+fn verify_with_key(package: &str, key_text: &str, bytes: &[u8], signature: &str) -> Result<(), String> {
+    use base64::Engine;
+    use p384::ecdsa::signature::hazmat::PrehashVerifier;
+    use p384::ecdsa::{Signature, VerifyingKey};
+    use p384::pkcs8::DecodePublicKey;
+    use sha2::{Digest, Sha256};
+
+    let key_der = base64::engine::general_purpose::STANDARD
+        .decode(key_text)
+        .map_err(|e| format!("The {package} publisher key is malformed: {e}"))?;
+    let key = VerifyingKey::from_public_key_der(&key_der)
+        .map_err(|e| format!("The {package} publisher key could not be parsed: {e}"))?;
+    let signature_der = base64::engine::general_purpose::STANDARD
+        .decode(signature.trim())
+        .map_err(|e| format!("The {package} release signature is malformed: {e}"))?;
+    let signature = Signature::from_der(&signature_der)
+        .map_err(|e| format!("The {package} release signature could not be parsed: {e}"))?;
+    let digest = Sha256::digest(bytes);
+    key.verify_prehash(&digest, &signature).map_err(|_| {
+        format!(
+            "The {package} package does not match its publisher's signature. \
+             Peebify will not install it."
+        )
+    })
+}
+
+pub fn file_sha256(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        match std::io::Read::read(&mut file, &mut buffer) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&buffer[..read]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn integrity_digests(root: &Path) -> Result<BTreeMap<String, String>, String> {
+    let mut pins = BTreeMap::new();
+    for name in CORE_FILES {
+        let digest = file_sha256(&root.join(name))
+            .map_err(|e| format!("Could not read {name} to record its checksum: {e}"))?;
+        pins.insert(name.to_string(), digest);
+    }
+    Ok(pins)
+}
+
+pub fn record_integrity(root: &Path) -> Result<BTreeMap<String, String>, String> {
+    let pins = integrity_digests(root)?;
+    update_state(root, |state| state.integrity = pins.clone())?;
+    Ok(pins)
+}
+
+fn record_integrity_locked(
+    root: &Path,
+    state: &mut UpdateState,
+) -> Result<BTreeMap<String, String>, String> {
+    state.integrity = integrity_digests(root)?;
+    write_state(root, state)?;
+    Ok(state.integrity.clone())
+}
+
+pub fn verify_integrity(root: &Path) -> Result<BTreeMap<String, String>, String> {
+    let _guard = STATE_LOCK.lock();
+    let mut state = load_state(root)?;
+    if state.integrity.is_empty() {
+        let recorded = record_integrity_locked(root, &mut state)?;
+        log::warn!("xxmi: no checksums were on record, so the mod tools on disk were recorded as trusted");
+        return Ok(recorded);
+    }
+    let mut verified = BTreeMap::new();
+    let mut added = false;
+    for name in CORE_FILES {
+        let digest = file_sha256(&root.join(name))
+            .map_err(|e| format!("Could not read {name} before starting the mod loader: {e}"))?;
+        verified.insert(name.to_string(), digest.clone());
+        match state.integrity.get(name) {
+            Some(recorded) if *recorded == digest => {}
+            Some(recorded) => {
+                log::error!("xxmi: {name} checksum mismatch, recorded {recorded}, found {digest}");
+                return Err(format!(
+                    "{name} on disk does not match the copy Peebify installed. Something else \
+                     changed it, so mods will not be loaded. Delete it from the mod tools folder \
+                     (shown under Mods > Setup) and launch again to get a fresh copy."
+                ));
+            }
+            None => {
+                log::warn!("xxmi: {name} had no recorded checksum, so the copy on disk was recorded");
+                state.integrity.insert(name.to_string(), digest);
+                added = true;
+            }
+        }
+    }
+    if added {
+        write_state(root, &state)?;
+    }
+    Ok(verified)
+}
+
+pub async fn install_package(
+    app: &AppHandle,
+    root: &Path,
+    package: &str,
+    release: &Release,
+    mut on_percent: impl FnMut(f64),
+) -> Result<String, String> {
+    let signature = release.signature.as_deref().ok_or_else(|| {
+        format!(
+            "The latest {package} release carries no publisher signature, so Peebify will not \
+             install it."
+        )
+    })?;
+
+    if !release.download_url.starts_with("https://") {
+        return Err(format!(
+            "The {package} release links to a download that is not HTTPS, so Peebify will not \
+             install it."
+        ));
+    }
+
+    std::fs::create_dir_all(root).map_err(|e| format!("Could not create {root:?}: {e}"))?;
+    let staging = root.join(STAGING_DIR);
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| format!("Could not create staging dir: {e}"))?;
+
+    let archive_name = super::fs_util::sanitize_folder_name(&release.asset_name);
+    let archive_name = if archive_name.to_ascii_lowercase().ends_with(".zip") {
+        archive_name
+    } else {
+        format!("{package}-package.zip")
+    };
+    let archive = staging.join(archive_name);
+    download_to(&release.download_url, &archive, |p| on_percent(p * 0.6)).await?;
+
+    let checked = {
+        let (archive, owned_package, signature) =
+            (archive.clone(), package.to_string(), signature.to_string());
+        tauri::async_runtime::spawn_blocking(move || {
+            let bytes = std::fs::read(&archive).map_err(|e| {
+                format!("Could not read the downloaded {owned_package} package: {e}")
+            })?;
+            verify_signature(&owned_package, &bytes, &signature)
+        })
+        .await
+        .map_err(|e| format!("Could not check the downloaded {package} package: {e}"))?
+    };
+    checked.inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&staging);
+    })?;
+    on_percent(62.0);
+
+    let extract_dir = staging.join("out");
+    std::fs::create_dir_all(&extract_dir)
+        .map_err(|e| format!("Could not create extract dir: {e}"))?;
+    let seven_zip = resolve_7z_binary(app).await?;
+    run_7z_extract(&seven_zip, &archive, &extract_dir, |p| {
+        on_percent(62.0 + p * 0.33)
+    })
+    .await?;
+    if let Some(link) = super::fs_util::find_link(&extract_dir) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!(
+            "The {package} package contains a link ({}), so Peebify will not install it.",
+            link.display()
+        ));
+    }
+
+    let source = unwrap_single_dir(&extract_dir);
+    let destination = package_dir(root, package);
+    std::fs::create_dir_all(&destination)
+        .map_err(|e| format!("Could not create {}: {e}", destination.display()))?;
+    let is_core = package == CORE_KEY;
+    if !is_core {
+        run_update_commands(&xcmd_path(&source), "PreInstall", &destination);
+    }
+    {
+        let (source, destination) = (source.clone(), destination.clone());
+        tauri::async_runtime::spawn_blocking(move || merge_dir(&source, &destination))
+            .await
+            .map_err(|e| format!("Could not install the {package} package: {e}"))??;
+    }
+    if !is_core {
+        run_update_commands(&xcmd_path(&destination), "PostInstall", &destination);
+    }
+    on_percent(98.0);
+
+    let _ = std::fs::remove_dir_all(&staging);
+
+    if is_core {
+        record_integrity(root)?;
+    } else {
+        disable_shaderfixes_extras(&destination);
+    }
+
+    record_version(root, package, &release.tag)?;
+    on_percent(100.0);
+
+    log::info!(
+        "xxmi: installed {package} {} into {} (signature verified)",
+        release.tag,
+        destination.display()
+    );
+    Ok(release.tag.clone())
+}
+
+pub fn installing() -> bool {
+    INSTALLING_NEW.load(Ordering::SeqCst)
+}
+
+fn current_root(app: &AppHandle) -> PathBuf {
+    let state = app.state::<BackendState>();
+    root(&state.config, &state.user_data)
+}
+
+struct InstallingGuard(AppHandle);
+
+impl InstallingGuard {
+    fn start(app: &AppHandle) -> Self {
+        INSTALLING_NEW.store(true, Ordering::SeqCst);
+        let _ = app.emit("mods-status-changed", json!({}));
+        Self(app.clone())
+    }
+}
+
+impl Drop for InstallingGuard {
+    fn drop(&mut self) {
+        INSTALLING_NEW.store(false, Ordering::SeqCst);
+        let _ = self.0.emit("mods-status-changed", json!({}));
+    }
+}
+
+pub fn start_background(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut next: Option<(Instant, PathBuf)> = None;
+        let mut was_on = false;
+        loop {
+            let on = super::mods::master_enabled(&app);
+            let root = current_root(&app);
+            let due = !was_on
+                || next
+                    .as_ref()
+                    .is_none_or(|(at, planned_for)| Instant::now() >= *at || *planned_for != root);
+            if on && due {
+                let wait = match run_once(&app).await {
+                    Ok(true) => Some(CHECK_INTERVAL),
+                    Ok(false) => Some(RETRY_INTERVAL),
+                    Err(e) if e == OFFLINE => None,
+                    Err(e) => {
+                        log::warn!("xxmi: background update check skipped: {e}");
+                        Some(CHECK_INTERVAL)
+                    }
+                };
+                if let Some(wait) = wait {
+                    next = Some((Instant::now() + wait, root));
+                }
+            }
+            was_on = on;
+            tokio::time::sleep(WATCH_TICK).await;
+        }
+    });
+}
+
+fn modded_game_active(app: &AppHandle) -> bool {
+    let state = app.state::<BackendState>();
+    game_profiles::GAME_IDS.iter().any(|&id| {
+        state.game.is_game_active_id(id) && super::mods::active_for(app, id, game_profiles::profile(id))
+    })
+}
+
+fn toolchain_in_use(app: &AppHandle) -> bool {
+    modded_game_active(app) || loader_active()
+}
+
+pub fn on_game_stopped(app: &AppHandle) {
+    if !PENDING.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = run_once(&app).await {
+            log::warn!("xxmi: deferred update check skipped: {e}");
+        }
+    });
+}
+
+fn is_current(root: &Path, package: &str, release: &Release) -> bool {
+    package_looks_installed(root, package)
+        && installed_versions(root).get(package) == Some(&release.tag)
+}
+
+async fn run_once(app: &AppHandle) -> Result<bool, String> {
+    if !super::mods::master_enabled(app) {
+        return Ok(true);
+    }
+    if !http::is_online_cached() {
+        return Err(OFFLINE.to_string());
+    }
+    let root = current_root(app);
+    let mut packages = vec![CORE_KEY];
+    packages.extend(supported_variants());
+
+    let missing = packages.iter().any(|p| !package_looks_installed(&root, p));
+    let _installing = missing.then(|| InstallingGuard::start(app));
+
+    let mut complete = true;
+    let mut core_changed = false;
+    for package in packages {
+        let release = match check_package(&root, package).await {
+            Ok(release) => release,
+            Err(e) => {
+                log::warn!("xxmi: could not check {package} for updates: {e}");
+                complete = false;
+                continue;
+            }
+        };
+        if is_current(&root, package, &release) {
+            continue;
+        }
+        let _update = UPDATE_LOCK.lock().await;
+        if is_current(&root, package, &release) {
+            continue;
+        }
+        if toolchain_in_use(app) {
+            PENDING.store(true, Ordering::SeqCst);
+            if !WAITING_LOGGED.swap(true, Ordering::SeqCst) {
+                log::info!("xxmi: {package} {} is ready, installing once no game is running", release.tag);
+            }
+            break;
+        }
+        let Some(_guard) = try_lock_variant(package) else {
+            continue;
+        };
+        let tag = match install_package(app, &root, package, &release, |_| {}).await {
+            Ok(tag) => tag,
+            Err(e) => {
+                log::warn!("xxmi: background install of {package} failed: {e}");
+                continue;
+            }
+        };
+        log::info!("xxmi: background update installed {package} {tag}");
+        WAITING_LOGGED.store(false, Ordering::SeqCst);
+        if package == CORE_KEY {
+            core_changed = true;
+        } else if let Err(e) = finish_variant(&root, package, core_changed).await {
+            log::warn!("xxmi: could not finish setting up {package}: {e}");
+        }
+        let _ = app.emit("mods-status-changed", json!({}));
+    }
+    Ok(complete)
+}
+
 // ------------ Tests ------------
-// Runs the install, uninstall and ini rewriting logic against scratch folders.
+// Runs the install, update, settings and ini rewriting logic against scratch folders.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1567,25 +2030,6 @@ mod tests {
         for name in CORE_FILES {
             std::fs::write(root.join(name), b"MZ").unwrap();
         }
-    }
-
-    #[test]
-    fn the_core_needs_all_three_libraries() {
-        let root = scratch("partial");
-        std::fs::write(root.join("d3d11.dll"), b"MZ").unwrap();
-        std::fs::write(root.join("d3dcompiler_47.dll"), b"MZ").unwrap();
-        assert!(!variant_installed(&root, "zzmi"));
-        std::fs::write(root.join(LOADER_DLL), b"MZ").unwrap();
-        assert!(variant_installed(&root, "zzmi"));
-        assert!(!variant_installed(&root, "wwmi"));
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn no_loader_at_all_is_not_installed() {
-        let root = scratch("none");
-        assert!(!variant_installed(&root, "zzmi"));
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1680,207 +2124,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn install_zzmi(root: &Path) {
-        install_core(root);
-        record_version(root, CORE_KEY, "v1").unwrap();
-        record_version(root, "zzmi", "v1").unwrap();
-        record_owned(root, CORE_KEY, &CORE_FILES.map(String::from)).unwrap();
-        record_owned(root, "zzmi", &["d3dx.ini".to_string(), "ShaderFixes".to_string(), "Mods".to_string()]).unwrap();
-        std::fs::create_dir_all(root.join("zzmi").join("ShaderFixes")).unwrap();
-        std::fs::write(root.join("zzmi").join("ShaderFixes").join("a.txt"), "x").unwrap();
-        std::fs::write(root.join("zzmi").join("d3d11.dll"), b"MZ").unwrap();
-        std::fs::write(root.join(LOADER_LOG), "log").unwrap();
-    }
-
     #[test]
-    fn uninstalling_a_picked_folder_leaves_foreign_files_alone() {
-        let root = scratch("foreign");
-        install_zzmi(&root);
-        std::fs::create_dir_all(root.join("Game").join("Mods")).unwrap();
-        std::fs::write(root.join("Game").join("Mods").join("keep.txt"), "x").unwrap();
-        std::fs::write(root.join("Game").join("data.pak"), "x").unwrap();
-        std::fs::write(root.join("notes.txt"), "x").unwrap();
-        std::fs::create_dir_all(root.join("GIMI")).unwrap();
-        std::fs::write(root.join("GIMI").join("d3dx.ini"), "[Loader]").unwrap();
-
-        let result = uninstall_variant(&root, "zzmi", false).unwrap();
-        assert!(result.leftovers.is_empty(), "{:?}", result.leftovers);
-        assert!(result.kept.is_empty());
-        assert!(!root.join("zzmi").exists());
-        for name in CORE_FILES.iter().chain([VERSION_FILE, OWNED_FILE, LOADER_LOG].iter()) {
-            assert!(!root.join(name).exists(), "{name}");
-        }
-        assert!(root.join("notes.txt").exists());
-        assert!(root.join("Game").join("data.pak").exists());
-        assert!(root.join("Game").join("Mods").join("keep.txt").exists());
-        assert!(root.join("GIMI").join("d3dx.ini").exists());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn a_full_uninstall_of_a_picked_folder_leaves_foreign_files_alone() {
-        let root = scratch("foreign-full");
-        install_zzmi(&root);
-        std::fs::create_dir_all(root.join("Game")).unwrap();
-        std::fs::write(root.join("Game").join("data.pak"), "x").unwrap();
-        std::fs::write(root.join("notes.txt"), "x").unwrap();
-        let result = uninstall(&root, false).unwrap();
-        assert!(result.leftovers.is_empty(), "{:?}", result.leftovers);
-        assert!(!root.join("zzmi").exists());
-        assert!(!root.join(LOADER_DLL).exists());
-        assert!(root.join("notes.txt").exists());
-        assert!(root.join("Game").join("data.pak").exists());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn kept_mods_keep_their_saved_settings() {
-        let root = scratch("keep");
-        install_zzmi(&root);
-        let variant = root.join("zzmi");
-        std::fs::create_dir_all(variant.join("Mods").join("Cool Mod")).unwrap();
-        std::fs::write(variant.join("d3dx_user.ini"), "$x = 1").unwrap();
-        std::fs::write(variant.join("mine.txt"), "x").unwrap();
-        let result = uninstall_variant(&root, "zzmi", false).unwrap();
-        assert_eq!(result.kept, vec!["zzmi".to_string()]);
-        assert!(variant.join("Mods").join("Cool Mod").exists());
-        assert!(variant.join("d3dx_user.ini").exists());
-        assert!(variant.join("mine.txt").exists());
-        assert!(!variant.join("d3dx.ini").exists());
-        assert!(!variant.join("ShaderFixes").exists());
-        assert!(!variant.join("d3d11.dll").exists());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn peebifys_own_folder_is_cleared_completely() {
-        let root = scratch("owned");
-        install_core(&root);
-        record_version(&root, "zzmi", "v1").unwrap();
-        std::fs::write(root.join("extra.dll"), b"MZ").unwrap();
-        std::fs::write(root.join("zzmi").join("mine.txt"), "x").unwrap();
-        let result = uninstall_variant(&root, "zzmi", true).unwrap();
-        assert!(result.leftovers.is_empty(), "{:?}", result.leftovers);
-        let empty = || std::fs::read_dir(&root).unwrap().next().is_none();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !empty() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(empty());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn a_folder_peebify_never_installed_into_is_not_touched() {
-        let root = scratch("untouched");
-        std::fs::write(root.join("zzmi").join("mine.txt"), "x").unwrap();
-        let result = uninstall(&root, false).unwrap();
-        assert!(result.kept.is_empty());
-        assert!(root.join("zzmi").join("d3dx.ini").exists());
-        assert!(root.join("zzmi").join("mine.txt").exists());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    fn game_dir_with_migoto(root: &Path, name: &str, ini: &str) -> PathBuf {
-        let game = root.join(name);
-        std::fs::create_dir_all(game.join("ShaderFixes")).unwrap();
-        std::fs::write(game.join("d3d11.dll"), b"MZ").unwrap();
-        std::fs::write(game.join("d3dcompiler_47.dll"), b"MZ").unwrap();
-        std::fs::write(game.join("d3dx.ini"), ini).unwrap();
-        std::fs::write(game.join("Game.exe"), b"MZ").unwrap();
-        game
-    }
-
-    #[test]
-    fn the_game_sweep_leaves_other_tools_d3d11_alone() {
-        let root = scratch("sweep-foreign");
-        let dxvk = root.join("dxvk");
-        std::fs::create_dir_all(dxvk.join("ShaderCache")).unwrap();
-        std::fs::write(dxvk.join("d3d11.dll"), b"MZ").unwrap();
-        std::fs::write(dxvk.join("dxgi.dll"), b"MZ").unwrap();
-        std::fs::write(dxvk.join("d3dcompiler_47.dll"), b"MZ").unwrap();
-        let manual = game_dir_with_migoto(&root, "manual", "[Loader]\nloader = 3DMigoto Loader.exe\n");
-        let xxmi_libs = game_dir_with_migoto(&root, "xxmi-libs", "[Loader]\nloader = XXMI Launcher.exe\n");
-        std::fs::write(xxmi_libs.join(LOADER_DLL), b"MZ").unwrap();
-        let in_peebify_games = game_dir_with_migoto(
-            &root,
-            "in-peebify-games",
-            "[Loader]\nlaunch = C:\\Users\\X\\Peebify Games\\Game\\Game.exe\ntarget = \"C:\\Users\\X\\Peebify Games\\Game\\Game.exe\"\n",
-        );
-
-        let removed = sweep_game_dirs(&[
-            dxvk.clone(),
-            manual.clone(),
-            xxmi_libs.clone(),
-            in_peebify_games.clone(),
-        ]);
-        assert_eq!(removed, vec![xxmi_libs.join(LOADER_DLL).display().to_string()]);
-        for name in ["d3d11.dll", "dxgi.dll", "d3dcompiler_47.dll", "ShaderCache"] {
-            assert!(dxvk.join(name).exists(), "{name}");
-        }
-        for dir in [&manual, &xxmi_libs, &in_peebify_games] {
-            for name in ["d3d11.dll", "d3dcompiler_47.dll", "d3dx.ini", "ShaderFixes"] {
-                assert!(dir.join(name).exists(), "{name}");
-            }
-        }
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn the_game_sweep_removes_a_setup_peebify_placed() {
-        let root = scratch("sweep-owned");
-        let by_ini = game_dir_with_migoto(
-            &root,
-            "by-ini",
-            "[Loader]\nloader = C:\\Old\\3dmloader.exe\n[System]\nadditional_foreground_window = Peebify Overlay\n",
-        );
-        let by_legacy = game_dir_with_migoto(&root, "by-legacy", "[Loader]\nloader = x.exe\n");
-        std::fs::write(by_legacy.join("Peebify Mod Loader.exe"), b"MZ").unwrap();
-        let loose = root.join("loose");
-        std::fs::create_dir_all(&loose).unwrap();
-        std::fs::write(loose.join("3dmloader.exe"), b"MZ").unwrap();
-        std::fs::write(loose.join("d3d11.dll"), b"MZ").unwrap();
-
-        let removed = sweep_game_dirs(&[by_ini.clone(), by_legacy.clone(), loose.clone()]);
-        assert_eq!(removed.len(), 4 + 5 + 1, "{removed:?}");
-        for dir in [&by_ini, &by_legacy] {
-            for name in ["d3d11.dll", "d3dcompiler_47.dll", "d3dx.ini", "ShaderFixes"] {
-                assert!(!dir.join(name).exists(), "{name}");
-            }
-            assert!(dir.join("Game.exe").exists());
-        }
-        assert!(!by_legacy.join("Peebify Mod Loader.exe").exists());
-        assert!(!loose.join("3dmloader.exe").exists());
-        assert!(loose.join("d3d11.dll").exists());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn the_game_sweep_keeps_its_proof_while_a_file_is_stuck() {
-        let root = scratch("sweep-stuck");
-        let game = game_dir_with_migoto(&root, "game", "[Loader]\nloader = x.exe\n");
-        std::fs::write(game.join("3dmloader.exe"), b"MZ").unwrap();
-        std::fs::remove_file(game.join("d3d11.dll")).unwrap();
-        std::fs::create_dir_all(game.join("d3d11.dll").join("held")).unwrap();
-
-        sweep_game_dirs(std::slice::from_ref(&game));
-        assert!(game.join("d3dx.ini").is_file());
-        assert!(game.join("3dmloader.exe").is_file());
-        assert!(!game.join("d3dcompiler_47.dll").exists());
-        assert!(!game.join("ShaderFixes").exists());
-
-        std::fs::remove_dir_all(game.join("d3d11.dll")).unwrap();
-        std::fs::write(game.join("d3d11.dll"), b"MZ").unwrap();
-        sweep_game_dirs(std::slice::from_ref(&game));
-        for name in ["d3d11.dll", "d3dx.ini", "3dmloader.exe"] {
-            assert!(!game.join(name).exists(), "{name}");
-        }
-        assert!(game.join("Game.exe").exists());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn updates_merge_into_shaderfixes_and_report_what_they_wrote() {
+    fn updates_merge_into_shaderfixes_without_dropping_extra_files() {
         let root = scratch("merge");
         let source = root.join("pkg");
         std::fs::create_dir_all(source.join("ShaderFixes")).unwrap();
@@ -1892,9 +2137,8 @@ mod tests {
         std::fs::create_dir_all(destination.join("Mods")).unwrap();
         std::fs::write(destination.join("ShaderFixes").join("fix.ini"), "old").unwrap();
         std::fs::write(destination.join("ShaderFixes").join("dump.txt"), "mine").unwrap();
-        let mut written = merge_dir(&source, &destination).unwrap();
-        written.sort();
-        assert_eq!(written, vec!["ShaderFixes".to_string(), "d3dx.ini".to_string()]);
+        merge_dir(&source, &destination).unwrap();
+        assert!(destination.join("d3dx.ini").is_file());
         let fix = std::fs::read_to_string(destination.join("ShaderFixes").join("fix.ini")).unwrap();
         assert_eq!(fix, "new");
         assert!(destination.join("ShaderFixes").join("dump.txt").exists());
@@ -1986,7 +2230,7 @@ mod tests {
             std::fs::write(dir.join(name), name.as_bytes()).unwrap();
         }
         std::fs::write(dir.join("zzmi").join("d3d11.dll"), b"stale").unwrap();
-        let integrity = xxmi_update::verify_integrity(&dir).unwrap();
+        let integrity = verify_integrity(&dir).unwrap();
         link_core_libs(&dir, "zzmi", false).unwrap();
         let module = dir.join("zzmi").join("d3d11.dll");
         let mut args = vec!["--dll".to_string(), dir.join(LOADER_DLL).display().to_string()];
@@ -1998,8 +2242,8 @@ mod tests {
                 .map(String::from),
         );
         let options = parse_options(&args).unwrap();
-        let loader = xxmi_update::file_sha256(&dir.join(LOADER_DLL)).unwrap();
-        let linked = xxmi_update::file_sha256(&module).unwrap();
+        let loader = file_sha256(&dir.join(LOADER_DLL)).unwrap();
+        let linked = file_sha256(&module).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(sha256_hex(&options.dll_sha256.unwrap()), loader);
         assert_eq!(sha256_hex(&options.module_sha256.unwrap()), linked);
@@ -2014,40 +2258,216 @@ mod tests {
     }
 
     #[test]
-    fn loader_failures_read_as_one_capitalised_sentence() {
-        use peebify_helpers::mods::{EXIT_NOT_MAPPED, EXIT_TARGET_EXITED, EXIT_TARGET_TIMEOUT};
-        assert_eq!(capitalized("the game"), "The game");
-        assert_eq!(capitalized(""), "");
+    fn stored_values_outside_the_declared_settings_are_dropped() {
         assert_eq!(
-            loader_failure_message("ZZZ", EXIT_TARGET_EXITED, true),
-            "ZZZ restarted itself before mods loaded. Close it and launch it again from Peebify."
+            sanitize_stored("System/proxy_d3d11", &json!(r"\\host\share\x.dll")),
+            None
         );
-        assert_eq!(
-            loader_failure_message("ZZZ", EXIT_NOT_MAPPED, true),
-            format!("ZZZ is running without mods. {}", capitalized(&describe_exit(EXIT_NOT_MAPPED)))
-        );
-        let idle = loader_failure_message("ZZZ", EXIT_TARGET_TIMEOUT, false);
-        assert!(idle.starts_with("Mods were not loaded for ZZZ. The game never started"));
-        assert!(!idle.contains('|'));
+        assert_eq!(sanitize_stored("Loader/target", &json!("Evil.exe")), None);
+        assert_eq!(sanitize_stored("no compound", &json!("1")), None);
     }
 
     #[test]
-    fn the_loader_log_reads_whole_or_as_a_tail() {
-        let dir = scratch("loaderlog");
-        let log = dir.join("mod-loader.log");
-        std::fs::write(&log, "a\nb\nc\nd\ne\n").unwrap();
-        assert_eq!(loader_log_tail(&log, 2), "d | e");
-        assert_eq!(loader_log_tail(&log, usize::MAX), "a | b | c | d | e");
-        assert_eq!(loader_log_tail(&dir.join("missing.log"), 4), "");
+    fn declared_settings_are_normalized_by_kind() {
+        assert_eq!(
+            sanitize_stored("Hunting/reload_fixes", &json!("no_modifiers VK_F10")),
+            Some(("Hunting", "reload_fixes", "no_modifiers VK_F10".to_string()))
+        );
+        assert_eq!(
+            sanitize_stored("hunting/RELOAD_CONFIG", &json!("ctrl alt VK_F5")),
+            Some(("Hunting", "reload_config", "ctrl alt VK_F5".to_string()))
+        );
+        assert_eq!(
+            sanitize_stored("Logging/show_warnings", &json!(true)),
+            Some(("Logging", "show_warnings", "1".to_string()))
+        );
+        assert_eq!(
+            sanitize_stored("System/dll_initialization_delay", &json!("99999")),
+            Some(("System", "dll_initialization_delay", "10000".to_string()))
+        );
+        assert_eq!(sanitize_stored("Logging/show_warnings", &json!("yes")), None);
+    }
+
+    #[test]
+    fn stored_values_cannot_smuggle_lines_or_sections() {
+        assert_eq!(
+            sanitize_stored(
+                "Hunting/reload_fixes",
+                &json!("no_modifiers VK_F10\r\n[System]\nproxy_d3d11 = x.dll")
+            ),
+            None
+        );
+        assert_eq!(
+            sanitize_stored("Hunting/reload_fixes", &json!(r"no_modifiers \\host\x.dll")),
+            None
+        );
+        assert_eq!(
+            sanitize_stored("System/dll_initialization_delay", &json!("5\n[x]")),
+            None
+        );
+    }
+
+
+    #[test]
+    fn a_signature_is_read_out_of_the_release_notes() {
+        let body = "Some notes\r\n\r\n## Signature\r\n- MEUCIQDabc+/==\r\n\r\nmore";
+        assert_eq!(parse_signature(body), None);
+        let body = "## Signature\n- MEUCIQDa\n";
+        assert_eq!(parse_signature(body).as_deref(), Some("MEUCIQDa"));
+        let body = "## Signature\r\n- MEUCIQDabcd=\r\n";
+        assert_eq!(parse_signature(body).as_deref(), Some("MEUCIQDabcd="));
+    }
+
+    #[test]
+    fn a_release_needs_a_package_zip_and_keeps_its_signature() {
+        let text = r###"{"tag_name":"v1.2.3","body":"## Signature\n- AAAA\n","assets":[{"name":"XXMI-PACKAGE-v1.2.3.zip","browser_download_url":"https://x/y.zip"}]}"###;
+        let release = parse_release("xxmi", text).unwrap();
+        assert_eq!(release.tag, "v1.2.3");
+        assert_eq!(release.asset_name, "XXMI-PACKAGE-v1.2.3.zip");
+        assert_eq!(release.signature.as_deref(), Some("AAAA"));
+        let text = r#"{"tag_name":"v1","body":"","assets":[{"name":"notes.txt","browser_download_url":"u"}]}"#;
+        assert!(parse_release("xxmi", text).is_err());
+    }
+
+    #[test]
+    fn every_package_has_a_publisher_key_that_parses() {
+        use base64::Engine;
+        use p384::ecdsa::VerifyingKey;
+        use p384::pkcs8::DecodePublicKey;
+        for (package, key) in PUBLIC_KEYS {
+            let der = base64::engine::general_purpose::STANDARD.decode(key).unwrap();
+            assert!(VerifyingKey::from_public_key_der(&der).is_ok(), "{package}");
+        }
+    }
+
+    #[test]
+    fn a_bad_signature_is_refused() {
+        let bogus = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            [0x30u8, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01],
+        );
+        assert!(verify_signature("xxmi", b"hello", &bogus).is_err());
+        assert!(verify_signature("xxmi", b"hello", "not base64!").is_err());
+    }
+
+    fn empty_scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("peebify-xxmi-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_missing_pin_is_recorded_and_a_changed_file_is_refused() {
+        let dir = empty_scratch("pins");
+        for name in CORE_FILES {
+            std::fs::write(dir.join(name), name.as_bytes()).unwrap();
+        }
+        let mut state = UpdateState::default();
+        for name in [LOADER_DLL, "d3d11.dll"] {
+            state
+                .integrity
+                .insert(name.to_string(), file_sha256(&dir.join(name)).unwrap());
+        }
+        write_state(&dir, &state).unwrap();
+        let verified = verify_integrity(&dir).unwrap();
+        assert!(current_state(&dir).unwrap().integrity.contains_key("d3dcompiler_47.dll"));
+        for name in CORE_FILES {
+            assert_eq!(verified[name], file_sha256(&dir.join(name)).unwrap());
+        }
+        std::fs::write(dir.join("d3dcompiler_47.dll"), b"swapped").unwrap();
+        assert!(verify_integrity(&dir).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn only_rate_limits_timeouts_and_server_errors_are_retried() {
-        assert!(retryable_download_status(503));
-        assert!(retryable_download_status(429));
-        assert!(retryable_download_status(408));
-        assert!(!retryable_download_status(404));
-        assert!(!retryable_download_status(403));
+    fn an_unreadable_state_file_reads_as_empty() {
+        let dir = empty_scratch("torn");
+        std::fs::write(dir.join(STATE_FILE), "{\"packages\":{\"xx").unwrap();
+        assert!(current_state(&dir).unwrap().packages.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_state_file_that_cannot_be_read_is_left_alone() {
+        let dir = empty_scratch("blocked");
+        for name in CORE_FILES {
+            std::fs::write(dir.join(name), name.as_bytes()).unwrap();
+        }
+        std::fs::create_dir_all(dir.join(STATE_FILE)).unwrap();
+        let recorded = record_integrity(&dir);
+        let still_there = dir.join(STATE_FILE).is_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(recorded.is_err());
+        assert!(still_there);
+    }
+
+    #[test]
+    fn a_release_check_keeps_pins_recorded_while_it_ran() {
+        let dir = empty_scratch("pin-race");
+        for name in CORE_FILES {
+            std::fs::write(dir.join(name), name.as_bytes()).unwrap();
+        }
+        let mut stale = UpdateState::default();
+        stale.integrity.insert("d3d11.dll".into(), "00".into());
+        stale.packages.insert(
+            "xxmi".into(),
+            PackageState {
+                etag: Some("\"abc\"".into()),
+                ..Default::default()
+            },
+        );
+        write_state(&dir, &stale).unwrap();
+
+        let entry = current_state(&dir).unwrap().packages.remove("xxmi").unwrap();
+        let pins = record_integrity(&dir).unwrap();
+        update_package(&dir, "xxmi", |stored| stored.latest_tag = Some("v2".into()));
+        let after = current_state(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(entry.etag.as_deref(), Some("\"abc\""));
+        assert_eq!(after.integrity, pins);
+        assert_eq!(after.packages["xxmi"].latest_tag.as_deref(), Some("v2"));
+        assert_eq!(after.packages["xxmi"].etag.as_deref(), Some("\"abc\""));
+    }
+
+    #[test]
+    fn concurrent_state_writers_lose_nothing() {
+        let dir = empty_scratch("writers");
+        for name in CORE_FILES {
+            std::fs::write(dir.join(name), name.as_bytes()).unwrap();
+        }
+        let packages: Vec<String> = (0..8).map(|i| format!("pkg{i}")).collect();
+        std::thread::scope(|scope| {
+            for package in &packages {
+                let dir = &dir;
+                scope.spawn(move || {
+                    for round in 0..5 {
+                        update_package(dir, package, |stored| stored.retry_after = Some(round));
+                    }
+                });
+            }
+            scope.spawn(|| {
+                for _ in 0..5 {
+                    verify_integrity(&dir).unwrap();
+                    record_integrity(&dir).unwrap();
+                }
+            });
+        });
+        let state = current_state(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(state.integrity.len(), CORE_FILES.len());
+        for package in &packages {
+            assert_eq!(state.packages[package].retry_after, Some(4), "{package}");
+        }
+    }
+
+    #[test]
+    fn a_pinned_publisher_signature_still_verifies() {
+        let key = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEcszeM3U3YiReAV2pLkj6AoSVUi3EI1bH499R3PVqXhnedCrNOhn3mvNy3JcF9WDYV7kFEaBAasE3vmG2lZnOTIbBxTEK7cxP8LBKvJOuXGPRXkoBV89q57pfrIXn3mZi";
+        let sig = "MGYCMQDDJeBNaUthhNxgQeHTZNF4sG7Su4LXw0kifkTE8koTy6FVoxfhqaoM/6hBb3w8WKkCMQCnUcUcckgCdy2g8pz2+l4e/7TxTgleQHEVReI660bVqm80AnqFfR5WXQwikLYG03Y=";
+        assert!(verify_with_key("xxmi", key, b"peebify-xxmi-kat", sig).is_ok());
+        assert!(verify_with_key("xxmi", key, b"peebify-xxmi-kaT", sig).is_err());
     }
 }

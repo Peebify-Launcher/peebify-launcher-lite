@@ -11,10 +11,10 @@ import {
   type PointerEvent,
   type RefObject,
 } from "react";
-import { createPortal } from "react-dom";
-import { AnimatePresence, m } from "framer-motion";
 import { Check, Pipette, Undo2 } from "lucide-react";
-import { useClickOutside, useEscapeKey } from "../../lib/useClickOutside";
+import { useClickOutside, useDismissOnViewportChange, useEscapeKey } from "../../lib/hooks";
+import { DropPanel } from "./PopoverMenu";
+import { useT } from "../../lib/useT";
 import { Hint } from "./Tooltip";
 
 interface Hsv {
@@ -70,7 +70,6 @@ function hsvToHex({ h, s, v }: Hsv): string {
   return `#${[f(5), f(3), f(1)].map((n) => n.toString(16).padStart(2, "0")).join("")}`;
 }
 
-// Picks black or white for an icon drawn on top of the color.
 function inkFor(hex: string): string {
   const [r, g, b] = hexToRgb(hex).map((n) => {
     const c = n / 255;
@@ -82,8 +81,6 @@ function inkFor(hex: string): string {
 type EyeDropperCtor = new () => { open: () => Promise<{ sRGBHex: string }> };
 const EyeDropper = (window as unknown as { EyeDropper?: EyeDropperCtor }).EyeDropper;
 
-// Pointer dragging shared by the color field and the hue strip: reports the pointer position as 0..1 fractions
-// of the element, and keeps tracking while the button is held even outside it.
 function useDrag(onMove: (x: number, y: number) => void) {
   const [dragging, setDragging] = useState(false);
   const report = (e: PointerEvent<HTMLElement>) => {
@@ -127,9 +124,8 @@ function ColorPanel({
   label: string;
   fieldRef: RefObject<HTMLDivElement | null>;
 }) {
+  const t = useT();
   const [original] = useState(value);
-  // Hue and saturation are kept here rather than re-derived from the hex, so dragging into grey or black
-  // doesn't throw the hue away.
   const [state, setState] = useState(() => ({ hex: value, hsv: hexToHsv(value) }));
   let hsv = state.hsv;
   if (state.hex !== value) {
@@ -182,7 +178,6 @@ function ColorPanel({
       const hex = parseHex(sRGBHex);
       if (hex) applyHex(hex);
     } catch {
-      // Cancelled with Escape.
     }
   };
 
@@ -202,8 +197,11 @@ function ColorPanel({
         ref={fieldRef}
         role="slider"
         tabIndex={0}
-        aria-label={`${label}: saturation and brightness`}
-        aria-valuetext={`Saturation ${Math.round(hsv.s * 100)}%, brightness ${Math.round(hsv.v * 100)}%`}
+        aria-label={t("ui.colorPicker.field", { label })}
+        aria-valuetext={t("ui.colorPicker.fieldValue", {
+          saturation: Math.round(hsv.s * 100),
+          brightness: Math.round(hsv.v * 100),
+        })}
         aria-valuenow={Math.round(hsv.s * 100)}
         onKeyDown={onFieldKey}
         {...field.bind}
@@ -222,7 +220,7 @@ function ColorPanel({
       <div
         role="slider"
         tabIndex={0}
-        aria-label={`${label}: hue`}
+        aria-label={t("ui.colorPicker.hue", { label })}
         aria-valuemin={0}
         aria-valuemax={360}
         aria-valuenow={Math.round(hsv.h)}
@@ -241,11 +239,11 @@ function ColorPanel({
       </div>
 
       <div className="flex items-center gap-[8px]">
-        <Hint tip={changed ? "Click the left half to go back" : undefined} className="flex shrink-0">
+        <Hint tip={changed ? t("ui.colorPicker.revertHint") : undefined} className="flex shrink-0">
           <div className="flex h-[34px] w-[46px] overflow-hidden rounded-[8px] ring-1 ring-inset ring-white/15">
             <button
               type="button"
-              aria-label="Go back to the color you started with"
+              aria-label={t("ui.colorPicker.revert")}
               disabled={!changed}
               onClick={() => applyHex(original)}
               className="group grid flex-1 place-items-center disabled:cursor-default"
@@ -273,15 +271,15 @@ function ColorPanel({
             }}
             spellCheck={false}
             maxLength={7}
-            aria-label={`${label}: hex code`}
+            aria-label={t("ui.colorPicker.hex", { label })}
             className="min-w-0 flex-1 bg-transparent uppercase text-white outline-none"
           />
         </label>
         {EyeDropper && (
-          <Hint tip="Pick a color from the screen" placement="bottom" className="flex shrink-0">
+          <Hint tip={t("ui.colorPicker.eyedropper")} placement="bottom" className="flex shrink-0">
             <button
               type="button"
-              aria-label="Pick a color from the screen"
+              aria-label={t("ui.colorPicker.eyedropper")}
               onClick={() => void pickFromScreen()}
               className="grid size-[34px] place-items-center rounded-[8px] border border-white/10 bg-white/[0.04] text-white/70 transition duration-150 hover:bg-white/[0.1] hover:text-white active:scale-[0.95]"
             >
@@ -292,7 +290,7 @@ function ColorPanel({
       </div>
 
       <div className="flex flex-col gap-[7px]">
-        <div className={SECTION_LABEL}>Presets</div>
+        <div className={SECTION_LABEL}>{t("ui.colorPicker.presets")}</div>
         <div className="grid grid-cols-8 gap-[6px]">
           {presets.map((preset) => {
             const active = preset === value;
@@ -300,7 +298,7 @@ function ColorPanel({
               <button
                 key={preset}
                 type="button"
-                aria-label={`Use ${preset.toUpperCase()}`}
+                aria-label={t("ui.colorPicker.usePreset", { color: preset.toUpperCase() })}
                 aria-pressed={active}
                 onClick={() => applyHex(preset)}
                 className={`grid aspect-square place-items-center rounded-[6px] ring-inset transition duration-150 hover:scale-[1.1] active:scale-[0.95] ${
@@ -338,7 +336,6 @@ export function ColorPopover({
   const panelRef = useRef<HTMLDivElement>(null);
   const fieldRef = useRef<HTMLDivElement>(null);
   const [style, setStyle] = useState<CSSProperties>({});
-  const [up, setUp] = useState(false);
 
   useClickOutside([anchorRef, panelRef], onClose, open);
   useEscapeKey(() => {
@@ -352,7 +349,6 @@ export function ColorPopover({
     if (!rect) return;
     const flipUp =
       rect.bottom + PANEL_HEIGHT_ESTIMATE + EDGE > window.innerHeight && rect.top > PANEL_HEIGHT_ESTIMATE;
-    setUp(flipUp);
     setStyle({
       position: "fixed",
       width: PANEL_WIDTH,
@@ -362,38 +358,13 @@ export function ColorPopover({
   }, [open, anchorRef]);
 
   useEffect(() => {
-    if (!open) return;
-    fieldRef.current?.focus({ preventScroll: true });
-    const close = (e: Event) => {
-      if (panelRef.current?.contains(e.target as Node)) return;
-      onClose();
-    };
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("resize", close);
-    return () => {
-      window.removeEventListener("scroll", close, true);
-      window.removeEventListener("resize", close);
-    };
-  }, [open, onClose]);
+    if (open) fieldRef.current?.focus({ preventScroll: true });
+  }, [open]);
+  useDismissOnViewportChange(panelRef, onClose, open);
 
-  return createPortal(
-    <AnimatePresence>
-      {open && (
-        <m.div
-          ref={panelRef}
-          role="dialog"
-          aria-label={label}
-          initial={{ opacity: 0, scale: 0.96, y: up ? 4 : -4 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.97, y: up ? 4 : -4 }}
-          transition={{ duration: 0.14, ease: [0.4, 0, 0.2, 1] }}
-          style={{ ...style, transformOrigin: up ? "bottom right" : "top right" }}
-          className="z-(--z-tooltip) overflow-hidden rounded-ui border border-white/15 bg-[rgba(20,20,26,0.97)] shadow-2xl backdrop-blur-xl"
-        >
-          <ColorPanel value={value} onChange={onChange} presets={presets} label={label} fieldRef={fieldRef} />
-        </m.div>
-      )}
-    </AnimatePresence>,
-    document.body,
+  return (
+    <DropPanel open={open} panelRef={panelRef} style={style} role="dialog" ariaLabel={label}>
+      <ColorPanel value={value} onChange={onChange} presets={presets} label={label} fieldRef={fieldRef} />
+    </DropPanel>
   );
 }

@@ -13,7 +13,6 @@ use std::time::{Duration, Instant, SystemTime};
 use parking_lot::Mutex;
 use serde_json::Value;
 
-// Pruning runs before the new session's log is created, so four older ones plus it make five.
 const KEEP_PREVIOUS_LAUNCH_LOGS: usize = 4;
 const MAX_LAUNCH_LOGS_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_CRASH_LOG_BYTES: u64 = 1024 * 1024;
@@ -38,6 +37,7 @@ struct Sink {
 }
 
 static SINK: OnceLock<Sink> = OnceLock::new();
+static BOOT: OnceLock<Instant> = OnceLock::new();
 static PENDING: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static SESSION_ENDED: AtomicBool = AtomicBool::new(false);
 static PENDING_IN_CRASH_FILE: AtomicUsize = AtomicUsize::new(0);
@@ -141,15 +141,29 @@ fn format_line(level: &str, message: &str) -> String {
     }
 }
 
+pub fn mark_boot() {
+    let _ = BOOT.set(Instant::now());
+}
+
+pub fn since_boot_ms() -> u128 {
+    BOOT.get().map(|t| t.elapsed().as_millis()).unwrap_or(0)
+}
+
 pub fn init(logs_dir: &Path, boot_launch: Option<bool>) {
     if SINK.get().is_some() {
         return;
     }
     let _ = std::fs::create_dir_all(logs_dir);
-    prune_old_launch_logs(logs_dir);
 
     let stamp = iso_now().replace(':', "-");
     let launch_name = format!("launch-{stamp}.log");
+    {
+        let dir = logs_dir.to_path_buf();
+        let current = launch_name.clone();
+        let _ = std::thread::Builder::new()
+            .name("log-prune".to_string())
+            .spawn(move || prune_old_launch_logs(&dir, &current));
+    }
     let session_marker = logs_dir.join(SESSION_MARKER);
     let unclean_previous = std::fs::read_to_string(&session_marker).ok();
     let sink = Sink {
@@ -291,15 +305,19 @@ fn stale_launch_logs(files: Vec<LaunchLogFile>) -> Vec<String> {
     stale
 }
 
-fn prune_old_launch_logs(dir: &Path) {
+fn prune_old_launch_logs(dir: &Path, current: &str) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
+    let current_group = launch_log_group(current).to_string();
     let files: Vec<LaunchLogFile> = entries
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
             if !(name.starts_with("launch-") && name.ends_with(".log")) {
+                return None;
+            }
+            if launch_log_group(&name) == current_group {
                 return None;
             }
             let meta = e.metadata().ok()?;
@@ -328,7 +346,7 @@ pub fn append(level: &str, message: &str) {
 }
 
 fn fallback_crash_file() -> Option<PathBuf> {
-    super::state::user_data_dir_before_setup().map(|dir| dir.join("logs").join("crashes.log"))
+    super::user_data_dir_before_setup().map(|dir| dir.join("logs").join("crashes.log"))
 }
 
 fn crash(message: &str) {

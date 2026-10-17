@@ -1,8 +1,8 @@
 // ------------ Tooltip ------------
-// The launcher's own hover text. Hint wraps anything to give it a tooltip, and the portal draws it above
-// everything else and keeps it inside the window. Shows on keyboard focus as well as hover.
+// The launcher's own hover text. Hint wraps anything to give it a tooltip, IconButton is a button with one, and the
+// portal draws it above everything else and keeps it inside the window. Shows on keyboard focus as well as hover.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { ButtonHTMLAttributes, ReactNode, RefObject, SyntheticEvent } from "react";
 import { createPortal } from "react-dom";
 
 const TIP_CLAIM = "peebify:tooltip-claim";
@@ -10,6 +10,15 @@ const EDGE = 8;
 const GAP = 12;
 
 type Placement = "right" | "left" | "bottom" | "cursor";
+
+export const WRAPPED_TIP = "block max-w-[360px] whitespace-normal";
+
+const BUD_ORIGIN: Record<Placement, string> = {
+  right: "origin-left",
+  left: "origin-right",
+  bottom: "origin-top",
+  cursor: "origin-top-left",
+};
 
 export function TooltipPortal({
   x,
@@ -58,7 +67,7 @@ export function TooltipPortal({
     <span
       ref={boxRef}
       role="tooltip"
-      className="pointer-events-none fixed z-(--z-tooltip) whitespace-nowrap rounded-[7px] border border-white/10 bg-[rgba(20,20,26,0.95)] px-[10px] py-[6px] text-[12px] font-medium text-white shadow-lg"
+      className={`tooltip-bud pointer-events-none fixed z-(--z-tooltip) whitespace-nowrap rounded-[7px] border border-white/10 bg-[rgba(20,20,26,0.95)] px-[10px] py-[6px] text-[12px] font-medium text-white shadow-lg ${BUD_ORIGIN[placement]}`}
       style={pos ? { left: pos.left, top: pos.top } : { left: -9999, top: -9999 }}
     >
       {children}
@@ -91,7 +100,52 @@ export function Hint({
   );
 }
 
-export function useAnchoredTip<T extends HTMLElement>(placement: Exclude<Placement, "cursor"> = "right") {
+type TipHandlers = ReturnType<typeof useAnchoredTip>["bind"];
+
+export function IconButton({
+  label,
+  tip = label,
+  placement = "bottom",
+  buttonRef,
+  children,
+  ...props
+}: {
+  label?: string;
+  tip?: ReactNode;
+  placement?: Exclude<Placement, "cursor">;
+  buttonRef?: RefObject<HTMLButtonElement | null>;
+} & ButtonHTMLAttributes<HTMLButtonElement>) {
+  const hint = useAnchoredTip<HTMLButtonElement>(placement);
+  const handlers = Object.fromEntries(
+    Object.entries(hint.bind).map(([name, own]) => [
+      name,
+      (e: SyntheticEvent) => {
+        (own as (e: SyntheticEvent) => void)(e);
+        (props[name as keyof TipHandlers] as ((e: SyntheticEvent) => void) | undefined)?.(e);
+      },
+    ]),
+  );
+  return (
+    <button
+      {...props}
+      {...handlers}
+      aria-label={props["aria-label"] ?? label}
+      ref={(el) => {
+        hint.anchorRef.current = el;
+        if (buttonRef) buttonRef.current = el;
+      }}
+    >
+      {children}
+      {tip && hint.shown && (
+        <TooltipPortal x={hint.pos.x} y={hint.pos.y} placement={placement}>
+          {tip}
+        </TooltipPortal>
+      )}
+    </button>
+  );
+}
+
+function useAnchoredTip<T extends HTMLElement>(placement: Exclude<Placement, "cursor"> = "right") {
   const anchorRef = useRef<T>(null);
   const pointer = useRef({ x: 0, y: 0 });
   const viaFocus = useRef(false);

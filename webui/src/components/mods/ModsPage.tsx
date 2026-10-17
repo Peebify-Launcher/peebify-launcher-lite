@@ -1,56 +1,53 @@
 // ------------ Mods Page ------------
-// The Mods tab. Shows the mod support switch, the game picker and setup for the mod tools (XXMI, the loader
-// Peebify uses), then switches between the Library and Browse views.
+// The Mods tab, with the mod support switch at its top.
 import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence, m } from "framer-motion";
 import {
   AlertTriangle,
-  ArrowUpCircle,
-  Download,
   Eye,
   FolderCog,
   FolderOpen,
   Lock,
-  Package,
   Puzzle,
   RefreshCw,
   Settings2,
   Timer,
 } from "lucide-react";
 import { fadeVariants } from "../../lib/motion";
-import { requestEnableMods } from "../../lib/mods";
-import { gameById } from "../../data/games";
-import type { GameId } from "../../types/game";
+import { useModsStore, useModProfilesStore } from "../../store/mods";
+import { MOD_RISK_WARNING } from "../../lib/mods";
+import { useT } from "../../lib/useT";
+import { gameById, type GameId } from "../../data/games";
+import { MODS_SETTINGS } from "../../data/settings";
 import { useUiStore } from "../../store/uiStore";
 import { useSessionUiStore } from "../../store/sessionUiStore";
-import { useModsStore } from "../../store/modsStore";
-import { useNotificationStore } from "../../store/notificationStore";
+import { useNotificationStore } from "../../store/notifications";
 import { useModalStore } from "../../store/modalStore";
 import {
   chooseModsPath,
   getLoaderSettings,
-  installModToolchain,
   openModsFolder,
   resetModsPath,
   setConfigValue,
   setGameModsEnabled,
   setLoaderSetting,
-  uninstallModToolchain,
   type LoaderSetting,
 } from "../../lib/ipc";
-import { NumberField } from "../ui/NumberField";
-import { GamePickerGrid } from "../settings/GamePickerGrid";
+import { NumberField, SettingRow, SettingsExpander } from "../settings/SettingRow";
+import { GamePickerGrid } from "../ui/GamePickerGrid";
 import { GlassPage } from "../ui/GlassPage";
-import { GroupBox } from "../ui/SettingsGroup";
-import { SettingCard } from "../ui/SettingCard";
-import { SettingsExpander } from "../ui/SettingsExpander";
-import { ActionButton } from "../ui/ActionButton";
-import { SegmentedControl } from "../ui/SegmentedControl";
-import { Toggle } from "../ui/Toggle";
+import { GroupBox, GroupLabel, SettingCard } from "../ui/panels";
+import { ActionButton, SegmentedControl, Toggle } from "../ui/controls";
 import { ModsHub, type BrowseSeed } from "./ModsHub";
 import { BrowseMods } from "./BrowseMods";
+import { ModsOptIn } from "./ModsOptIn";
 
+// ------------ Page ------------
+// The Mods tab. Shows the mod support switch, the game picker and setup for the mod tools (XXMI, the loader
+// Peebify uses), then switches between the Library and Browse views. The mod support switch and the NSFW toggle
+// live here too, since Settings has no Mods tab.
 export function ModsPage() {
+  const t = useT();
   const activeId = useUiStore((s) => s.activeGameId);
   const push = useNotificationStore((s) => s.push);
   const openConfirm = useModalStore((s) => s.openConfirm);
@@ -60,32 +57,52 @@ export function ModsPage() {
   const requestedGameId = useModsStore((s) => s.requestedGameId);
   const refresh = useModsStore((s) => s.refresh);
   const refreshIfCurrent = useModsStore((s) => s.refreshIfCurrent);
-  const setProgress = useModsStore((s) => s.setProgress);
   const setMasterEnabled = useModsStore((s) => s.setMasterEnabled);
 
-  const game = gameById(activeId);
+  const [shownId, setShownId] = useState(activeId);
+  const game = gameById(shownId);
   const tab = useSessionUiStore((s) => s.modsTab);
   const setTab = useSessionUiStore((s) => s.setModsTab);
-  const [toolsBusyFor, setToolsBusyFor] = useState<ReadonlySet<string>>(() => new Set());
-  const toolsBusy = toolsBusyFor.has(activeId);
-  const markToolsBusy = (id: string, on: boolean) =>
-    setToolsBusyFor((prev) => {
-      const next = new Set(prev);
-      if (on) next.add(id);
-      else next.delete(id);
-      return next;
-    });
+  const [rescanning, setRescanning] = useState(false);
   const [setupOpen, setSetupOpen] = useState<boolean | null>(null);
   const [browseSeed, setBrowseSeed] = useState<BrowseSeed | null>(null);
   const clearBrowseSeed = useCallback(() => setBrowseSeed(null), []);
-  const [loaderSettings, setLoaderSettings] = useState<LoaderSetting[]>([]);
+  const [loader, setLoader] = useState<{ gameId: GameId; rows: LoaderSetting[] } | null>(null);
+  const loaderSettings = loader?.gameId === shownId ? loader.rows : [];
 
   useEffect(() => {
-    setSetupOpen(null);
-    void refresh(activeId);
+    let cancelled = false;
+    let swapped = false;
+    const swap = () => {
+      if (cancelled || swapped) return;
+      swapped = true;
+      setShownId(activeId);
+      setSetupOpen(null);
+    };
+    void (async () => {
+      try {
+        const mods = await useModsStore.getState().prepare(activeId);
+        const [commitProfiles, rows] = await Promise.all([
+          useModProfilesStore.getState().prepare(activeId),
+          mods.status.toolchainInstalled ? getLoaderSettings(activeId).then((r) => r.rows) : [],
+        ]);
+        if (cancelled) return;
+        mods.commit();
+        commitProfiles();
+        setLoader({ gameId: activeId, rows });
+        swap();
+      } catch {
+        if (!cancelled) void refresh(activeId);
+      }
+    })();
+    const timer = window.setTimeout(swap, 2500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [activeId, refresh]);
 
-  const current = loadedGameId === activeId;
+  const current = loadedGameId === shownId;
 
   useEffect(() => {
     const s = useModsStore.getState();
@@ -97,37 +114,33 @@ export function ModsPage() {
   const toolsInstalled = status?.toolchainInstalled ?? false;
 
   useEffect(() => {
+    if (!current) return;
     let cancelled = false;
     if (!toolsInstalled) {
-      setLoaderSettings([]);
+      setLoader({ gameId: shownId, rows: [] });
       return;
     }
-    void getLoaderSettings(activeId).then((rows) => {
-      if (!cancelled) setLoaderSettings(rows);
+    void getLoaderSettings(shownId).then(({ rows }) => {
+      if (!cancelled) setLoader({ gameId: shownId, rows });
     });
     return () => {
       cancelled = true;
     };
-  }, [activeId, toolsInstalled]);
+  }, [shownId, toolsInstalled, current]);
 
   const changeLoaderSetting = async (id: string, value: string) => {
-    const gameId = activeId;
-    const ok = await setLoaderSetting(gameId, id, value);
-    if (!ok) return;
-    const rows = await getLoaderSettings(gameId);
-    if (useUiStore.getState().activeGameId === gameId) setLoaderSettings(rows);
+    const gameId = shownId;
+    if (!(await setLoaderSetting(gameId, id, value)).ok) return;
+    const { rows } = await getLoaderSettings(gameId);
+    setLoader((prev) => (prev?.gameId === gameId || prev === null ? { gameId, rows } : prev));
   };
 
   const master = status?.masterEnabled ?? false;
   const supported = status?.supportsMods ?? false;
   const gameOn = status?.gameEnabled ?? false;
   const modCapableIds = (status?.supportedGames ?? []).map((g) => g.id as GameId);
-  const toolchainUpdates = status?.updates ?? [];
-  const autoUpdate = status?.autoUpdate ?? true;
-  const updateSummary = toolchainUpdates
-    .map((u) => `${u.package.toUpperCase()} ${u.installed} → ${u.latest}`)
-    .join(", ");
-  const hasGameBanana = !!status?.supportedGames.find((g) => g.id === activeId)?.gameBananaId;
+  const toolsInstalling = status?.toolsInstalling ?? false;
+  const hasGameBanana = !!status?.supportedGames.find((g) => g.id === shownId)?.gameBananaId;
   const showSetup = setupOpen ?? !toolsInstalled;
   const library = tab === "installed" || !hasGameBanana;
 
@@ -137,86 +150,43 @@ export function ModsPage() {
       ? `${variantLabel} ${status.versions[status.variant]}`
       : variantLabel;
   const setupSummary = !toolsInstalled
-    ? "The mod tools aren't installed yet"
-    : `${versionLabel} installed, mods ${gameOn ? "on" : "off"} for ${game.name}`;
+    ? t(toolsInstalling ? "mods.page.setup.summaryInstalling" : "mods.page.setup.summaryNotInstalled")
+    : gameOn
+      ? t("mods.page.setup.summaryOn", { version: versionLabel, game: game.name })
+      : t("mods.page.setup.summaryOff", { version: versionLabel, game: game.name });
 
   const enableMaster = () =>
-    requestEnableMods(() => {
-      void setConfigValue("behavior.modsEnabled", true).then(() => {
-        setMasterEnabled(true);
-        void refreshIfCurrent(activeId);
-      });
+    void setConfigValue("behavior.modsEnabled", true).then(() => {
+      setMasterEnabled(true);
+      void refreshIfCurrent(activeId);
+      push({ type: "success", title: t("mods.page.off.enabledTitle"), text: t("mods.page.off.enabledText") });
     });
 
   const toggleGame = async (on: boolean) => {
-    const result = await setGameModsEnabled(activeId, on);
-    if (!on && result?.sweptFiles.length) {
-      push({
-        title: "Cleaned up mod files",
-        text: `Removed ${result.sweptFiles.length} leftover 3DMigoto file${
-          result.sweptFiles.length === 1 ? "" : "s"
-        } from the ${game.name} folder.`,
-      });
-    }
-    void refreshIfCurrent(activeId);
+    await setGameModsEnabled(shownId, on);
+    void refreshIfCurrent(shownId);
   };
 
-  const installTools = async () => {
-    if (toolsBusy) return;
-    markToolsBusy(activeId, true);
-    const result = await installModToolchain(activeId);
-    markToolsBusy(activeId, false);
-    setProgress(null);
-    if (result) {
-      push(
-        result.changed
-          ? { type: "success", title: "Mod tools ready", text: `They're installed for ${game.name}.` }
-          : { title: "Nothing to update", text: `The mod tools for ${game.name} are already up to date.` },
-      );
+  const rescanMods = async () => {
+    if (rescanning) return;
+    const gameId = shownId;
+    setRescanning(true);
+    try {
+      await Promise.all([refresh(gameId), useModProfilesStore.getState().refresh(gameId)]);
+    } finally {
+      setRescanning(false);
     }
-    void refreshIfCurrent(activeId);
   };
-
-  const confirmUninstallTools = () =>
-    openConfirm({
-      title: `Uninstall the mod tools for ${game.name}?`,
-      message: `This removes the ${variantLabel} loader and clears any 3DMigoto files left in the ${game.name} folder. Your mods and their settings stay installed, so they'll work again if you reinstall the tools.`,
-      confirmLabel: "Uninstall tools",
-      danger: true,
-      onConfirm: () => {
-        void (async () => {
-          markToolsBusy(activeId, true);
-          const result = await uninstallModToolchain(activeId);
-          markToolsBusy(activeId, false);
-          if (result?.leftovers.length) {
-            push({
-              type: "warning",
-              title: "Some mod tool files were left behind",
-              text: `Peebify couldn't remove ${result.leftovers.length} item(s), such as ${result.leftovers[0]}. Close anything using them and try again.`,
-            });
-          } else if (result) {
-            push({
-              type: "success",
-              title: "Mod tools removed",
-              text: result.keptMods.length
-                ? `Your ${game.name} mods are still there for when you reinstall.`
-                : "There were no mods to keep.",
-            });
-          }
-          void refreshIfCurrent(activeId);
-        })();
-      },
-    });
 
   const announceFolder = async (path: string | undefined) => {
     if (!path) return;
     await refreshIfCurrent(activeId);
     const found = useModsStore.getState().status?.toolchainInstalled ?? false;
     push({
-      title: "Mod tools folder changed",
+      title: t("mods.page.toasts.folderChangedTitle"),
       text: found
-        ? `Peebify now uses ${path}. The ${variantLabel} tools are already in it.`
-        : `Peebify now uses ${path}. The ${variantLabel} tools aren't in it yet, so install them from Setup.`,
+        ? t("mods.page.toasts.folderChangedFound", { path, variant: variantLabel })
+        : t("mods.page.toasts.folderChangedMissing", { path, variant: variantLabel }),
     });
   };
 
@@ -224,88 +194,84 @@ export function ModsPage() {
 
   const confirmChangeFolder = () =>
     openConfirm({
-      title: "Use a different mod tools folder?",
-      message: `Nothing gets moved. Your mods and tools stay in ${oldFolder}, and Peebify only shows what is in the folder you pick. Pick this folder again to see them.`,
-      confirmLabel: "Choose folder",
+      title: t("mods.page.confirm.changeFolderTitle"),
+      message: t("mods.page.confirm.changeFolderMessage", { folder: oldFolder }),
+      confirmLabel: t("mods.page.confirm.changeFolderConfirm"),
       onConfirm: () => void chooseModsPath().then(announceFolder),
     });
 
   const confirmResetFolder = () =>
     openConfirm({
-      title: "Go back to the default folder?",
-      message: `Nothing gets moved. Your mods and tools stay in ${oldFolder}, and Peebify goes back to its own folder. Pick this folder again to see them.`,
-      confirmLabel: "Reset folder",
+      title: t("mods.page.confirm.resetFolderTitle"),
+      message: t("mods.page.confirm.resetFolderMessage", { folder: oldFolder }),
+      confirmLabel: t("mods.page.confirm.resetFolderConfirm"),
       onConfirm: () => void resetModsPath().then(announceFolder),
     });
 
   return (
-    <GlassPage title="Mods" subtitle="Your mods, profiles and downloads for each game.">
+    <GlassPage title={t("common.mods")} subtitle={t("mods.page.subtitle")}>
+      <AnimatePresence mode="wait" initial={false}>
       {!status ? null : !master ? (
-        <div className="mx-auto mt-16 max-w-[460px] rounded-ui border border-dashed border-white/15 bg-white/[0.03] px-8 py-10 text-center">
-          <span className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-white/[0.06] text-white/60">
-            <AlertTriangle size={22} />
-          </span>
-          <h2 className="text-[16px] font-semibold">Mod support is turned off</h2>
-          <p className="mt-2 text-[13px] leading-[1.6] text-white/55">
-            Mods are made by other people and using them can get your account banned, so Peebify
-            keeps them off until you say otherwise. Turn them on to manage and browse mods here.
-          </p>
-          <div className="mt-5 flex justify-center">
-            <ActionButton variant="accent" onClick={enableMaster}>
-              Turn on mod support
-            </ActionButton>
-          </div>
-        </div>
+        <m.div key="opt-in" custom={0.2} variants={fadeVariants} initial="initial" animate="animate" exit="exit">
+          <ModsOptIn
+            games={status.supportedGames.map((g) => ({ id: g.id as GameId, variant: g.variant }))}
+            onTurnOn={enableMaster}
+          />
+        </m.div>
       ) : (
-        <>
+        <m.div key="mods" custom={0.2} variants={fadeVariants} initial="initial" animate="animate" exit="exit">
           <GamePickerGrid
             ids={modCapableIds.length ? modCapableIds : undefined}
             subtitleFor={(id) => {
               const g = status.supportedGames.find((s) => s.id === id);
-              if (!g) return { text: "No mod support", tone: "off" };
-              if (!g.installed) return { text: `${g.variant.toUpperCase()} · not installed`, tone: "off" };
-              if (!g.enabled) return { text: `${g.variant.toUpperCase()} · ready`, tone: "off" };
-              return { text: `${g.variant.toUpperCase()} · on`, tone: "on" };
+              if (!g) return { text: t("mods.page.picker.noSupport"), tone: "off" };
+              const variant = g.variant.toUpperCase();
+              if (!g.installed) {
+                const key = status.toolsInstalling ? "mods.page.picker.installing" : "mods.page.picker.notInstalled";
+                return { text: t(key, { variant }), tone: "off" };
+              }
+              if (!g.enabled) return { text: t("mods.page.picker.ready", { variant }), tone: "off" };
+              return { text: t("mods.page.picker.on", { variant }), tone: "on" };
             }}
           />
 
-          {!supported ? (
+          <section>
+            <GroupLabel label={t("settings.groups.modSupport")} />
             <GroupBox>
-              <SettingCard
-                icon={status.unsupportedReason ? <AlertTriangle size={18} /> : <Puzzle size={18} />}
-                title={`Mods aren't available for ${game.name}`}
-                description={
-                  status.unsupportedReason ??
-                  "No one has made a mod loader for this game yet, so there's nothing for Peebify to use."
-                }
-              />
-            </GroupBox>
-          ) : (
-            <>
-              <GroupBox>
+              <ModsPanel />
+              {MODS_SETTINGS.map((s) => (
+                <SettingRow key={s.id} setting={s} />
+              ))}
+              {!supported ? (
+                <SettingCard
+                  icon={<Puzzle size={18} />}
+                  title={t("mods.page.unsupported.title", { game: game.name })}
+                  description={t("mods.page.unsupported.noLoader")}
+                />
+              ) : (
                 <SettingsExpander
                   icon={<Settings2 size={18} />}
-                  title="Setup"
+                  title={t("mods.page.setup.title")}
                   summary={setupSummary}
                   open={showSetup}
                   onOpenChange={setSetupOpen}
                 >
                   <SettingCard
                     icon={<Puzzle size={18} />}
-                    title={`Use mods in ${game.name}`}
+                    title={t("mods.page.setup.useMods", { game: game.name })}
                     description={
                       !toolsInstalled
-                        ? "Install the mod tools below first, there's nothing to load your mods with until you do."
+                        ? t("mods.page.setup.useModsNoTools")
                         : status.experimental
-                          ? "This game is experimental! The mod loader is less reliable here than on the others."
-                          : "The mod loader starts just before the game, so Windows will ask for permission. Only the mods you switch on get loaded in."
+                          ? t("mods.page.setup.useModsExperimental")
+                          : t("mods.page.setup.useModsDescription")
                     }
                     disabled={!toolsInstalled}
                     control={
                       <Toggle
                         checked={gameOn}
                         disabled={!toolsInstalled || !current}
-                        ariaLabel={`Use mods in ${game.name}`}
+                        ariaLabel={t("mods.page.setup.useMods", { game: game.name })}
                         onChange={(v) => void toggleGame(v)}
                       />
                     }
@@ -313,72 +279,22 @@ export function ModsPage() {
                   {status.forcesDx11 && gameOn && game.graphicsApiChoice && (
                     <SettingCard
                       icon={<Lock size={18} />}
-                      title="DirectX is locked to DX11"
-                      description={`The mod tools only work with DX11, so ${game.name} always launches with DX11 while mods are on.`}
+                      title={t("mods.page.setup.dx11Title")}
+                      description={t("mods.page.setup.dx11Description", { game: game.name })}
                     />
                   )}
                   <SettingCard
-                    icon={toolchainUpdates.length ? <ArrowUpCircle size={18} /> : <Package size={18} />}
-                    title="XXMI mod tools"
-                    description={
-                      !toolsInstalled
-                        ? "Not installed. Peebify uses XXMI to load mods into the game, so nothing can load until it is."
-                        : toolchainUpdates.length
-                          ? autoUpdate
-                            ? `${versionLabel} is installed. A newer version is out (${updateSummary}). Peebify installs it on its own while no game is running, or you can update now.`
-                            : `${versionLabel} is installed. A newer version is out (${updateSummary}). Update now when you are ready.`
-                          : `${versionLabel} is installed for ${game.name}. Peebify checks for newer versions in the background.`
-                    }
-                    control={
-                      toolsInstalled ? (
-                        <div className="flex items-center gap-2">
-                          <ActionButton
-                            variant={toolchainUpdates.length ? "accent" : undefined}
-                            onClick={() => void installTools()}
-                            disabled={toolsBusy || !current}
-                            icon={toolsBusy ? undefined : <RefreshCw size={15} />}
-                          >
-                            {toolsBusy
-                              ? "Working…"
-                              : toolchainUpdates.length
-                                ? "Update now"
-                                : "Check for updates"}
-                          </ActionButton>
-                          <ActionButton
-                            variant="danger"
-                            onClick={confirmUninstallTools}
-                            disabled={toolsBusy || !current}
-                          >
-                            Uninstall
-                          </ActionButton>
-                        </div>
-                      ) : (
-                        <ActionButton
-                          variant="accent"
-                          onClick={() => void installTools()}
-                          disabled={toolsBusy || !current}
-                          icon={toolsBusy ? undefined : <Download size={15} />}
-                        >
-                          {toolsBusy ? "Installing…" : "Install mod tools"}
-                        </ActionButton>
-                      )
-                    }
-                  />
-                  <SettingCard
                     icon={<RefreshCw size={18} />}
-                    title="Update the mod tools on their own"
-                    description="Peebify installs new XXMI versions in the background while no game is running. Turn this off to keep the version you have until you update it yourself."
+                    title={t("mods.page.setup.rescanTitle")}
+                    description={t("mods.page.setup.rescanDescription")}
                     control={
-                      <Toggle
-                        checked={autoUpdate}
-                        disabled={!current}
-                        ariaLabel="Update the mod tools on their own"
-                        onChange={(v) =>
-                          void setConfigValue("behavior.modsAutoUpdate", v).then(() =>
-                            refreshIfCurrent(activeId),
-                          )
-                        }
-                      />
+                      <ActionButton
+                        icon={<RefreshCw size={15} className={rescanning ? "animate-spin" : ""} />}
+                        disabled={rescanning || !current}
+                        onClick={() => void rescanMods()}
+                      >
+                        {t("common.refresh")}
+                      </ActionButton>
                     }
                   />
                   {loaderSettings
@@ -388,7 +304,7 @@ export function ModsPage() {
                         key={row.id}
                         icon={row.kind === "bool" ? <Eye size={18} /> : <Timer size={18} />}
                         title={row.label}
-                        description={`${row.description} Takes effect the next time the game starts.`}
+                        description={t("mods.page.setup.loaderSettingDescription", { description: row.description })}
                         control={
                           row.kind === "bool" ? (
                             <Toggle
@@ -402,7 +318,7 @@ export function ModsPage() {
                               value={row.value}
                               min={row.min ?? 0}
                               max={row.max ?? 10000}
-                              unit="ms"
+                              unit={t("mods.page.setup.msUnit")}
                               zeroLabel="0"
                               disabled={!current}
                               ariaLabel={row.label}
@@ -414,10 +330,10 @@ export function ModsPage() {
                     ))}
                   <SettingCard
                     icon={<FolderCog size={18} />}
-                    title="Mod tools folder"
+                    title={t("mods.page.setup.folderTitle")}
                     description={
                       status.isDefault
-                        ? `${status.toolchainPath} (Peebify's own folder)`
+                        ? t("mods.page.setup.folderDefault", { path: status.toolchainPath })
                         : status.toolchainPath
                     }
                     control={
@@ -425,29 +341,38 @@ export function ModsPage() {
                         <ActionButton
                           icon={<FolderOpen size={15} />}
                           disabled={!toolsInstalled || !current}
-                          onClick={() => void openModsFolder(activeId)}
+                          onClick={() => void openModsFolder(shownId)}
                         >
-                          Open
+                          {t("common.open")}
                         </ActionButton>
-                        <ActionButton onClick={confirmChangeFolder}>Change…</ActionButton>
+                        <ActionButton onClick={confirmChangeFolder}>{t("mods.page.setup.change")}</ActionButton>
                         <ActionButton
                           disabled={status.isDefault}
                           onClick={confirmResetFolder}
                         >
-                          Reset
+                          {t("common.reset")}
                         </ActionButton>
                       </div>
                     }
                   />
                 </SettingsExpander>
-              </GroupBox>
+              )}
+            </GroupBox>
+          </section>
 
+          {supported && (
+            <>
               <div className="mb-5 mt-6">
                 <SegmentedControl
-                  ariaLabel="Mods view"
+                  ariaLabel={t("mods.page.view.ariaLabel")}
                   options={[
-                    { value: "installed", label: mods.length ? `Library (${mods.length})` : "Library" },
-                    ...(hasGameBanana ? [{ value: "browse", label: "Browse" }] : []),
+                    {
+                      value: "installed",
+                      label: mods.length
+                        ? t("mods.page.view.libraryCount", { count: mods.length })
+                        : t("mods.page.view.library"),
+                    },
+                    ...(hasGameBanana ? [{ value: "browse", label: t("mods.page.view.browse") }] : []),
                   ]}
                   value={library ? "installed" : "browse"}
                   onChange={(v) => setTab(v as "installed" | "browse")}
@@ -464,8 +389,8 @@ export function ModsPage() {
                 >
                   {library ? (
                     <ModsHub
-                      key={activeId}
-                      gameId={activeId}
+                      key={shownId}
+                      gameId={shownId}
                       onBrowse={hasGameBanana ? () => setTab("browse") : undefined}
                       onOpenGameBanana={
                         hasGameBanana
@@ -478,8 +403,8 @@ export function ModsPage() {
                     />
                   ) : (
                     <BrowseMods
-                      key={activeId}
-                      gameId={activeId}
+                      key={shownId}
+                      gameId={shownId}
                       initialMod={browseSeed}
                       onInitialModHandled={clearBrowseSeed}
                     />
@@ -488,8 +413,36 @@ export function ModsPage() {
               </AnimatePresence>
             </>
           )}
-        </>
+        </m.div>
       )}
+      </AnimatePresence>
     </GlassPage>
+  );
+}
+
+// ------------ Mods Panel ------------
+// The mod support switch on the Mods page, with the warning that mods can get an account banned. It only shows
+// while mods are on; switching it off brings back the opt-in panel, which is the one way to turn them on again.
+function ModsPanel() {
+  const t = useT();
+  const master = useModsStore((s) => s.masterEnabled);
+  const setMasterEnabled = useModsStore((s) => s.setMasterEnabled);
+
+  const toggleMaster = (on: boolean) =>
+    void setConfigValue("behavior.modsEnabled", on).then(() => setMasterEnabled(on));
+
+  return (
+    <SettingCard
+      icon={<AlertTriangle size={18} />}
+      title={t("settings.mods.enableModSupport")}
+      description={t(MOD_RISK_WARNING)}
+      control={
+        <Toggle
+          checked={master}
+          ariaLabel={t("settings.mods.enableModSupport")}
+          onChange={toggleMaster}
+        />
+      }
+    />
   );
 }

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
-use super::state::BackendState;
+use super::BackendState;
 use super::{
     arg_str, err_response, fs_util, game_profiles, http, mods, ok_response, ok_with,
     resolve_profile,
@@ -77,13 +77,19 @@ fn is_nsfw(record: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn preview_url(record: &Value) -> Option<String> {
-    let media = record.get("_aPreviewMedia")?;
-    let images = media
+fn preview_media(record: &Value) -> &[Value] {
+    let Some(media) = record.get("_aPreviewMedia") else {
+        return &[];
+    };
+    media
         .as_array()
-        .cloned()
-        .or_else(|| media.get("_aImages").and_then(Value::as_array).cloned())?;
-    let first = images.first()?;
+        .or_else(|| media.get("_aImages").and_then(Value::as_array))
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+}
+
+fn preview_url(record: &Value) -> Option<String> {
+    let first = preview_media(record).first()?;
     let base = first.get("_sBaseUrl").and_then(Value::as_str)?;
     let file = ["_sFile530", "_sFile220", "_sFile100", "_sFile"]
         .iter()
@@ -642,33 +648,19 @@ pub(super) async fn mod_profile(_app: &AppHandle, args: &[Value]) -> Result<Valu
         }
     };
 
-    Ok(ok_with(json!({
-        "id": mod_id,
-        "name": profile.get("_sName").and_then(Value::as_str).unwrap_or(""),
-        "profileUrl": profile.get("_sProfileUrl").and_then(Value::as_str),
-        "version": profile.get("_sVersion").and_then(Value::as_str),
-        "likes": profile.get("_nLikeCount").and_then(Value::as_u64).unwrap_or(0),
-        "views": profile.get("_nViewCount").and_then(Value::as_u64).unwrap_or(0),
-        "updatedAt": profile.get("_tsDateModified").and_then(Value::as_u64),
-        "submitter": profile
-            .get("_aSubmitter")
-            .and_then(|s| s.get("_sName"))
-            .and_then(Value::as_str),
-        "category": profile
-            .get("_aSubCategory")
-            .or_else(|| profile.get("_aRootCategory"))
-            .and_then(|c| c.get("_sName"))
-            .and_then(Value::as_str),
-        "tagline": profile.get("_sDescription").and_then(Value::as_str),
-        "description": profile
-            .get("_sText")
-            .and_then(Value::as_str)
-            .map(html_to_text)
-            .unwrap_or_default(),
-        "images": preview_images(&profile),
-        "files": files,
-        "filesError": files_error,
-    })))
+    let mut reply = flatten_record(&profile);
+    reply["id"] = json!(mod_id);
+    reply["updatedAt"] = json!(profile.get("_tsDateModified").and_then(Value::as_u64));
+    reply["tagline"] = json!(profile.get("_sDescription").and_then(Value::as_str));
+    reply["description"] = json!(profile
+        .get("_sText")
+        .and_then(Value::as_str)
+        .map(html_to_text)
+        .unwrap_or_default());
+    reply["images"] = json!(preview_images(&profile));
+    reply["files"] = json!(files);
+    reply["filesError"] = json!(files_error);
+    Ok(ok_with(reply))
 }
 
 fn urlencode(input: &str) -> String {
@@ -828,16 +820,7 @@ fn decode_entities(text: &str) -> String {
 }
 
 fn preview_images(record: &Value) -> Vec<Value> {
-    let Some(media) = record.get("_aPreviewMedia") else {
-        return Vec::new();
-    };
-    let images = media
-        .as_array()
-        .cloned()
-        .or_else(|| media.get("_aImages").and_then(Value::as_array).cloned())
-        .unwrap_or_default();
-
-    images
+    preview_media(record)
         .iter()
         .filter_map(|img| {
             let base = img.get("_sBaseUrl")?.as_str()?.trim_end_matches('/');
@@ -878,7 +861,7 @@ fn flatten_files(download_page: &Value) -> Vec<Value> {
                 "version": f.get("_sVersion").and_then(Value::as_str),
                 "description": f.get("_sDescription").and_then(Value::as_str),
                 "avResult": av,
-                "installable": av.eq_ignore_ascii_case(CLEAN_AV_RESULT),
+                "installable": is_clean_file(f),
                 "dateAdded": f.get("_tsDateAdded").and_then(Value::as_u64),
                 "family": file_family(f.get("_sFile").and_then(Value::as_str).unwrap_or("")),
             })
@@ -986,11 +969,11 @@ fn thumbnail_answers(
 
 // ------------ Installing Mods ------------
 // Downloads a mod file from GameBanana, checks the archive and hands it to the mod library to install.
-pub(super) async fn install(app: &AppHandle, args: &[Value]) -> Result<Value, String> {
+pub(crate) async fn install(app: &AppHandle, args: &[Value]) -> Result<Value, String> {
     install_with_cancel(app, args, None).await
 }
 
-pub(super) async fn install_with_cancel(
+pub(crate) async fn install_with_cancel(
     app: &AppHandle,
     args: &[Value],
     cancel: Option<Arc<AtomicBool>>,
@@ -1235,11 +1218,6 @@ fn gb_source(fetched: &Fetched, mod_id: u64, file_id: u64, thumbnail: Option<Str
         "kind": "gamebanana",
         "gbModId": mod_id,
         "gbFileId": file_id,
-        "url": fetched
-            .listing
-            .get("_aOwner")
-            .and_then(|o| o.get("_sProfileUrl"))
-            .and_then(Value::as_str),
         "version": fetched.file.get("_sVersion").and_then(Value::as_str),
         "thumbnailUrl": thumbnail,
     })
@@ -1375,12 +1353,15 @@ async fn fetch_gb_file(
     )
     .await
     .and_then(|r| r);
-    if let Err(e) = downloaded {
+    let abandon = || {
         let _ = std::fs::remove_dir_all(&staging);
+        mods::finish_progress(app, profile_id, true);
+    };
+    if let Err(e) = downloaded {
         if e == fs_util::CANCELLED_MSG {
             log::info!("gamebanana: download of {file_name} cancelled");
         }
-        mods::finish_progress(app, profile_id, true);
+        abandon();
         return Err(e);
     }
 
@@ -1397,14 +1378,12 @@ async fn fetch_gb_file(
         match hashed {
             Ok(actual) if actual.eq_ignore_ascii_case(expected) => {}
             Err(e) if e == fs_util::CANCELLED_MSG => {
-                let _ = std::fs::remove_dir_all(&staging);
                 log::info!("gamebanana: download of {file_name} cancelled while it was verified");
-                mods::finish_progress(app, profile_id, true);
+                abandon();
                 return Err(e);
             }
             Ok(actual) => {
-                let _ = std::fs::remove_dir_all(&staging);
-                mods::finish_progress(app, profile_id, true);
+                abandon();
                 log::warn!("gamebanana: md5 mismatch for {file_name} ({actual} != {expected})");
                 return Err(
                     "The downloaded file didn't match GameBanana's checksum, so it wasn't installed."
@@ -1472,14 +1451,14 @@ pub(super) async fn check_updates(app: &AppHandle, args: &[Value]) -> Result<Val
 
     if !force {
         if let Some(cached) = UPDATE_CACHE.get(&game_id) {
-            return Ok(ok_with(json!({ "updates": cached, "cached": true })));
+            return Ok(ok_with(json!({ "updates": cached })));
         }
     }
 
     let entries = mods::gamebanana_entries(app, &game_id);
     if entries.is_empty() {
         UPDATE_CACHE.set(&game_id, Vec::new());
-        return Ok(ok_with(json!({ "updates": [], "cached": false })));
+        return Ok(ok_with(json!({ "updates": [] })));
     }
 
     let ids: Vec<u64> = entries
@@ -1565,10 +1544,7 @@ pub(super) async fn check_updates(app: &AppHandle, args: &[Value]) -> Result<Val
         entries.len()
     );
     UPDATE_CACHE.set(&game_id, updates.clone());
-    Ok(ok_with(json!({
-        "updates": updates,
-        "cached": false,
-    })))
+    Ok(ok_with(json!({ "updates": updates })))
 }
 
 pub(super) async fn update_mod(app: &AppHandle, args: &[Value]) -> Result<Value, String> {
@@ -1687,64 +1663,35 @@ async fn download(
     url: &str,
     destination: &std::path::Path,
     listed_size: u64,
-    cancel: &AtomicBool,
+    cancel: &Arc<AtomicBool>,
     mut on_percent: impl FnMut(f64),
 ) -> Result<(), String> {
-    use futures::StreamExt;
-    use tokio::io::AsyncWriteExt;
-
     if cancel.load(Ordering::SeqCst) {
         return Err(fs_util::CANCELLED_MSG.to_string());
     }
-    let response = http::download_client()
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("Download failed: {e}"))?;
-    let status = response.status().as_u16();
-    if status != 200 {
-        return Err(format!(
-            "GameBanana returned HTTP {status} for the download"
-        ));
-    }
-    let total = response
-        .content_length()
-        .filter(|len| *len > 0)
-        .unwrap_or(listed_size);
-    if let Some(refusal) = download_refusal(0, total) {
-        log::warn!("gamebanana: {url} announces {total} bytes, over the {MAX_ARCHIVE_BYTES}-byte limit");
-        return Err(refusal.to_string());
-    }
-
-    let mut file = tokio::fs::File::create(destination)
-        .await
-        .map_err(|e| format!("Could not create {destination:?}: {e}"))?;
-    let mut stream = response.bytes_stream();
-    let mut written: u64 = 0;
-    while let Some(chunk) = stream.next().await {
-        if cancel.load(Ordering::SeqCst) {
-            return Err(fs_util::CANCELLED_MSG.to_string());
-        }
-        let chunk = chunk.map_err(|e| format!("Download interrupted: {e}"))?;
-        if let Some(refusal) = download_refusal(written + chunk.len() as u64, total) {
-            log::warn!(
-                "gamebanana: {url} sent more than {} bytes",
-                if total > 0 { total } else { MAX_ARCHIVE_BYTES }
-            );
-            return Err(refusal.to_string());
-        }
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| format!("Write failed: {e}"))?;
-        written += chunk.len() as u64;
-        if total > 0 {
-            on_percent((written as f64 / total as f64) * 100.0);
-        }
-    }
-    file.flush()
-        .await
-        .map_err(|e| format!("Flush failed: {e}"))?;
-    Ok(())
+    let job = http::ToolJob::new(Arc::clone(cancel));
+    let refusal = |received: u64, announced: u64| {
+        let announced = if announced > 0 { announced } else { listed_size };
+        let refused = download_refusal(received, announced)?;
+        log::warn!("gamebanana: {url} is refused ({received} received, {announced} announced): {refused}");
+        Some(refused.to_string())
+    };
+    peebify_transfer::download_stream(
+        &http::shared_transfer(),
+        &job,
+        url,
+        destination,
+        &refusal,
+        &mut |written, announced| {
+            let total = if announced > 0 { announced } else { listed_size };
+            if total > 0 {
+                on_percent((written as f64 / total as f64) * 100.0);
+            }
+        },
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| if e == peebify_transfer::files::CANCELLED { fs_util::CANCELLED_MSG.to_string() } else { e })
 }
 
 fn archive_sanity_check(path: &std::path::Path) -> Result<(), String> {
@@ -1852,27 +1799,6 @@ mod tests {
         assert_eq!(archive_file_name(""), "mod");
         assert_eq!(archive_file_name(".zip"), ".zip");
         assert!(!archive_file_name("../x.zip").contains(['/', '\\']));
-    }
-
-    #[test]
-    fn download_retries_skip_errors_another_attempt_cannot_fix() {
-        use super::{final_download_error, OVERSIZED_DOWNLOAD};
-        assert!(final_download_error(OVERSIZED_DOWNLOAD));
-        assert!(final_download_error(super::fs_util::CANCELLED_MSG));
-        assert!(final_download_error("GameBanana returned HTTP 404 for the download"));
-        assert!(final_download_error("GameBanana returned HTTP 403 for the download"));
-        assert!(!final_download_error("GameBanana returned HTTP 429 for the download"));
-        assert!(!final_download_error("GameBanana returned HTTP 503 for the download"));
-        assert!(final_download_error(
-            "Write failed: There is not enough space on the disk. (os error 112)"
-        ));
-        assert!(!final_download_error(
-            "Could not create \"C:\\\\x\\\\mod.zip\": The process cannot access the file because it is being used by another process. (os error 32)"
-        ));
-        assert!(!final_download_error("Download interrupted: error decoding response body"));
-        assert!(!final_download_error(
-            "GameBanana sent back a web page instead of the mod file. Try again in a moment."
-        ));
     }
 
     #[test]

@@ -380,7 +380,7 @@ pub mod vcredist {
     }
 }
 
-mod net {
+pub(crate) mod net {
     use std::io::{Read, Write};
     use std::path::Path;
     use std::time::{Duration, Instant};
@@ -392,8 +392,6 @@ mod net {
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
     const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
-    // ureq 3 only offers a total budget for the body, not a per-read one, so the idle limit is
-    // enforced by attempt_download itself.
     struct Agent {
         inner: ureq::Agent,
         read_idle: Duration,
@@ -482,8 +480,6 @@ mod net {
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|n| *n > 0);
 
-        // A blocked read cannot be interrupted, so it runs on its own thread and a chunk that takes
-        // longer than read_idle to arrive fails the attempt. The thread exits on its next read.
         let mut reader = resp.into_body().into_reader();
         let (tx, rx) = std::sync::mpsc::sync_channel::<std::io::Result<Vec<u8>>>(4);
         std::thread::spawn(move || {

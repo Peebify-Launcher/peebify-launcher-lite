@@ -4,8 +4,7 @@
 import type { SyntheticEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { isTauri } from "./tauri";
-import { gameById } from "../data/games";
-import type { GameId } from "../types/game";
+import { gameById, type GameId } from "../data/games";
 import type { MediaSlice, RemoteMedia } from "./ipc";
 
 export function localFileSrc(p: string | null | undefined): string | null {

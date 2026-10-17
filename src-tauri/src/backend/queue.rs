@@ -579,7 +579,7 @@ impl OperationQueue {
             )
         };
         sync_pending(&self.app, &pending, &parked);
-        if let Some(state) = self.app.try_state::<super::state::BackendState>() {
+        if let Some(state) = self.app.try_state::<super::BackendState>() {
             state.window.update_tray_menu();
         }
     }
@@ -646,6 +646,7 @@ pub struct Update {
     resumed: bool,
     warning: bool,
     waiting_network: bool,
+    held_for_game: bool,
 }
 
 impl From<Phase> for Update {
@@ -657,6 +658,7 @@ impl From<Phase> for Update {
             resumed: false,
             warning: false,
             waiting_network: false,
+            held_for_game: false,
         }
     }
 }
@@ -694,6 +696,11 @@ impl Update {
         self.waiting_network = waiting;
         self
     }
+
+    pub fn held_for_game(mut self, held: bool) -> Self {
+        self.held_for_game = held;
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -706,6 +713,8 @@ struct Job {
     downloaded: f64,
     percent: f64,
     speed: f64,
+    network_speed: f64,
+    disk_speed: f64,
     eta_secs: f64,
     paused: bool,
     error: Option<String>,
@@ -713,6 +722,7 @@ struct Job {
     warning: bool,
     parked: bool,
     waiting_network: bool,
+    held_for_game: bool,
 }
 
 impl Job {
@@ -727,6 +737,8 @@ impl Job {
             "downloaded": self.downloaded,
             "percent": self.percent,
             "speed": self.speed,
+            "networkSpeed": self.network_speed,
+            "diskSpeed": self.disk_speed,
             "etaSecs": self.eta_secs,
             "paused": self.paused,
             "error": self.error,
@@ -734,6 +746,7 @@ impl Job {
             "warning": self.warning,
             "parked": self.parked,
             "waitingNetwork": self.waiting_network,
+            "heldForGame": self.held_for_game,
         })
     }
 }
@@ -846,10 +859,13 @@ fn resolve(
         ),
         percent: num(payload, "percentage", prev.map_or(0.0, |p| p.percent)),
         speed: num(payload, "speed", prev.map_or(0.0, |p| p.speed)),
+        network_speed: num(payload, "networkSpeed", prev.map_or(0.0, |p| p.network_speed)),
+        disk_speed: num(payload, "diskSpeed", prev.map_or(0.0, |p| p.disk_speed)),
         eta_secs: num(payload, "eta", prev.map_or(0.0, |p| p.eta_secs)),
         paused,
         parked: !terminal && prev.is_some_and(|p| p.parked),
         waiting_network: !terminal && !paused && update.waiting_network,
+        held_for_game: !terminal && !paused && update.held_for_game,
     }
 }
 
@@ -867,10 +883,13 @@ fn looks_unchanged(a: &Job, b: &Job) -> bool {
         && a.warning == b.warning
         && a.parked == b.parked
         && a.waiting_network == b.waiting_network
+        && a.held_for_game == b.held_for_game
         && a.total == b.total
         && a.downloaded == b.downloaded
         && a.percent == b.percent
         && (a.speed - b.speed).abs() < 1.0
+        && (a.network_speed - b.network_speed).abs() < 1.0
+        && (a.disk_speed - b.disk_speed).abs() < 1.0
         && (a.eta_secs - b.eta_secs).abs() < 0.5
 }
 
@@ -971,7 +990,7 @@ fn emit(app: &AppHandle, snap: Value) {
 }
 
 fn live_job(app: &AppHandle, game_id: &str) -> Live {
-    app.try_state::<super::state::BackendState>()
+    app.try_state::<super::BackendState>()
         .map(|state| state.engine.queue.live(game_id))
         .unwrap_or_default()
 }
@@ -1054,6 +1073,8 @@ fn merge_pending(jobs: &mut Vec<Job>, pending: &[(String, String)], parked: &[St
             downloaded: 0.0,
             percent: 0.0,
             speed: 0.0,
+            network_speed: 0.0,
+            disk_speed: 0.0,
             eta_secs: 0.0,
             paused: false,
             error: None,
@@ -1061,6 +1082,7 @@ fn merge_pending(jobs: &mut Vec<Job>, pending: &[(String, String)], parked: &[St
             warning: false,
             parked: false,
             waiting_network: false,
+            held_for_game: false,
         });
     }
     for job in jobs.iter_mut() {
@@ -1231,8 +1253,8 @@ mod status_routing_tests {
         let job = send(
             &mut b,
             "repair-progress",
-            super::super::repair_engine::SCAN_PHASE,
-            json!({ "status": super::super::repair_engine::status::VALIDATING }),
+            super::super::engine::SCAN_PHASE,
+            json!({ "status": super::super::engine::status::VALIDATING }),
             &live(Some(5), Some("repair")),
         )
         .expect("event accepted");
@@ -1693,6 +1715,8 @@ mod status_routing_tests {
             downloaded,
             percent: 0.0,
             speed: 0.0,
+            network_speed: 0.0,
+            disk_speed: 0.0,
             eta_secs: 0.0,
             paused: false,
             error: None,
@@ -1700,6 +1724,7 @@ mod status_routing_tests {
             warning: false,
             parked: false,
             waiting_network: false,
+            held_for_game: false,
         }
     }
 

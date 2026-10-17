@@ -15,6 +15,7 @@ pub const RUN_VALUE: &str = "PeebifyLauncher";
 
 pub const UNINSTALLER_NAME: &str = "uninstall.exe";
 pub const INSTALL_MANIFEST_NAME: &str = "install-manifest.json";
+pub const UPDATE_STATE_NAME: &str = ".update-state.json";
 pub const STAGED_DIR_NAME: &str = ".staged";
 pub const BACKUP_DIR_NAME: &str = ".backup";
 

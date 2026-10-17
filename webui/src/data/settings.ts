@@ -1,11 +1,13 @@
 // ------------ Settings Table ------------
 // A table of every toggle, dropdown and slider on the Settings page, grouped into sections and tabs.
-// The settings UI is drawn from this, and the default values are worked out from it too.
+// The settings UI is drawn from this. The default values live in settingsDefaults.ts.
 import type { LucideIcon } from "lucide-react";
+import { LANGUAGES, SYSTEM_LANGUAGE, type TKey } from "../lib/i18n";
 import {
   AppWindow,
   Bell,
   Clock,
+  Download,
   EyeOff,
   FastForward,
   FileImage,
@@ -13,23 +15,30 @@ import {
   Film,
   Frame,
   Gamepad2,
-  MessageCircle,
+  Gauge,
+  Images,
+  Info,
+  Languages,
+  LineChart,
   MessageSquare,
-  Minimize2,
+  Minus,
   Monitor,
+  MonitorPlay,
   MousePointerClick,
+  Network,
   Newspaper,
-  Package,
+  Palette,
   Power,
+  Puzzle,
   Ratio,
   ScrollText,
   Share2,
   SlidersHorizontal,
   Sparkles,
+  Tag,
   Timer,
   Trash2,
   Undo2,
-  UserRound,
   X,
   ZoomIn,
 } from "lucide-react";
@@ -39,34 +48,44 @@ export type SettingsCategory =
   | "games"
   | "mods"
   | "overlay"
-  | "about";
+  | "launcher";
+
+type SettingText = TKey | { name: string };
+
+export const settingText = (text: SettingText, tr: (key: TKey) => string): string =>
+  typeof text === "string" ? tr(text) : text.name;
+
+export interface SettingOption {
+  value: string;
+  label: SettingText;
+}
 
 interface BaseSetting {
   id: string;
   icon: LucideIcon;
-  title: string;
-  description: string;
-  group?: string;
+  title: SettingText;
+  description: TKey;
+  group?: TKey;
   parent?: string;
+  indent?: boolean;
   disableWhen?: (values: Record<string, string>) => boolean;
 }
 
 interface SegmentedSetting extends BaseSetting {
   kind: "segmented";
-  options: { value: string; label: string }[];
-  default: string;
+  width?: number;
+  options: SettingOption[];
 }
 
 interface ToggleSetting extends BaseSetting {
   kind: "toggle";
-  default: string;
   invert?: boolean;
 }
 
 interface SelectSetting extends BaseSetting {
   kind: "select";
-  options: { value: string; label: string }[];
-  default: string;
+  options: SettingOption[];
+  unit?: string;
 }
 
 interface NumberSetting extends BaseSetting {
@@ -74,20 +93,12 @@ interface NumberSetting extends BaseSetting {
   min: number;
   max: number;
   unit: string;
-  zeroLabel: string;
-  default: string;
 }
 
 interface ActionSetting extends BaseSetting {
   kind: "action";
-  button: string;
-  buttonIcon?: "external";
+  button: SettingText;
   danger?: boolean;
-}
-
-interface InfoSetting extends BaseSetting {
-  kind: "info";
-  value: string;
 }
 
 export type Setting =
@@ -95,419 +106,472 @@ export type Setting =
   | ToggleSetting
   | SelectSetting
   | NumberSetting
-  | ActionSetting
-  | InfoSetting;
+  | ActionSetting;
 
 interface SettingsSection {
   category: SettingsCategory;
-  title: string;
-  subtitle: string;
+  title: TKey;
+  subtitle: TKey;
+  tab?: { label: TKey; icon: LucideIcon };
   settings: Setting[];
 }
 
-const triState = (a: string, b: string, c: string) => [
-  { value: "minimize", label: a },
-  { value: "tray", label: b },
-  { value: "close", label: c },
+const triState = (): SettingOption[] => [
+  { value: "minimize", label: "common.minimize" },
+  { value: "tray", label: "settings.options.toTray" },
+  { value: "close", label: "common.close" },
 ];
 
 export const SETTINGS_SECTIONS: SettingsSection[] = [
   {
     category: "general",
-    title: "General",
-    subtitle: "Startup, window, and notification behavior.",
+    title: "settings.sections.general.title",
+    subtitle: "settings.sections.general.subtitle",
+    tab: { label: "settings.sections.general.title", icon: SlidersHorizontal },
     settings: [
+      {
+        kind: "select",
+        id: "language",
+        icon: Languages,
+        group: "settings.groups.languageAndStartup",
+        title: "language.title",
+        description: "language.description",
+        options: [
+          { value: SYSTEM_LANGUAGE, label: "language.systemDefault" },
+          ...LANGUAGES.map((l) => ({ value: l.code, label: { name: l.name } })),
+        ],
+      },
       {
         kind: "toggle",
         id: "startOnBoot",
         icon: Power,
-        group: "Startup",
-        title: "Start with Windows",
-        description: "Open the launcher on system startup.",
-        default: "false",
+        group: "settings.groups.languageAndStartup",
+        title: "settings.items.startOnBoot.title",
+        description: "settings.items.startOnBoot.description",
       },
       {
         kind: "segmented",
         id: "startOnBootAction",
         icon: AppWindow,
         parent: "startOnBoot",
-        group: "Startup",
-        title: "On boot, open",
-        description: "How the launcher appears when it starts with Windows.",
+        indent: true,
+        group: "settings.groups.languageAndStartup",
+        title: "settings.items.startOnBootAction.title",
+        description: "settings.items.startOnBootAction.description",
         options: [
-          { value: "open", label: "Normally" },
-          { value: "minimized", label: "Minimized" },
-          { value: "tray", label: "To tray" },
+          { value: "open", label: "settings.items.startOnBootAction.options.open" },
+          { value: "minimized", label: "settings.items.startOnBootAction.options.minimized" },
+          { value: "tray", label: "settings.options.toTray" },
         ],
-        default: "open",
-      },
-      {
-        kind: "segmented",
-        id: "launchAction",
-        icon: Gamepad2,
-        group: "When a game launches",
-        title: "Launcher window",
-        description: "What the launcher does when a game starts. Close hides it until the game exits, then quits, so playtime is still tracked.",
-        options: triState("Minimize", "To tray", "Close"),
-        default: "minimize",
-      },
-      {
-        kind: "toggle",
-        id: "reopenAfterGameClose",
-        icon: Undo2,
-        group: "When a game launches",
-        title: "Re-open after the game closes",
-        description: "Restore the launcher when the game exits.",
-        default: "true",
-        disableWhen: (v) => v.launchAction === "close",
-      },
-      {
-        kind: "segmented",
-        id: "closeAction",
-        icon: X,
-        group: "Window",
-        title: "When you close the launcher",
-        description: "Action for the close (X) button.",
-        options: triState("Minimize", "To tray", "Close"),
-        default: "close",
-      },
-      {
-        kind: "segmented",
-        id: "minimizeAction",
-        icon: Minimize2,
-        group: "Window",
-        title: "When you minimize",
-        description: "What the minimize button does.",
-        options: triState("Minimize", "To tray", "Close"),
-        default: "minimize",
       },
       {
         kind: "toggle",
         id: "rememberWindowState",
         icon: Frame,
-        group: "Window",
-        title: "Remember window size & position",
-        description: "Restore the launcher's last window bounds on startup.",
-        default: "true",
+        group: "settings.groups.languageAndStartup",
+        title: "settings.items.rememberWindowState.title",
+        description: "settings.items.rememberWindowState.description",
+      },
+      {
+        kind: "segmented",
+        id: "launchAction",
+        icon: Gamepad2,
+        group: "settings.groups.windowBehavior",
+        title: "settings.items.launchAction.title",
+        description: "settings.items.launchAction.description",
+        options: triState(),
+      },
+      {
+        kind: "segmented",
+        id: "closeAction",
+        icon: X,
+        group: "settings.groups.windowBehavior",
+        title: "settings.items.closeAction.title",
+        description: "settings.items.closeAction.description",
+        options: triState(),
+      },
+      {
+        kind: "segmented",
+        id: "minimizeAction",
+        icon: Minus,
+        group: "settings.groups.windowBehavior",
+        title: "settings.items.minimizeAction.title",
+        description: "settings.items.minimizeAction.description",
+        options: triState(),
+      },
+      {
+        kind: "toggle",
+        id: "reopenAfterGameClose",
+        icon: Undo2,
+        group: "settings.groups.windowBehavior",
+        title: "settings.items.reopenAfterGameClose.title",
+        description: "settings.items.reopenAfterGameClose.description",
+        disableWhen: (v) => v.launchAction === "close",
       },
       {
         kind: "toggle",
         id: "osNotifications",
         icon: Bell,
-        group: "Notifications",
-        title: "System notifications",
-        description:
-          "Show Windows notifications for finished downloads and launch failures while the launcher is in the background.",
-        default: "true",
+        group: "settings.groups.notifications",
+        title: "settings.items.osNotifications.title",
+        description: "settings.items.osNotifications.description",
+      },
+      {
+        kind: "select",
+        id: "downloadSpeedLimit",
+        icon: Gauge,
+        group: "settings.groups.gameDownloads",
+        title: "settings.items.downloadSpeedLimit.title",
+        description: "settings.items.downloadSpeedLimit.description",
+        options: [
+          { value: "0", label: "settings.items.downloadSpeedLimit.unlimited" },
+          ...["5", "10", "25", "50", "100", "250", "500"].map((v) => ({ value: v, label: { name: `${v} MB/s` } })),
+        ],
+        unit: "MB/s",
+      },
+      {
+        kind: "segmented",
+        id: "downloadWhileGaming",
+        icon: Gamepad2,
+        group: "settings.groups.gameDownloads",
+        title: "settings.items.downloadWhileGaming.title",
+        description: "settings.items.downloadWhileGaming.description",
+        width: 300,
+        options: [
+          { value: "off", label: "settings.items.downloadWhileGaming.options.off" },
+          { value: "slow", label: "settings.items.downloadWhileGaming.options.slow" },
+          { value: "pause", label: "settings.items.downloadWhileGaming.options.pause" },
+        ],
+      },
+      {
+        kind: "segmented",
+        id: "downloadConnections",
+        icon: Network,
+        group: "settings.groups.gameDownloads",
+        title: "settings.items.downloadConnections.title",
+        description: "settings.items.downloadConnections.description",
+        width: 300,
+        options: [
+          { value: "0", label: "settings.items.downloadConnections.auto" },
+          ...["4", "8", "16", "32"].map((v) => ({ value: v, label: { name: v } })),
+        ],
       },
     ],
   },
   {
     category: "appearance",
-    title: "Appearance",
-    subtitle: "Wallpapers, icons, game colors, and what the home screen shows.",
+    title: "settings.sections.appearance.title",
+    subtitle: "settings.sections.appearance.subtitle",
+    tab: { label: "settings.sections.appearance.title", icon: Palette },
     settings: [
       {
         kind: "toggle",
         id: "hideNewsPanel",
         icon: Newspaper,
         invert: true,
-        group: "Home screen",
-        title: "Show news panel",
-        description: "Per-game news, notices, and the banner slideshow.",
-        default: "false",
+        group: "settings.groups.homeScreen",
+        title: "settings.items.hideNewsPanel.title",
+        description: "settings.items.hideNewsPanel.description",
       },
       {
         kind: "toggle",
         id: "hideSocials",
         icon: Share2,
         invert: true,
-        group: "Home screen",
-        title: "Show socials tray",
-        description: "Social links on the home screen.",
-        default: "false",
+        group: "settings.groups.homeScreen",
+        title: "settings.items.hideSocials.title",
+        description: "settings.items.hideSocials.description",
       },
       {
         kind: "toggle",
         id: "hidePlaytime",
         icon: Timer,
         invert: true,
-        group: "Home screen",
-        title: "Show playtime pill",
-        description: "The playtime tracker by the Start button.",
-        default: "false",
+        group: "settings.groups.homeScreen",
+        title: "settings.items.hidePlaytime.title",
+        description: "settings.items.hidePlaytime.description",
       },
       {
         kind: "toggle",
         id: "hideBottomRightButtons",
         icon: MousePointerClick,
         invert: true,
-        group: "Home screen",
-        title: "Show quick-action buttons",
-        description: "The repair / settings / folder shortcuts in the bottom-right.",
-        default: "false",
+        group: "settings.groups.homeScreen",
+        title: "settings.items.hideBottomRightButtons.title",
+        description: "settings.items.hideBottomRightButtons.description",
+      },
+      {
+        kind: "toggle",
+        id: "hideSidebarPlaytime",
+        icon: LineChart,
+        invert: true,
+        group: "settings.groups.sidebar",
+        title: "settings.items.hideSidebarPlaytime.title",
+        description: "settings.items.hideSidebarPlaytime.description",
+      },
+      {
+        kind: "toggle",
+        id: "hideSidebarGallery",
+        icon: Images,
+        invert: true,
+        group: "settings.groups.sidebar",
+        title: "settings.items.hideSidebarGallery.title",
+        description: "settings.items.hideSidebarGallery.description",
+      },
+      {
+        kind: "toggle",
+        id: "hideSidebarDownloads",
+        icon: Download,
+        invert: true,
+        group: "settings.groups.sidebar",
+        title: "settings.items.hideSidebarDownloads.title",
+        description: "settings.items.hideSidebarDownloads.description",
+      },
+      {
+        kind: "toggle",
+        id: "hideSidebarMods",
+        icon: Puzzle,
+        invert: true,
+        group: "settings.groups.sidebar",
+        title: "settings.items.hideSidebarMods.title",
+        description: "settings.items.hideSidebarMods.description",
+      },
+      {
+        kind: "toggle",
+        id: "hideSidebarVersion",
+        icon: Tag,
+        invert: true,
+        group: "settings.groups.sidebar",
+        title: "settings.items.hideSidebarVersion.title",
+        description: "settings.items.hideSidebarVersion.description",
       },
       {
         kind: "select",
         id: "uiScale",
         icon: ZoomIn,
-        group: "Interface",
-        title: "Interface size",
-        description:
-          "Makes text, buttons and panels bigger or smaller. Applied on top of the automatic sizing for your monitor.",
+        group: "settings.groups.display",
+        title: "settings.items.uiScale.title",
+        description: "settings.items.uiScale.description",
         options: [
-          { value: "80", label: "80%" },
-          { value: "90", label: "90%" },
-          { value: "100", label: "100% (default)" },
-          { value: "110", label: "110%" },
-          { value: "125", label: "125%" },
-          { value: "150", label: "150%" },
-          { value: "175", label: "175%" },
-          { value: "200", label: "200%" },
+          { value: "80", label: { name: "80%" } },
+          { value: "90", label: { name: "90%" } },
+          { value: "100", label: "settings.items.uiScale.options.default" },
+          { value: "110", label: { name: "110%" } },
+          { value: "125", label: { name: "125%" } },
+          { value: "150", label: { name: "150%" } },
+          { value: "175", label: { name: "175%" } },
+          { value: "200", label: { name: "200%" } },
         ],
-        default: "100",
       },
       {
         kind: "toggle",
         id: "animatedWallpaper",
         icon: Film,
-        group: "Wallpaper",
-        title: "Animated wallpaper",
-        description: "Use the looping video wallpaper instead of a static image.",
-        default: "true",
+        group: "settings.groups.display",
+        title: "settings.items.animatedWallpaper.title",
+        description: "settings.items.animatedWallpaper.description",
+      },
+      {
+        kind: "segmented",
+        id: "glassEffects",
+        icon: Sparkles,
+        group: "settings.groups.display",
+        title: "settings.items.glassEffects.title",
+        description: "settings.items.glassEffects.description",
+        options: [
+          { value: "full", label: "settings.items.glassEffects.options.full" },
+          { value: "balanced", label: "settings.items.glassEffects.options.balanced" },
+          { value: "lite", label: "settings.items.glassEffects.options.lite" },
+        ],
       },
       {
         kind: "segmented",
         id: "timeFormat",
         icon: Clock,
-        group: "Time",
-        title: "Clock format",
-        description:
-          "How playtime and session times are written. System follows your Windows region.",
+        group: "settings.groups.display",
+        title: "settings.items.timeFormat.title",
+        description: "settings.items.timeFormat.description",
         options: [
-          { value: "system", label: "System" },
-          { value: "12", label: "12-hour" },
-          { value: "24", label: "24-hour" },
+          { value: "system", label: "settings.items.timeFormat.options.system" },
+          { value: "12", label: "settings.items.timeFormat.options.h12" },
+          { value: "24", label: "settings.items.timeFormat.options.h24" },
         ],
-        default: "system",
       },
     ],
   },
   {
     category: "games",
-    title: "Games",
-    subtitle: "Pick your preferences for the side-bar, as well as additional customization.",
+    title: "settings.sections.games.title",
+    subtitle: "settings.sections.games.subtitle",
+    tab: { label: "settings.sections.games.title", icon: Gamepad2 },
     settings: [],
   },
   {
     category: "mods",
-    title: "Mods",
-    subtitle: "Set up mod support and the XXMI tools.",
+    title: "common.mods",
+    subtitle: "settings.sections.mods.subtitle",
     settings: [
       {
         kind: "toggle",
         id: "showNsfwMods",
         icon: EyeOff,
-        group: "GameBanana",
-        title: "Show NSFW mods",
-        description: "Show mature-rated mods in the GameBanana browser.",
-        default: "false",
+        group: "settings.groups.gameBanana",
+        title: "settings.items.showNsfwMods.title",
+        description: "settings.items.showNsfwMods.description",
       },
     ],
   },
   {
     category: "overlay",
-    title: "Overlay",
-    subtitle: "The in-game drawer, the on-screen readout, and captures.",
+    title: "common.overlay",
+    subtitle: "settings.sections.overlay.subtitle",
+    tab: { label: "common.overlay", icon: MonitorPlay },
     settings: [
       {
         kind: "toggle",
         id: "overlayEnabled",
         icon: Monitor,
-        group: "Overlay",
-        title: "Use the game overlay",
-        description:
-          "Draws a panel over the running game so you can change mods, watch performance, and capture clips without alt-tabbing.",
-        default: "false",
+        group: "common.overlay",
+        title: "settings.items.overlayEnabled.title",
+        description: "settings.items.overlayEnabled.description",
       },
 
-      {
-        kind: "toggle",
-        id: "overlayShotToast",
-        icon: MessageSquare,
-        parent: "overlayEnabled",
-        group: "Screenshots",
-        title: "Show a message on screen",
-        description:
-          "Confirms over the game that a capture was saved, and says why when one fails.",
-        default: "true",
-      },
       {
         kind: "segmented",
         id: "overlayShotFormat",
         icon: FileImage,
         parent: "overlayEnabled",
-        group: "Screenshots",
-        title: "Format",
-        description: "PNG is lossless and large. JPEG is small and lossy.",
+        group: "common.screenshots",
+        title: "settings.items.overlayShotFormat.title",
+        description: "settings.items.overlayShotFormat.description",
         options: [
-          { value: "png", label: "PNG" },
-          { value: "jpeg", label: "JPEG" },
+          { value: "png", label: { name: "PNG" } },
+          { value: "jpeg", label: { name: "JPEG" } },
         ],
-        default: "png",
       },
       {
         kind: "number",
         id: "overlayShotQuality",
         icon: SlidersHorizontal,
         parent: "overlayEnabled",
-        group: "Screenshots",
-        title: "JPEG quality",
-        description: "Higher keeps more detail and makes a bigger file. Ignored for PNG.",
+        indent: true,
+        group: "common.screenshots",
+        title: "settings.items.overlayShotQuality.title",
+        description: "settings.items.overlayShotQuality.description",
         min: 40,
         max: 100,
         unit: "%",
-        zeroLabel: "",
-        default: "90",
-        disableWhen: (v) => v.overlayShotFormat !== "jpeg",
+      },
+      {
+        kind: "toggle",
+        id: "overlayShotToast",
+        icon: MessageSquare,
+        parent: "overlayEnabled",
+        group: "common.screenshots",
+        title: "settings.items.overlayShotToast.title",
+        description: "settings.items.overlayShotToast.description",
       },
 
       {
-        kind: "select",
+        kind: "segmented",
         id: "overlayRecRes",
         icon: Ratio,
         parent: "overlayEnabled",
-        group: "Recording",
-        title: "Resolution",
-        description: "Recording below your game's resolution costs less to encode.",
+        group: "settings.groups.recording",
+        title: "settings.items.overlayRecRes.title",
+        description: "settings.items.overlayRecRes.description",
         options: [
-          { value: "native", label: "Same as the game" },
-          { value: "1440", label: "1440p" },
-          { value: "1080", label: "1080p" },
-          { value: "720", label: "720p" },
+          { value: "native", label: "settings.items.overlayRecRes.options.native" },
+          { value: "1440", label: { name: "1440p" } },
+          { value: "1080", label: { name: "1080p" } },
+          { value: "720", label: { name: "720p" } },
         ],
-        default: "native",
       },
       {
         kind: "segmented",
         id: "overlayRecFps",
         icon: FastForward,
         parent: "overlayEnabled",
-        group: "Recording",
-        title: "Frame rate",
-        description: "Frames per second in the saved file, not in the game.",
+        group: "settings.groups.recording",
+        title: "settings.items.overlayRecFps.title",
+        description: "settings.items.overlayRecFps.description",
         options: [
-          { value: "30", label: "30" },
-          { value: "60", label: "60" },
-          { value: "120", label: "120" },
+          { value: "30", label: { name: "30" } },
+          { value: "60", label: { name: "60" } },
+          { value: "120", label: { name: "120" } },
         ],
-        default: "60",
       },
       {
-        kind: "select",
+        kind: "segmented",
         id: "overlayRecCodec",
         icon: FileVideo,
         parent: "overlayEnabled",
-        group: "Recording",
-        title: "Codec",
-        description:
-          "H.264 plays everywhere. AV1 makes the smallest files. If your graphics card cannot encode the one you pick, Peebify records H.264 instead.",
+        group: "settings.groups.recording",
+        title: "settings.items.overlayRecCodec.title",
+        description: "settings.items.overlayRecCodec.description",
         options: [
-          { value: "h264", label: "H.264" },
-          { value: "hevc", label: "HEVC (H.265)" },
-          { value: "av1", label: "AV1" },
+          { value: "h264", label: { name: "H.264" } },
+          { value: "hevc", label: { name: "HEVC (H.265)" } },
+          { value: "av1", label: { name: "AV1" } },
         ],
-        default: "h264",
       },
       {
-        kind: "select",
+        kind: "segmented",
         id: "overlayRecQuality",
         icon: Sparkles,
         parent: "overlayEnabled",
-        group: "Recording",
-        title: "Quality",
-        description:
-          "Peebify picks the bitrate from this, your resolution and your frame rate, and only spends it where the picture is actually moving.",
+        group: "settings.groups.recording",
+        title: "settings.items.overlayRecQuality.title",
+        description: "settings.items.overlayRecQuality.description",
         options: [
-          { value: "efficient", label: "Efficient" },
-          { value: "balanced", label: "Balanced" },
-          { value: "high", label: "High" },
+          { value: "efficient", label: "settings.items.overlayRecQuality.options.efficient" },
+          { value: "balanced", label: "settings.items.overlayRecQuality.options.balanced" },
+          { value: "high", label: "settings.items.overlayRecQuality.options.high" },
         ],
-        default: "balanced",
       },
     ],
   },
   {
-    category: "about",
-    title: "About",
-    subtitle: "Troubleshooting, credits, and community.",
+    category: "launcher",
+    title: "settings.sections.about.title",
+    subtitle: "settings.sections.about.subtitle",
+    tab: { label: "settings.sections.about.title", icon: Info },
     settings: [
+      {
+        kind: "toggle",
+        id: "peebifyContent",
+        icon: Newspaper,
+        group: "settings.groups.privacy",
+        title: "settings.items.peebifyContent.title",
+        description: "settings.items.peebifyContent.description",
+      },
       {
         kind: "action",
         id: "openLogs",
         icon: ScrollText,
-        group: "Data",
-        title: "Open logs folder",
-        description: "Open the folder with launcher logs for troubleshooting.",
-        button: "Open now",
-      },
-      {
-        kind: "info",
-        id: "developer",
-        icon: UserRound,
-        group: "Credits",
-        title: "Developer",
-        description: "Designs, builds, and maintains Peebify.",
-        value: "Acheuy",
-      },
-      {
-        kind: "action",
-        id: "xxmi",
-        icon: Package,
-        group: "Credits",
-        title: "XXMI",
-        description:
-          "Peebify's mod support is built on the XXMI modding framework and its per-game model importers, by SpectrumQT and leotorrez.",
-        button: "GitHub",
-        buttonIcon: "external",
-      },
-      {
-        kind: "action",
-        id: "discord",
-        icon: MessageCircle,
-        group: "Community",
-        title: "Peebify Discord",
-        description: "Get help, report a bug, or just say hello.",
-        button: "Join",
-        buttonIcon: "external",
+        group: "settings.groups.troubleshooting",
+        title: "settings.items.openLogs.title",
+        description: "settings.items.openLogs.description",
+        button: "settings.items.openLogs.button",
       },
       {
         kind: "action",
         id: "clearData",
         icon: Trash2,
-        group: "Danger zone",
-        title: "Clear launcher data",
-        description:
-          "Resets all launcher settings to defaults. Playtime and mod profiles are erased. Installed games stay installed.",
-        button: "Clear data",
+        group: "settings.groups.dangerZone",
+        title: "settings.items.clearData.title",
+        description: "settings.items.clearData.description",
+        button: "settings.items.clearData.button",
         danger: true,
       },
     ],
   },
 ];
 
-export const SETTINGS_DEFAULTS: Record<string, string> = Object.fromEntries(
-  SETTINGS_SECTIONS.flatMap((s) =>
-    s.settings
-      .filter(
-        (x): x is SegmentedSetting | ToggleSetting | SelectSetting | NumberSetting =>
-          x.kind !== "action" && x.kind !== "info",
-      )
-      .map((x) => [x.id, x.default]),
-  ),
-);
-
 export const ALL_SETTINGS: Setting[] = SETTINGS_SECTIONS.flatMap((s) => s.settings);
 
+export const MODS_SETTINGS: Setting[] = SETTINGS_SECTIONS.find((s) => s.category === "mods")!.settings;
+
 export const PEEBIFY_DISCORD_URL = "https://discord.gg/5kfpJTv2Xc";
+export const PEEBIFY_SITE_URL = "https://peebify.net";
 export const XXMI_URL = "https://github.com/SpectrumQT/XXMI-Launcher";

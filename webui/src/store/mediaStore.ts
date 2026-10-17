@@ -2,7 +2,8 @@
 // The list of screenshots and clips for the gallery, with its filters, selection mode and deleting.
 import { create } from "zustand";
 import { deleteCapture, listCaptures, type MediaItem } from "../lib/ipc";
-import { useNotificationStore } from "./notificationStore";
+import { useNotificationStore } from "./notifications";
+import { t } from "../lib/i18n";
 
 export type KindFilter = "all" | "screenshot" | "clip";
 
@@ -53,7 +54,7 @@ export const useMediaStore = create<MediaState>((set, get) => ({
       const res = await listCaptures();
       if (token !== listToken) return;
       if (!res.ok) {
-        set({ error: res.error ?? "Could not read your captures.", hydrated: true });
+        set({ error: res.error ?? t("ipc.captures.readFailed"), hydrated: true });
         return;
       }
       const known = new Set(res.items.map((i) => i.path));
@@ -104,11 +105,15 @@ export const useMediaStore = create<MediaState>((set, get) => ({
     if (failed > 0) {
       useNotificationStore.getState().push({
         type: deleted > 0 ? "warning" : "error",
-        title: deleted > 0 ? "Some captures were not deleted" : "Delete failed",
+        title: deleted > 0 ? t("stores.media.partialTitle") : t("stores.media.failedTitle"),
         text:
           deleted > 0
-            ? `${deleted} deleted, ${failed} failed. ${error ?? "Check the logs for details."}`
-            : (error ?? "Those captures could not be deleted."),
+            ? t("stores.media.partialText", {
+                deleted,
+                failed,
+                error: error ?? t("stores.media.checkLogs"),
+              })
+            : (error ?? t("stores.media.noneDeleted")),
       });
     }
     set((s) => {

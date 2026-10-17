@@ -1,9 +1,8 @@
 // ------------ Modal Store ------------
 // Which dialog is open: a confirm box or the install dialog for a game.
 import { create } from "zustand";
-import type { GameId } from "../types/game";
-import { isManaged } from "../data/games";
-import { peekInstall, whenInstallReady } from "../lib/installPreload";
+import { type GameId, isManaged } from "../data/games";
+import { peekInstall, warmInstall, whenInstallReady } from "../lib/installPreload";
 
 let installOpenToken = 0;
 
@@ -16,7 +15,10 @@ interface ConfirmOpts {
   onConfirm: () => void;
 }
 
-type ModalState = ({ kind: "confirm" } & ConfirmOpts) | { kind: "install"; gameId: GameId } | null;
+type ModalState =
+  | ({ kind: "confirm" } & ConfirmOpts)
+  | { kind: "install"; gameId: GameId }
+  | null;
 
 interface ModalStore {
   modal: ModalState;
@@ -31,10 +33,10 @@ export const useModalStore = create<ModalStore>((set, get) => ({
   openInstall: (gameId) => {
     const token = ++installOpenToken;
     if (!isManaged(gameId) || peekInstall(gameId)) {
+      warmInstall(gameId);
       set({ modal: { kind: "install", gameId } });
       return;
     }
-    // Hold the dialog back until its sizes and options are loaded so it opens at its final size.
     void whenInstallReady(gameId).then(() => {
       if (token === installOpenToken && !get().modal) set({ modal: { kind: "install", gameId } });
     });

@@ -1,32 +1,22 @@
 // ------------ Yostar Launcher API ------------
 // Talks to Yostar's PC launcher service for Arknights: signs each request, resolves the latest build and its CDNs,
-// and turns the loose-file manifest into download resources checked with CRC-64. Also maps the launcher's news feed.
-use serde_json::Value;
+// and turns the loose-file manifest into download resources checked with CRC-64. Also maps the launcher's news feed
+// and sizes the install preview.
+use std::path::Path;
 
-use super::download_engine::{combine_url, GameConfig};
-use super::fs_util::{md5_hex, CRC64_PREFIX};
-use super::game_profiles;
+use futures::future::BoxFuture;
+use serde_json::{json, Value};
+
+use super::engine::{combine_url, resource_list_preview, Preview};
+use super::fs_util::md5_hex;
+use super::game_profiles::{self, profile_str, required_str};
 use super::http;
+use super::manifest::{json_u64, Cx, Entry, Hash, Manifest, Policy, Publisher};
 use super::news::{article, envelope, slide, MAX_ITEMS, MAX_SLIDES};
-use super::validator::Resource;
 
 const OK_CODE: i64 = 200;
 const LATEST_LABEL: &str = "latest";
 const API_TEXT_LIMIT: u64 = 4 << 20;
-
-fn profile_str<'a>(profile: &'a Value, key: &str) -> &'a str {
-    profile.get(key).and_then(Value::as_str).unwrap_or("").trim()
-}
-
-fn required<'a>(profile: &'a Value, key: &str) -> Result<&'a str, String> {
-    match profile_str(profile, key) {
-        "" => Err(format!(
-            "{} is missing its {key} setting.",
-            game_profiles::display_name(profile)
-        )),
-        value => Ok(value),
-    }
-}
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -50,11 +40,11 @@ pub fn sign_header(game_tag: &str, launcher_version: &str, sign_key: &str, time:
 }
 
 async fn signed_get_once(profile: &Value, path_and_query: &str) -> Result<Value, String> {
-    let api = required(profile, "ysApiUrl")?;
+    let api = required_str(profile, "ysApiUrl")?;
     let header = sign_header(
-        required(profile, "ysGameTag")?,
-        required(profile, "ysLauncherVersion")?,
-        required(profile, "ysSignKey")?,
+        required_str(profile, "ysGameTag")?,
+        required_str(profile, "ysLauncherVersion")?,
+        required_str(profile, "ysSignKey")?,
         unix_now(),
         "",
     );
@@ -135,7 +125,7 @@ pub fn cdns_from(data: &Value) -> Vec<String> {
     cdns
 }
 
-async fn fetch_cdns(profile: &Value) -> Result<Vec<String>, String> {
+pub(super) async fn fetch_cdns(profile: &Value) -> Result<Vec<String>, String> {
     let cdns = cdns_from(&signed_get(profile, "/api/launcher/advanced/game/download/cdn").await?);
     if cdns.is_empty() {
         return Err("The Yostar API returned no download servers.".to_string());
@@ -173,7 +163,7 @@ async fn fetch_manifest(profile: &Value, release: &Release) -> Result<Value, Str
     http::with_retry(|| http::get_json(url), 3, 1000, "Yostar file list").await
 }
 
-pub fn manifest_resources(manifest: &Value) -> Vec<Resource> {
+pub fn manifest_entries(manifest: &Value, base: &str) -> Vec<Entry> {
     let empty = Vec::new();
     manifest
         .get("file")
@@ -185,17 +175,9 @@ pub fn manifest_resources(manifest: &Value) -> Vec<Resource> {
             if dest.is_empty() || dest.split('/').any(|part| part == "..") {
                 return None;
             }
-            let size = match entry.get("size")? {
-                Value::String(s) => s.trim().parse::<u64>().ok()?,
-                Value::Number(n) => n.as_u64()?,
-                _ => return None,
-            };
-            let hash = match entry.get("hash")? {
-                Value::String(s) => s.trim().parse::<u64>().ok()?,
-                Value::Number(n) => n.as_u64()?,
-                _ => return None,
-            };
-            Some(Resource::new(dest, size, format!("{CRC64_PREFIX}{hash}")))
+            let size = json_u64(entry.get("size"))?;
+            let hash = json_u64(entry.get("hash"))?;
+            Some(Entry::new(dest, size, Hash::Crc64(hash), combine_url(base, &encode_path(dest))))
         })
         .collect()
 }
@@ -204,33 +186,45 @@ pub fn manifest_source(manifest: &Value) -> &str {
     manifest.get("source").and_then(Value::as_str).unwrap_or("").trim()
 }
 
-pub(super) async fn resolve_config(profile: &Value) -> Result<GameConfig, String> {
+async fn resolve(profile: &Value) -> Result<Manifest, String> {
     let name = game_profiles::display_name(profile);
     let (release, cdns) = tokio::try_join!(fetch_release(profile), fetch_cdns(profile))?;
     let manifest = fetch_manifest(profile, &release).await?;
-    let resources = manifest_resources(&manifest);
-    if resources.is_empty() {
-        return Err(format!("{name}: the server returned an empty file list."));
-    }
     let source = manifest_source(&manifest);
-    let mut mirrors: Vec<String> = cdns.iter().map(|cdn| combine_url(cdn, source)).collect();
-    let base_url = mirrors[0].clone();
-    if mirrors.len() < 2 {
-        mirrors.clear();
+    let mirrors: Vec<String> = cdns.iter().map(|cdn| combine_url(cdn, source)).collect();
+    let entries = manifest_entries(&manifest, &mirrors[0]);
+    if entries.is_empty() {
+        return Err(format!("{name}: the server returned an empty file list."));
     }
     log::info!(
         "{name} build {} resolved with {} files, {:.2} GB.",
         release.version,
-        resources.len(),
-        resources.iter().map(|r| r.size).sum::<u64>() as f64 / 1_073_741_824.0
+        entries.len(),
+        entries.iter().map(|e| e.size).sum::<u64>() as f64 / 1_073_741_824.0
     );
-    Ok(GameConfig {
-        resources,
-        base_url,
-        version: release.version,
-        mirrors,
-        bundle: None,
-    })
+    Ok(Manifest { version: release.version, entries, mirrors, ..Default::default() })
+}
+
+// ------------ Publisher ------------
+// Arknights' file list. A full repair records the build it repaired against.
+pub(super) struct Yostar;
+
+impl Publisher for Yostar {
+    fn manifest<'a>(&'a self, cx: &'a Cx<'a>) -> BoxFuture<'a, Result<Manifest, String>> {
+        Box::pin(resolve(cx.profile))
+    }
+
+    fn latest<'a>(&'a self, profile: &'a Value, _fresh: bool) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move { Ok(json!({ "version": fetch_release(profile).await?.version })) })
+    }
+
+    fn preview<'a>(&'a self, profile: &'a Value, _quality: Option<&'a str>) -> BoxFuture<'a, Result<Preview, String>> {
+        Box::pin(preview(profile))
+    }
+
+    fn policy(&self, _dir: &Path) -> Policy {
+        Policy { records: true, ..Policy::default() }
+    }
 }
 
 fn local_date_from_ms(ms: i64) -> String {
@@ -319,6 +313,12 @@ fn slides_from(data: &Value, site: &str) -> Vec<Value> {
         .collect()
 }
 
+// ------------ Install Preview ------------
+// The download and install size of the file list.
+pub(super) async fn preview(profile: &Value) -> Result<Preview, String> {
+    Ok(resource_list_preview(resolve(profile).await?))
+}
+
 // ------------ Website News ------------
 // The arknights.global news page is a single-page app over a plain JSON API: one call lists the categories, one call lists the posts in a category.
 // Its rows already look like the launcher feed's rows (title, link, publishTime), so they are wrapped into the same groups and share collect_rows.
@@ -374,7 +374,6 @@ fn site_group(kind: &str, data: &Value, site: &str) -> Value {
     serde_json::json!({ "typeLabel": kind, "rows": rows })
 }
 
-// Every post carries its own banner art; the newest posts become the slideshow, each opening its article.
 fn site_slides(groups: &[Value]) -> Vec<Value> {
     let mut rows: Vec<(i64, &Value)> = groups
         .iter()
@@ -535,12 +534,14 @@ mod tests {
                 { "path": "/broken.bin", "hash": "nope", "size": "1" },
             ],
         });
-        let resources = manifest_resources(&manifest);
-        assert_eq!(resources.len(), 2);
-        assert_eq!(resources[0].dest(), "Arknights.exe");
-        assert_eq!(resources[0].size, 675304);
-        assert_eq!(resources[0].md5(), "crc64:1157254865370011820");
-        assert_eq!(resources[1].md5(), "crc64:0");
+        let entries = manifest_entries(&manifest, "https://cdn.example/game");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(&*entries[0].path, "Arknights.exe");
+        assert_eq!(entries[0].size, 675304);
+        assert_eq!(entries[0].hash.expected(), "crc64:1157254865370011820");
+        assert_eq!(entries[1].hash.expected(), "crc64:0");
+        assert_eq!(entries[1].url(), "https://cdn.example/game/Arknights_Data/Plugins/x86_64/TQM64/dump/space.txt");
+        assert!(!entries[0].live);
         assert_eq!(manifest_source(&manifest), "/Arknights_EN-041.2.0-game");
     }
 

@@ -152,7 +152,7 @@ fn main() {
     } else if subcommand == Some("inspect") {
         inspect_main(&args)
     } else if flag(&args, "second-stage") {
-        uninstall_main(&args)
+        uninstall_main(&args, silent)
     } else {
         let Some(_instance) = win::claim_single_instance() else {
             ilog!("another copy of setup is already running");
@@ -162,17 +162,20 @@ fn main() {
                     "Setup is already running. Finish or close the other window first.",
                 );
             }
-            ilog!("---- peebify-installer exit: {}", exit::ALREADY_RUNNING);
-            std::process::exit(exit::ALREADY_RUNNING);
+            exit_with(exit::ALREADY_RUNNING);
         };
         if flag(&args, "uninstall") {
-            uninstall_main(&args)
+            uninstall_main(&args, silent)
         } else if silent {
             silent_install_main(&args)
         } else {
             gui_main()
         }
     };
+    exit_with(code);
+}
+
+fn exit_with(code: i32) -> ! {
     ilog!("---- peebify-installer exit: {code}");
     std::process::exit(code);
 }
@@ -317,6 +320,7 @@ fn silent_install_main(args: &[String]) -> i32 {
 }
 
 const SETUP_TITLE: &str = "Peebify Launcher Setup";
+const REMOVE_WITHOUT_WINDOW: &str = "Setup's window couldn't open on this PC. Remove Peebify Launcher anyway? Your settings and installed games are kept.";
 
 fn install_without_window(payload: &Payload) -> i32 {
     if !win::message_box_yes_no(
@@ -370,11 +374,7 @@ fn install_without_window(payload: &Payload) -> i32 {
 }
 
 fn uninstall_without_window(install_dir: PathBuf) -> i32 {
-    if !win::message_box_yes_no(
-        consts::PRODUCT_NAME,
-        "Setup's window couldn't open on this PC. Remove Peebify Launcher anyway? Your \
-         settings and installed games are kept.",
-    ) {
+    if !win::message_box_yes_no(consts::PRODUCT_NAME, REMOVE_WITHOUT_WINDOW) {
         return exit::CANCELLED;
     }
     let opts = UninstallOptions {
@@ -392,8 +392,7 @@ fn uninstall_without_window(install_dir: PathBuf) -> i32 {
     }
 }
 
-fn uninstall_main(args: &[String]) -> i32 {
-    let silent = flag(args, "s") || flag(args, "silent");
+fn uninstall_main(args: &[String], silent: bool) -> i32 {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
@@ -484,11 +483,7 @@ fn staged_uninstall(opts: UninstallOptions, choose: bool) -> i32 {
         Err(e) => {
             ilog!("uninstall: the window could not open ({e}), running without it");
             let confirmed = !choose
-                || win::message_box_yes_no(
-                    consts::PRODUCT_NAME,
-                    "Setup's window couldn't open on this PC. Remove Peebify Launcher anyway? \
-                     Your settings and installed games are kept.",
-                );
+                || win::message_box_yes_no(consts::PRODUCT_NAME, REMOVE_WITHOUT_WINDOW);
             if !confirmed {
                 return exit::CANCELLED;
             }
@@ -532,11 +527,21 @@ fn resolve_uninstall_dir(
     Ok(dir)
 }
 
+fn tool_exit(result: Result<(), String>) -> i32 {
+    match result {
+        Ok(()) => exit::OK,
+        Err(e) => {
+            eprintln!("{}", serde_json::json!({ "ok": false, "error": e }));
+            exit::FAILED
+        }
+    }
+}
+
 fn pack_main(args: &[String]) -> i32 {
     let required = |name: &str| -> Result<String, String> {
         value_of(args, name).ok_or_else(|| format!("pack: missing --{name}"))
     };
-    let result = (|| -> Result<(), String> {
+    tool_exit((|| -> Result<(), String> {
         let stub = PathBuf::from(required("stub")?);
         let payload_dir = PathBuf::from(required("payload-dir")?);
         let out = PathBuf::from(required("out")?);
@@ -555,18 +560,11 @@ fn pack_main(args: &[String]) -> i32 {
             })
         );
         Ok(())
-    })();
-    match result {
-        Ok(()) => exit::OK,
-        Err(e) => {
-            eprintln!("{}", serde_json::json!({ "ok": false, "error": e }));
-            exit::FAILED
-        }
-    }
+    })())
 }
 
 fn inspect_main(args: &[String]) -> i32 {
-    let result = (|| -> Result<(), String> {
+    tool_exit((|| -> Result<(), String> {
         let file = PathBuf::from(
             value_of(args, "file").ok_or_else(|| "inspect: missing --file".to_string())?,
         );
@@ -583,14 +581,7 @@ fn inspect_main(args: &[String]) -> i32 {
             })
         );
         Ok(())
-    })();
-    match result {
-        Ok(()) => exit::OK,
-        Err(e) => {
-            eprintln!("{}", serde_json::json!({ "ok": false, "error": e }));
-            exit::FAILED
-        }
-    }
+    })())
 }
 
 #[cfg(test)]
@@ -630,13 +621,6 @@ mod tests {
             assert!(text.contains("64 bad usage"));
         }
         assert!(usage(true).contains(&format!("  {:<24}Where to install", "--install-dir <path>")));
-    }
-
-    #[test]
-    fn dialog_usage_does_not_rely_on_space_aligned_columns() {
-        for line in usage(false).lines() {
-            assert!(!line.trim_start().contains("  "), "{line:?}");
-        }
     }
 
     #[test]

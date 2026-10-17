@@ -2,21 +2,23 @@
 // The shared logic behind a game's buttons: update, repair, move, uninstall, locate an existing install, and
 // pick the download quality. Used by the home page and by settings.
 import { useCallback, useEffect, useState } from "react";
-import { gameById, isManaged, supportsQuickRepair } from "../data/games";
-import type { GameId } from "../types/game";
+import { fetchRemembered, reads, recall, rememberAnswer, useRemembered } from "./launcherHooks";
+import { gameById, isManaged, supportsQuickRepair, type GameId, type ResourceQuality } from "../data/games";
 import { useGamesStore } from "../store/gamesStore";
 import { useCustomizationStore } from "../store/customizationStore";
 import { useQueueStore } from "../store/queueStore";
-import { useNotificationStore } from "../store/notificationStore";
+import { useNotificationStore } from "../store/notifications";
 import { useModalStore } from "../store/modalStore";
 import { isActiveJob } from "./download";
 import { log } from "./log";
+import { t } from "./i18n";
+import { useT } from "./useT";
 import {
   checkGameUpdate,
+  checkResourceQuality,
   DEFAULT_RESOURCE_QUALITY,
   downloadEnqueue,
   getModsStatus,
-  getResourceQuality,
   getSteamInstall,
   listMods,
   locateGameInstall,
@@ -24,7 +26,7 @@ import {
   repairGame,
   RESOURCE_QUALITY_OPTIONS,
   uninstallGame,
-  type ResourceQuality,
+  type QualityCheck,
   type ResourceQualityInfo,
   type SteamInstall,
 } from "./ipc";
@@ -32,9 +34,54 @@ import {
 export const qualityLabel = (q: ResourceQuality): string =>
   RESOURCE_QUALITY_OPTIONS.find((o) => o.value === q)?.label ?? q;
 
+const joinLabels = (qualities: ResourceQuality[]): string =>
+  qualities
+    .map(qualityLabel)
+    .reduce((first, second) => (first ? t("actions.game.joinAnd", { first, second }) : second), "");
+
+export function describeQualityCheck(check: QualityCheck, game: string): { type: "success" | "warning"; title: string; text: string } {
+  const quality = qualityLabel(check.selected);
+  const launch = qualityLabel(check.launchWith);
+  const found = check.files[check.selected];
+  const whole = !!found && found.total > 0 && found.present === found.total;
+  if (whole && check.launchWith === check.selected) {
+    return {
+      type: "success",
+      title: t("maintenance.resourceQuality.check.okTitle", { game, quality }),
+      text: t("maintenance.resourceQuality.check.okText", { quality }),
+    };
+  }
+  if (whole) {
+    return {
+      type: "warning",
+      title: t("maintenance.resourceQuality.check.behindTitle", { game, quality, launch }),
+      text: t("maintenance.resourceQuality.check.behindText", { quality, launch }),
+    };
+  }
+  if (found && found.present > 0) {
+    return {
+      type: "warning",
+      title: t("maintenance.resourceQuality.check.incompleteTitle", { game, quality }),
+      text: t("maintenance.resourceQuality.check.incompleteText", {
+        quality,
+        present: found.present,
+        total: found.total,
+      }),
+    };
+  }
+  const others = check.onDisk.filter((q) => q !== check.selected);
+  return {
+    type: "warning",
+    title: t("maintenance.resourceQuality.check.missingTitle", { game, quality }),
+    text: others.length
+      ? t("maintenance.resourceQuality.check.missingText", { quality, installed: joinLabels(others) })
+      : t("maintenance.resourceQuality.check.missingNoneText", { quality }),
+  };
+}
+
 export function useResourceQuality(
   gameId: GameId,
-  { installed, steamCopy, jobActive }: { installed: boolean; steamCopy: boolean; jobActive: boolean },
+  { installed, jobActive }: { installed: boolean; jobActive: boolean },
   { sizes: withSizes = false, initial = null }: { sizes?: boolean; initial?: ResourceQualityInfo | null } = {},
 ) {
   const game = gameById(gameId);
@@ -42,31 +89,59 @@ export function useResourceQuality(
     useCustomizationStore((s) => s.resourceQuality[gameId]) ?? DEFAULT_RESOURCE_QUALITY;
   const setResourceQuality = useCustomizationStore((s) => s.setResourceQuality);
   const push = useNotificationStore((s) => s.push);
+  const toast = useNotificationStore((s) => s.toast);
   const [info, setInfo] = useState<{ gameId: GameId; data: ResourceQualityInfo } | null>(
     initial ? { gameId, data: initial } : null,
   );
+  const [checking, setChecking] = useState(false);
+  const [reload, setReload] = useState(0);
   useEffect(() => {
     if (!game.resourceQualityChoice) return;
     let alive = true;
-    void getResourceQuality(gameId, withSizes).then((data) => {
+    void fetchRemembered(reads.resourceQuality(gameId, withSizes)).then((data) => {
       if (alive) setInfo({ gameId, data });
     });
     return () => {
       alive = false;
     };
-  }, [gameId, installed, jobActive, game.resourceQualityChoice, withSizes]);
+  }, [gameId, installed, jobActive, game.resourceQualityChoice, withSizes, reload]);
 
-  const data = info?.gameId === gameId ? info.data : null;
+  const data = info?.gameId === gameId ? info.data : recall(reads.resourceQuality(gameId, withSizes));
   const onDisk = data?.installed ?? [];
-  const pending =
-    installed && isManaged(gameId) && !steamCopy && onDisk.length > 0 && !onDisk.includes(quality);
+  const pending = installed && isManaged(gameId) && onDisk.length > 0 && !onDisk.includes(quality);
+
+  const check = useCallback(async () => {
+    if (checking) return;
+    setChecking(true);
+    toast({
+      type: "progress",
+      title: t("maintenance.resourceQuality.check.checkingTitle", { game: game.name }),
+      text: t("maintenance.resourceQuality.check.checkingText", { quality: qualityLabel(quality) }),
+    });
+    const result = await checkResourceQuality(gameId);
+    setChecking(false);
+    setReload((n) => n + 1);
+    push(
+      result.ok
+        ? describeQualityCheck(result.check, game.name)
+        : {
+            type: "warning",
+            title: t("maintenance.resourceQuality.check.failedTitle", { game: game.name }),
+            text: result.error,
+          },
+    );
+  }, [checking, gameId, game.name, quality, push, toast]);
 
   const apply = useCallback(() => {
-    const from = onDisk.map(qualityLabel).join(" and ");
+    const from = joinLabels(onDisk);
     void downloadEnqueue(gameId, () =>
       push({
-        title: `Switching ${game.name} to ${qualityLabel(quality)}`,
-        text: `Downloading the ${qualityLabel(quality)} files and removing the ${from} ones. Track it on Downloads.`,
+        type: "progress",
+        title: t("actions.game.switchingQuality.title", {
+          game: game.name,
+          quality: qualityLabel(quality),
+        }),
+        text: t("actions.game.switchingQuality.text", { quality: qualityLabel(quality), from }),
       }),
     );
   }, [gameId, game.name, quality, onDisk, push]);
@@ -79,42 +154,41 @@ export function useResourceQuality(
     sizes: data?.sizes ?? null,
     pending,
     apply,
+    check,
+    checking,
   };
 }
 
 export function useModsForceDx11(gameId: GameId): boolean {
-  const [state, setState] = useState<{ gameId: GameId; force: boolean } | null>(null);
-  useEffect(() => {
-    let alive = true;
-    void getModsStatus(gameId).then((s) => {
-      if (alive) setState({ gameId, force: s.masterEnabled && s.gameEnabled && s.forcesDx11 });
-    });
-    return () => {
-      alive = false;
-    };
-  }, [gameId]);
-  return state?.gameId === gameId && state.force;
+  const s = useRemembered(reads.modsStatus(gameId), [gameId]);
+  return !!s && s.masterEnabled && s.gameEnabled && s.forcesDx11;
 }
 
 function useSteamInstall(gameId: GameId, installed: boolean) {
   const [state, setState] = useState<{ gameId: GameId; info: SteamInstall } | null>(null);
   useEffect(() => {
     let alive = true;
-    void getSteamInstall(gameId).then((info) => {
+    void fetchRemembered(reads.steamInstall(gameId)).then((info) => {
       if (alive) setState({ gameId, info });
     });
     return () => {
       alive = false;
     };
   }, [gameId, installed]);
-  const setSteam = useCallback((info: SteamInstall) => setState({ gameId, info }), [gameId]);
-  return [state?.gameId === gameId ? state.info : null, setSteam] as const;
+  const setSteam = useCallback(
+    (info: SteamInstall) => {
+      rememberAnswer(reads.steamInstall(gameId), info);
+      setState({ gameId, info });
+    },
+    [gameId],
+  );
+  return [state?.gameId === gameId ? state.info : recall(reads.steamInstall(gameId)), setSteam] as const;
 }
 
 async function countMods(gameId: GameId): Promise<number> {
   try {
     const status = await getModsStatus(gameId);
-    return status.supportsMods ? (await listMods(gameId)).length : 0;
+    return status.supportsMods ? ((await listMods(gameId))?.length ?? 0) : 0;
   } catch (e) {
     log.warn(`Could not count the mods for ${gameId}:`, e);
     return 0;
@@ -122,24 +196,19 @@ async function countMods(gameId: GameId): Promise<number> {
 }
 
 function uninstallMessage(name: string, steamCopy: boolean, modCount: number): string {
-  const mods = modCount === 1 ? "mod" : `${modCount} mods`;
-  const kept = "Your launcher settings and playtime history are kept.";
   if (steamCopy) {
-    const removed = modCount
-      ? ` The ${mods} you installed for it ${modCount === 1 ? "is" : "are"} removed too.`
-      : "";
-    return `Steam will ask you to confirm the uninstall, and Peebify removes ${name} from its library.${removed} ${kept}`;
+    return modCount
+      ? t("actions.game.uninstall.steamMods", { game: name, count: modCount })
+      : t("actions.game.uninstall.steam", { game: name });
   }
   return modCount
-    ? `This permanently deletes the installed game files from your disk, along with the ${mods} you installed for it. ${kept}`
-    : `This permanently deletes the installed game files from your disk. ${kept}`;
+    ? t("actions.game.uninstall.filesMods", { count: modCount })
+    : t("actions.game.uninstall.files");
 }
 
-export const JOB_ACTIVE_BLOCKER =
-  "Finish or cancel this game's current download, repair or move first.";
+export const jobActiveBlocker = (): string => t("actions.game.jobActiveBlocker");
 
-export const LINKED_UNCHECKED_TEXT =
-  "Linked your existing installation. Run a full repair from Settings if it has problems.";
+export const linkedUncheckedText = (): string => t("actions.game.located.linkedUnchecked");
 
 const SKIP_LINKED_CHECK: ReadonlySet<GameId> = new Set<GameId>(["bd2", "re1999"]);
 
@@ -150,6 +219,7 @@ export function checkLinkedInstall(gameId: GameId): boolean {
 }
 
 export function useGameActions(gameId: GameId) {
+  const t = useT();
   const game = gameById(gameId);
   const managed = isManaged(gameId);
   const installed = useGamesStore((s) => s.installed.includes(gameId));
@@ -164,30 +234,36 @@ export function useGameActions(gameId: GameId) {
   const steamCopy = installed && !!steam?.isSteamInstall;
 
   const uninstallBlocker = running
-    ? `Close ${game.name} first.`
+    ? t("actions.game.closeFirst", { game: game.name })
     : jobActive
-      ? JOB_ACTIVE_BLOCKER
+      ? t("actions.game.jobActiveBlocker")
       : null;
 
   const checkUpdates = async () => {
-    toast({ title: `Checking ${game.name}`, text: "Looking for updates…" });
+    toast({
+      type: "progress",
+      title: t("actions.game.checking.title", { game: game.name }),
+      text: t("actions.game.checking.text"),
+    });
     const result = await checkGameUpdate(gameId, true);
     if (!result.ok) {
-      push({ type: "warning", title: "Couldn't check for updates", text: result.error });
+      push({ type: "warning", title: t("actions.game.checkFailed"), text: result.error });
       return;
     }
-    const { available, steamManaged } = result;
-    useGamesStore.getState().setUpdate(gameId, available, steamManaged, result);
+    const { available } = result;
+    useGamesStore.getState().setUpdate(gameId, available, result);
     if (!available) {
-      toast({ type: "success", title: "Up to date", text: `${game.name} is up to date.` });
+      toast({
+        type: "success",
+        title: t("actions.game.upToDate.title"),
+        text: t("actions.game.upToDate.text", { game: game.name }),
+      });
       return;
     }
     push({
       type: "info",
-      title: "Update available",
-      text: steamManaged
-        ? `${game.name} has a new version ready. Steam installs this one, so use Update in Steam.`
-        : `${game.name} has a new version ready.`,
+      title: t("actions.game.updateAvailable.title"),
+      text: t("actions.game.updateAvailable.text", { game: game.name }),
     });
   };
 
@@ -195,24 +271,25 @@ export function useGameActions(gameId: GameId) {
     void repairGame(gameId, true).then((queued) => {
       if (!queued) return;
       push({
-        title: `Quick repair for ${game.name}`,
-        text: "Checking file sizes against the local manifest.",
+        type: "progress",
+        title: t("actions.game.quickRepair.title", { game: game.name }),
+        text: t("actions.game.quickRepair.text"),
       });
     });
   };
 
   const confirmFullRepair = () =>
     openConfirm({
-      title: `Full repair for ${game.name}`,
-      message:
-        "This hashes every installed game file and re-downloads any that are missing or corrupted. It is far more thorough than a quick repair, and can take a while.",
-      confirmLabel: "Full repair",
+      title: t("actions.game.fullRepair.title", { game: game.name }),
+      message: t("actions.game.fullRepair.message"),
+      confirmLabel: t("actions.game.fullRepair.confirm"),
       onConfirm: () => {
         void repairGame(gameId, false).then((queued) => {
           if (!queued) return;
           push({
-            title: `Repairing ${game.name}`,
-            text: "Verifying game files. Track it on Downloads.",
+            type: "progress",
+            title: t("actions.game.repairing.title", { game: game.name }),
+            text: t("actions.game.repairing.text"),
           });
         });
       },
@@ -224,42 +301,46 @@ export function useGameActions(gameId: GameId) {
       void useCustomizationStore.getState().hydrate();
       const ids = useGamesStore.getState().installed;
       if (!ids.includes(gameId)) useGamesStore.getState().setInstalled([...ids, gameId]);
-      const located = await getSteamInstall(gameId);
-      setSteam(located);
-      const linked = managed && !located.isSteamInstall;
-      const checking = linked && checkLinkedInstall(gameId);
+      setSteam(await getSteamInstall(gameId));
+      const checking = managed && checkLinkedInstall(gameId);
       push({
         type: "success",
-        title: `${game.name} located`,
+        title: t("actions.game.located.title", { game: game.name }),
         text: checking
-          ? "Verifying your installation. Track it on the Downloads page."
-          : linked
-            ? LINKED_UNCHECKED_TEXT
-            : "Linked your existing installation.",
+          ? t("actions.game.located.checking")
+          : managed
+            ? t("actions.game.located.linkedUnchecked")
+            : t("actions.game.located.linked"),
       });
     } else if (r.error) {
-      push({ type: "warning", title: `Couldn't locate ${game.name}`, text: r.error });
+      push({
+        type: "warning",
+        title: t("actions.game.locateFailed", { game: game.name }),
+        text: r.error,
+      });
     }
   };
 
   const confirmMove = () =>
     openConfirm({
-      title: `Move ${game.name}`,
-      message:
-        "Pick a new folder next. The game files are moved there and the old folder is removed once it's done.",
-      confirmLabel: "Choose folder",
+      title: t("actions.game.move.title", { game: game.name }),
+      message: t("actions.game.move.message"),
+      confirmLabel: t("actions.game.move.confirm"),
       onConfirm: () => void moveGame(gameId),
     });
 
   const confirmDiscard = () =>
     openConfirm({
-      title: `Discard the ${game.name} download?`,
-      message:
-        "This deletes the files downloaded so far by the unfinished install. You can start the install again later.",
-      confirmLabel: "Discard",
+      title: t("actions.game.discard.title", { game: game.name }),
+      message: t("actions.game.discard.message"),
+      confirmLabel: t("actions.game.discard.confirm"),
       danger: true,
       onConfirm: () => {
-        push({ title: `Discarding ${game.name}`, text: "Removing the unfinished download." });
+        push({
+          type: "progress",
+          title: t("actions.game.discarding.title", { game: game.name }),
+          text: t("actions.game.discarding.text"),
+        });
         void uninstallGame(gameId).then((ok) => {
           if (!ok) return;
           const store = useGamesStore.getState();
@@ -277,14 +358,17 @@ export function useGameActions(gameId: GameId) {
     }
     const modCount = await countMods(gameId);
     openConfirm({
-      title: `Uninstall ${game.name}?`,
+      title: t("actions.game.uninstall.title", { game: game.name }),
       message: uninstallMessage(game.name, steamCopy, modCount),
-      confirmLabel: "Uninstall",
+      confirmLabel: t("common.uninstall"),
       danger: true,
       onConfirm: () => {
         push({
-          title: `Uninstalling ${game.name}`,
-          text: steamCopy ? "Handing the uninstall to Steam." : "Removing game files.",
+          type: "progress",
+          title: t("actions.game.uninstalling.title", { game: game.name }),
+          text: steamCopy
+            ? t("actions.game.uninstalling.textSteam")
+            : t("actions.game.uninstalling.text"),
         });
         void uninstallGame(gameId);
       },

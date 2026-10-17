@@ -1,18 +1,25 @@
-// ------------ Bluepoch API ------------
+// ------------ Reverse: 1999 (Bluepoch) ------------
 // Talks to the Bluepoch servers that host Reverse: 1999. It works out the latest version, builds the package to download, and sends news and activity requests.
+// It also holds the game's install manifest, repair (clearing its update staging), the shape check its verify uses, and its install preview.
 // Responses can come back scrambled or gzipped, so they are decoded here first, and it rotates through backup hosts when one is down.
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use futures::future::BoxFuture;
 use parking_lot::Mutex;
+use peebify_transfer::Sealed;
 use serde_json::{json, Value};
 
+use super::engine::{self, archive_space, package_preview, JobCore, Preview};
 use super::fs_util::md5_hex;
+use super::game_manager::local_game_version_at;
+use super::game_profiles;
 use super::http;
-use super::validator::Resource;
+use super::manifest::{origin_of, Container, Cx, Entry, Hash, Manifest, Policy, Publisher, Shape};
+use super::queue::Phase;
 
 pub const VERSION_FILE: &str = "reverse1999_version.ini";
 
@@ -254,12 +261,12 @@ pub async fn latest_version(profile: &Value) -> Result<String, String> {
 
 pub struct Package {
     pub version: String,
-    pub resources: Vec<Resource>,
+    pub parts: Vec<Entry>,
     pub download_bytes: u64,
     pub install_bytes: u64,
 }
 
-fn parse_package(url: &str) -> Option<(Resource, u64)> {
+fn parse_package(url: &str) -> Option<(Entry, u64)> {
     let name = url.rsplit('/').next()?;
     if name.is_empty() || name.contains('\\') {
         return None;
@@ -280,15 +287,12 @@ fn parse_package(url: &str) -> Option<(Resource, u64)> {
         return None;
     }
     let origin = field("origin").and_then(|v| v.parse().ok()).unwrap_or(0);
-    Some((
-        Resource::new(name, size, md5.to_lowercase()).with_url(Some(url)),
-        origin,
-    ))
+    Some((Entry::new(name, size, Hash::parse(md5), url), origin))
 }
 
 fn package_from(node: &Value, version: &str) -> Option<Package> {
     let empty: Vec<Value> = Vec::new();
-    let mut resources = Vec::new();
+    let mut parts = Vec::new();
     let mut download_bytes = 0u64;
     let mut install_bytes = 0u64;
 
@@ -296,15 +300,15 @@ fn package_from(node: &Value, version: &str) -> Option<Package> {
         let Some(url) = entry.as_str().filter(|s| !s.is_empty()) else {
             continue;
         };
-        let Some((resource, origin)) = parse_package(url) else {
+        let Some((part, origin)) = parse_package(url) else {
             log::warn!("Bluepoch: could not parse package metadata from {url}");
             continue;
         };
-        download_bytes = download_bytes.saturating_add(resource.size);
+        download_bytes = download_bytes.saturating_add(part.size);
         install_bytes = install_bytes.saturating_add(origin);
-        resources.push(resource);
+        parts.push(part);
     }
-    if resources.is_empty() {
+    if parts.is_empty() {
         return None;
     }
 
@@ -318,7 +322,7 @@ fn package_from(node: &Value, version: &str) -> Option<Package> {
 
     Some(Package {
         version: version.to_string(),
-        resources,
+        parts,
         download_bytes,
         install_bytes,
     })
@@ -346,7 +350,7 @@ pub async fn fetch_package(profile: &Value, current_version: &str) -> Result<Pac
     {
         log::info!(
             "Bluepoch: delta package for {current_version} -> {target} ({} parts).",
-            delta.resources.len()
+            delta.parts.len()
         );
         return Ok(delta);
     }
@@ -358,18 +362,14 @@ pub async fn fetch_package(profile: &Value, current_version: &str) -> Result<Pac
         .ok_or("Bluepoch diff-update/resource listed no usable package")?;
     log::info!(
         "Bluepoch: full package for {target} ({} parts, {} bytes compressed).",
-        full.resources.len(),
+        full.parts.len(),
         full.download_bytes
     );
     Ok(full)
 }
 
-pub fn data_dir(install_path: &Path, executable_name: &str) -> PathBuf {
-    install_path.join(format!("{}_Data", executable_name.trim_end_matches(".exe")))
-}
-
 pub fn staging_dirs(install_path: &Path, executable_name: &str) -> Vec<PathBuf> {
-    let root = data_dir(install_path, executable_name)
+    let root = game_profiles::data_dir(install_path, executable_name)
         .join("StreamingAssets")
         .join("PersistentRoot");
     let Ok(entries) = std::fs::read_dir(&root) else {
@@ -389,7 +389,7 @@ pub fn installed_version(install_path: &Path) -> Option<String> {
     (!version.is_empty()).then_some(version)
 }
 
-pub fn record_version(install_path: &Path, version: &str) -> Result<(), String> {
+pub fn record_version(_sealed: &peebify_transfer::Sealed, install_path: &Path, version: &str) -> Result<(), String> {
     super::fs_util::write_atomic(&install_path.join(VERSION_FILE), version.as_bytes())
 }
 
@@ -404,6 +404,179 @@ pub(crate) async fn activity_post(
     }
     let response = post(&cfg.activity, path, &body, &cfg.lang).await?;
     payload(&response, path)
+}
+
+// ------------ Install Preview ------------
+// The size of the game package.
+pub(super) async fn preview(profile: &Value) -> Result<Preview, String> {
+    let package = fetch_package(profile, "").await?;
+    let parts = package.parts.len() as u64;
+    Ok(package_preview(package.version.clone(), package.download_bytes, package.install_bytes, parts))
+}
+
+// ------------ Install ------------
+// The game ships as 7z archives, asked for from the installed version, that unpack into the folder. They are fetched
+// only while the install records another version, and stay when the version file cannot be written, so the next
+// update can unpack them again.
+pub(super) struct Bluepoch;
+
+impl Publisher for Bluepoch {
+    fn manifest<'a>(&'a self, cx: &'a Cx<'a>) -> BoxFuture<'a, Result<Manifest, String>> {
+        Box::pin(async move {
+            let current = installed_version(cx.dir).unwrap_or_default();
+            let package = fetch_package(cx.profile, &current).await?;
+            log::info!(
+                "{} package {} resolved with {} archive(s).",
+                game_profiles::display_name(cx.profile),
+                package.version,
+                package.parts.len()
+            );
+            let mirrors = origin_of(&package.parts);
+            let containers = if super::extract::needs_unpack(cx.dir, &package.version) {
+                vec![Container { parts: package.parts, ..Default::default() }]
+            } else {
+                Vec::new()
+            };
+            Ok(Manifest { version: package.version, containers, mirrors, ..Default::default() })
+        })
+    }
+
+    fn latest<'a>(&'a self, profile: &'a Value, _fresh: bool) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move { Ok(json!({ "version": latest_version(profile).await? })) })
+    }
+
+    fn preview<'a>(&'a self, profile: &'a Value, _quality: Option<&'a str>) -> BoxFuture<'a, Result<Preview, String>> {
+        Box::pin(preview(profile))
+    }
+
+    fn write_space(&self, download: u64, _install: u64) -> (u64, f64) {
+        archive_space(download, 0)
+    }
+
+    fn installed_version(&self, dir: &Path) -> Option<String> {
+        installed_version(dir).or_else(|| local_game_version_at(dir))
+    }
+
+    fn policy(&self, _dir: &Path) -> Policy {
+        Policy { partial_verify: true, nested: true, ..Policy::default() }
+    }
+
+    fn repair<'a>(&'a self, job: &'a Arc<JobCore>, dir: &'a Path, start_ms: i64) -> Option<BoxFuture<'a, Result<(), String>>> {
+        Some(Box::pin(repair(job, dir, start_ms)))
+    }
+
+    fn after_seal<'a>(
+        &'a self,
+        _job: &'a Arc<JobCore>,
+        dir: &'a Path,
+        manifest: &'a Manifest,
+        sealed: &'a Sealed,
+    ) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            super::validator::update_game_config_file(sealed, dir, &manifest.version)?;
+            match record_version(sealed, dir, &manifest.version) {
+                Ok(()) => Ok(true),
+                Err(e) => {
+                    log::warn!("Could not write {VERSION_FILE}: {e}");
+                    Ok(false)
+                }
+            }
+        })
+    }
+
+    fn shape_check<'a>(&'a self, cx: &'a Cx<'a>) -> Option<BoxFuture<'a, Shape>> {
+        Some(Box::pin(async move {
+            let (name, exe) = (game_profiles::display_name(cx.profile), game_profiles::executable_name(cx.profile));
+            let installed = installed_version(cx.dir);
+            let mut problems = Vec::new();
+            if installed.is_none() {
+                problems.push(format!(
+                    "{name}'s version file ({VERSION_FILE}) is missing or unreadable, so Peebify cannot tell which version is installed or whether an update is due."
+                ));
+            }
+            let staged = staging_dirs(cx.dir, exe).len();
+            if staged > 0 {
+                problems.push(format!(
+                    "{staged} leftover update folder{} from an interrupted hot update. Run a repair to clear {} so the game starts its next update clean.",
+                    if staged == 1 { "" } else { "s" },
+                    if staged == 1 { "it" } else { "them" },
+                ));
+            }
+            let published = match fetch_package(cx.profile, "").await {
+                Ok(package) => Some((package.version, package.install_bytes)),
+                Err(e) => {
+                    log::warn!("{name} verify: could not reach Bluepoch for the published size ({e}); skipped the size check.");
+                    None
+                }
+            };
+            let note = format!(
+                ", version {}. Bluepoch publishes no per-file checksums, so this checks the shape of the install rather than each file.",
+                installed.as_deref().unwrap_or("unknown")
+            );
+            Shape { problems, published, note }
+        }))
+    }
+}
+
+// ------------ Repair ------------
+// The game downloads its updates itself and publishes no file list, so repair can only clear its leftover update
+// staging folders and let the game fetch them again.
+async fn repair(job: &Arc<JobCore>, game_path: &Path, start_ms: i64) -> Result<(), String> {
+    let profile = job.profile();
+    let name = game_profiles::display_name(profile);
+
+    if let Some(too_deep) = game_profiles::path_budget_error(game_path, profile) {
+        return Err(format!(
+            "{too_deep} {name} downloads its updates itself, and it cannot write them from here. That is what the \"Could not find a part of the path\" notice in the game means. Move the install from Settings, Games, Install location, then start the game again."
+        ));
+    }
+
+    let exe = game_profiles::client_process_name(profile);
+
+    job.publish(
+        Phase::Repairing,
+        json!({
+            "status": engine::status::REPAIRING,
+            "message": format!("Clearing {name}'s update staging files..."),
+        }),
+    );
+
+    let root = game_path.to_path_buf();
+    let exe_name = exe.to_string();
+    let cleared = tauri::async_runtime::spawn_blocking(move || clear_staging(&root, &exe_name))
+        .await
+        .unwrap_or(0);
+
+    let duration = (chrono::Utc::now().timestamp_millis() - start_ms) as f64 / 1000.0;
+    let message = if cleared > 0 {
+        format!(
+            "Cleared {cleared} leftover update folder{} in {duration:.1}s. Start {name} to download its update again.",
+            if cleared == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "Nothing to clean up. {name} publishes no per-file list, so Peebify cannot checksum it. If the game still reports damaged files, reinstall it."
+        )
+    };
+    log::info!("{name} repair: {message}");
+
+    job.clear_update_cache();
+    job.publish(
+        Phase::Done,
+        json!({ "status": engine::status::COMPLETED, "message": message }),
+    );
+    Ok(())
+}
+
+fn clear_staging(install_path: &Path, executable_name: &str) -> u64 {
+    let mut cleared = 0u64;
+    for dir in staging_dirs(install_path, executable_name) {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => cleared += 1,
+            Err(e) => log::warn!("Could not clear {}: {e}", dir.display()),
+        }
+    }
+    cleared
 }
 
 #[cfg(test)]
@@ -459,8 +632,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        record_version(&dir, "2.1.0").unwrap();
-        record_version(&dir, "2.2.0").unwrap();
+        record_version(&peebify_transfer::Sealed::nothing_written(), &dir, "2.1.0").unwrap();
+        record_version(&peebify_transfer::Sealed::nothing_written(), &dir, "2.2.0").unwrap();
         assert_eq!(installed_version(&dir).as_deref(), Some("2.2.0"));
         let tmp = dir.join(format!("{VERSION_FILE}.tmp"));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);

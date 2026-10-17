@@ -1,7 +1,7 @@
 {
   "name": "peebify-launcher",
   "private": true,
-  "version": "5.0.0",
+  "version": "5.1.1",
   "type": "module",
   "description": "Peebify Launcher webui (React frontend for the Tauri shell)",
   "scripts": {
@@ -10,6 +10,7 @@
     "lint": "eslint src",
     "typecheck": "tsc && tsc -p tsconfig.node.json",
     "test": "vitest run",
+    "i18n:check": "node scripts/i18n-check.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

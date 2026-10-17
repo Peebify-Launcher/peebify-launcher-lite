@@ -65,6 +65,7 @@ async function flush(): Promise<void> {
   let failed = false;
   const batch = queue.splice(0, queue.length);
   if (dropped > 0) {
+    // i18n-ignore
     batch.unshift({ level: "warn", message: `dropped ${dropped} log lines`, t: Date.now(), w: source });
   }
   const droppedInBatch = dropped;

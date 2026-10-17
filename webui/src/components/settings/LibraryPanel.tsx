@@ -1,29 +1,27 @@
 // ------------ Library Panel ------------
 // The game list on the Games settings tab. Choose which games show in the sidebar, drag to reorder them, and see
 // which are installed.
-import { useId, useMemo } from "react";
+import { useMemo } from "react";
 import { Check, CircleDashed, Plus, GripVertical, EyeOff } from "lucide-react";
-import { GAMES, gameById } from "../../data/games";
-import type { GameId } from "../../types/game";
+import { GAMES, gameById, type GameId } from "../../data/games";
 import { useUiStore } from "../../store/uiStore";
 import { useGamesStore } from "../../store/gamesStore";
 import { useLibraryStore } from "../../store/libraryStore";
 import { useCustomizationStore } from "../../store/customizationStore";
 import { useSessionUiStore } from "../../store/sessionUiStore";
 import { iconFallback, iconSrcFor } from "../../lib/customMedia";
-import { REORDER_KEY_HINT, useReorder } from "../../lib/useReorder";
-import { GroupLabel } from "../ui/SettingsGroup";
+import { ReorderNotes, useLibraryReorder } from "../layout/Sidebar";
+import { GroupLabel } from "../ui/panels";
+import { Hint } from "../ui/Tooltip";
+import { useT } from "../../lib/useT";
 
 const SOURCE = "library-panel";
 
 export function LibraryPanel() {
-  const committed = useLibraryStore((s) => s.visible);
-  const preview = useLibraryStore((s) => s.preview);
-  const setPreview = useLibraryStore((s) => s.setPreview);
+  const t = useT();
   const show = useLibraryStore((s) => s.show);
   const hide = useLibraryStore((s) => s.hide);
-  const move = useLibraryStore((s) => s.move);
-  const visible = preview && preview.source !== SOURCE ? preview.order : committed;
+  const { visible, reorder, hintId } = useLibraryReorder(SOURCE);
   const installedIds = useGamesStore((s) => s.installed);
   const pendingInstalls = useGamesStore((s) => s.pendingInstalls);
   const activeId = useUiStore((s) => s.activeGameId);
@@ -34,9 +32,6 @@ export function LibraryPanel() {
 
   const hidden = useMemo(() => GAMES.filter((g) => !visible.includes(g.id)), [visible]);
   const isLastOne = visible.length <= 1;
-  const reorder = useReorder(visible, move, (order) => setPreview(SOURCE, order));
-  const hintId = useId();
-  const moved = reorder.announcement;
 
   const selectGame = (id: GameId) => {
     setSelectedId(id);
@@ -46,7 +41,10 @@ export function LibraryPanel() {
 
   return (
     <div>
-      <GroupLabel label="In your sidebar" hint={`${visible.length} of ${GAMES.length}`} />
+      <GroupLabel
+        label={t("settings.library.inSidebar")}
+        hint={t("settings.library.visibleCount", { shown: visible.length, total: GAMES.length })}
+      />
       <div className="flex flex-col gap-2" ref={reorder.containerRef}>
         {visible.map((id) => {
           const game = gameById(id);
@@ -104,33 +102,28 @@ export function LibraryPanel() {
                   />
                 </div>
               </button>
-              <button
-                onClick={() => hide(id)}
-                disabled={isLastOne}
-                aria-label={`Remove ${game.name} from the sidebar`}
-                title={
-                  isLastOne
-                    ? "Keep at least one game in the sidebar"
-                    : `Remove ${game.name} from the sidebar`
-                }
-                className="shrink-0 rounded-[8px] border border-white/[0.1] p-[6px] text-white/55 transition hover:border-white/25 hover:text-white disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-white/[0.1] disabled:hover:text-white/55"
+              <Hint
+                tip={isLastOne ? t("settings.library.keepOne") : t("settings.library.removeFromSidebar", { game: game.name })}
+                className="inline-flex shrink-0"
               >
-                <EyeOff size={14} />
-              </button>
+                <button
+                  onClick={() => hide(id)}
+                  disabled={isLastOne}
+                  aria-label={t("settings.library.removeFromSidebar", { game: game.name })}
+                  className="rounded-[8px] border border-white/[0.1] p-[6px] text-white/55 transition hover:border-white/25 hover:text-white disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-white/[0.1] disabled:hover:text-white/55"
+                >
+                  <EyeOff size={14} />
+                </button>
+              </Hint>
             </div>
           );
         })}
       </div>
-      <span id={hintId} className="sr-only">
-        {REORDER_KEY_HINT}
-      </span>
-      <span className="sr-only" aria-live="polite">
-        {moved ? `${gameById(moved.id).name}, position ${moved.position} of ${moved.total}` : ""}
-      </span>
+      <ReorderNotes hintId={hintId} moved={reorder.announcement} movedKey="settings.library.moved" />
 
       {hidden.length > 0 && (
         <>
-          <GroupLabel label="Not in your sidebar" className="mt-6" />
+          <GroupLabel label={t("settings.library.notInSidebar")} className="mt-6" />
           <div className="flex flex-col gap-2">
             {hidden.map((game) => (
               <button
@@ -167,6 +160,7 @@ export function LibraryPanel() {
 }
 
 function InstallState({ installed, partial = false }: { installed: boolean; partial?: boolean }) {
+  const t = useT();
   const tone = installed
     ? "text-emerald-300/80"
     : partial
@@ -175,7 +169,11 @@ function InstallState({ installed, partial = false }: { installed: boolean; part
   return (
     <div className={`mt-[1px] flex items-center gap-1 text-[11px] ${tone}`}>
       {installed ? <Check size={11} /> : <CircleDashed size={11} />}
-      {installed ? "Installed" : partial ? "Install unfinished" : "Not installed"}
+      {installed
+        ? t("settings.library.installed")
+        : partial
+          ? t("settings.library.installUnfinished")
+          : t("settings.library.notInstalled")}
     </div>
   );
 }

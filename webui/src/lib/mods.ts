@@ -1,16 +1,6 @@
 // ------------ Mod Warning ------------
-// The risk warning shown before mods are turned on, and the confirm dialog that uses it.
-import { useModalStore } from "../store/modalStore";
+// The risk warning shown wherever mods are turned on: the Mods page's opt-in panel, its mod support switch and the
+// overlay's mods tab.
+import type { TKey } from "./i18n";
 
-export const MOD_RISK_WARNING =
-  "Mods are made by other people, and Peebify loads them into the game while you play. This obviously breaks the rules of the game, and carries a risk of a ban even with the preventative measures we use.";
-
-export function requestEnableMods(onConfirm: () => void): void {
-  useModalStore.getState().openConfirm({
-    title: "Turn on mod support?",
-    message: MOD_RISK_WARNING,
-    confirmLabel: "I understand, turn mods on",
-    danger: true,
-    onConfirm,
-  });
-}
+export const MOD_RISK_WARNING: TKey = "actions.enableMods.riskWarning";

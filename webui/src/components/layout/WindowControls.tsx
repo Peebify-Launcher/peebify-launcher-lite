@@ -1,56 +1,26 @@
 // ------------ Window Controls ------------
 // The notification bell plus minimize, maximize and close buttons in the top right corner. The launcher draws
 // its own title bar, so these replace the normal Windows ones.
-import { createRef } from "react";
-import type { ReactNode, RefObject } from "react";
+import { createRef, type ComponentProps } from "react";
 import { Bell, Minus, Square, Copy, X } from "lucide-react";
 import { minimizeWindow, closeWindow } from "../../lib/tauri";
 import { toggleMaximizeWindow } from "../../lib/ipc";
-import { useNotificationStore } from "../../store/notificationStore";
+import { useNotificationStore } from "../../store/notifications";
 import { useUiStore } from "../../store/uiStore";
-import { TooltipPortal, useAnchoredTip } from "../ui/Tooltip";
+import { IconButton } from "../ui/Tooltip";
+import { useT } from "../../lib/useT";
 
 export const notificationBellRef = createRef<HTMLButtonElement>();
 
-function WinButton({
-  label,
-  spoken,
-  expanded,
-  buttonRef,
-  onClick,
-  children,
-}: {
-  label: string;
-  spoken?: string;
-  expanded?: boolean;
-  buttonRef?: RefObject<HTMLButtonElement | null>;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  const tip = useAnchoredTip<HTMLButtonElement>("bottom");
-  return (
-    <button
-      ref={(el) => {
-        tip.anchorRef.current = el;
-        if (buttonRef) buttonRef.current = el;
-      }}
-      onClick={onClick}
-      {...tip.bind}
-      aria-label={spoken ?? label}
-      aria-expanded={expanded}
-      className="relative grid h-[30px] w-[30px] place-items-center rounded-[7px] transition-colors hover:bg-white/10"
-    >
-      {children}
-      {tip.shown && (
-        <TooltipPortal x={tip.pos.x} y={tip.pos.y} placement="bottom">
-          {label}
-        </TooltipPortal>
-      )}
-    </button>
-  );
-}
+const WinButton = (props: ComponentProps<typeof IconButton>) => (
+  <IconButton
+    {...props}
+    className="relative grid h-[30px] w-[30px] place-items-center rounded-[7px] transition-colors hover:bg-white/10"
+  />
+);
 
 export function WindowControls({ hideBell = false }: { hideBell?: boolean }) {
+  const t = useT();
   const togglePanel = useNotificationStore((s) => s.togglePanel);
   const panelOpen = useNotificationStore((s) => s.open);
   const unread = useNotificationStore((s) => s.items.filter((i) => !i.read).length);
@@ -64,30 +34,33 @@ export function WindowControls({ hideBell = false }: { hideBell?: boolean }) {
     >
       {!hideBell && (
         <WinButton
-          label="Notifications"
-          spoken={unread > 0 ? `Notifications, ${unread} unread` : undefined}
-          expanded={panelOpen}
+          label={t("common.notifications")}
+          aria-label={unread > 0 ? t("layout.window.notificationsUnread", { count: unread }) : undefined}
+          aria-expanded={panelOpen}
           buttonRef={notificationBellRef}
           onClick={togglePanel}
         >
           <Bell size={15} />
           {unread > 0 && (
-            <span className="accent-grad absolute right-[1px] top-[1px] grid h-[15px] min-w-[15px] place-items-center rounded-full border-[1.5px] border-[rgba(18,18,22,0.8)] px-[3px] text-[9px] font-medium leading-none text-(--on-accent)">
+            <span
+              key={unread}
+              className="badge-pop accent-grad absolute right-[1px] top-[1px] grid h-[15px] min-w-[15px] place-items-center rounded-full border-[1.5px] border-[rgba(18,18,22,0.8)] px-[3px] text-[9px] font-medium leading-none text-(--on-accent)"
+            >
               {unread}
             </span>
           )}
         </WinButton>
       )}
-      <WinButton label="Minimize" onClick={() => void minimizeWindow()}>
+      <WinButton label={t("common.minimize")} onClick={() => void minimizeWindow()}>
         <Minus size={15} />
       </WinButton>
       <WinButton
-        label={maximized ? "Restore" : "Maximize"}
+        label={maximized ? t("layout.window.restore") : t("common.maximize")}
         onClick={() => void toggleMaximizeWindow().then(setMaximized)}
       >
         {maximized ? <Copy size={14} className="-scale-x-100" /> : <Square size={14} />}
       </WinButton>
-      <WinButton label="Close" onClick={() => void closeWindow()}>
+      <WinButton label={t("common.close")} onClick={() => void closeWindow()}>
         <X size={15} />
       </WinButton>
     </div>

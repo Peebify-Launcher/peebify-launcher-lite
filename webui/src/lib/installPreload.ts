@@ -1,8 +1,7 @@
 // ------------ Install Preload ------------
 // Loads everything the install dialog shows (default folder, disk space, sizes, quality sizes, voice packs) ahead of
-// time and keeps it for a minute, so the dialog opens at its final size instead of filling in and resizing.
-import type { GameId } from "../types/game";
-import { gameById, isManaged } from "../data/games";
+// time and keeps it, so the dialog opens at once and at its final size instead of filling in and resizing.
+import { gameById, isManaged, type GameId } from "../data/games";
 import { useCustomizationStore } from "../store/customizationStore";
 import { log } from "./log";
 import {
@@ -31,6 +30,7 @@ export interface InstallSnapshot {
 }
 
 const FRESH_MS = 60_000;
+const USABLE_MS = 10 * 60_000;
 const FAILED_MS = 5_000;
 const OPEN_WAIT_MS = 1000;
 
@@ -39,6 +39,7 @@ interface Entry {
   ttl: number;
   promise: Promise<InstallSnapshot>;
   value: InstallSnapshot | null;
+  valueAt: number;
 }
 
 const entries = new Map<GameId, Entry>();
@@ -88,20 +89,29 @@ async function build(gameId: GameId): Promise<InstallSnapshot> {
   };
 }
 
+const failed = (snap: InstallSnapshot) => snap.previewFailed || snap.packsFailed;
+
 export function preloadInstall(gameId: GameId, { force = false } = {}): Promise<InstallSnapshot> {
   if (!isManaged(gameId)) return Promise.reject(new Error("not managed"));
   const existing = entries.get(gameId);
   if (existing && !force && Date.now() - existing.at < existing.ttl) return existing.promise;
-  const entry: Entry = { at: Date.now(), ttl: FRESH_MS, promise: null as unknown as Promise<InstallSnapshot>, value: null };
+  const entry: Entry = {
+    at: Date.now(),
+    ttl: FRESH_MS,
+    promise: null as unknown as Promise<InstallSnapshot>,
+    value: existing?.value ?? null,
+    valueAt: existing?.valueAt ?? 0,
+  };
   entry.promise = build(gameId).then(
     (snap) => {
       entry.value = snap;
-      // A failed lookup is only remembered briefly so the next open tries again.
-      if (snap.previewFailed || snap.packsFailed) entry.ttl = FAILED_MS;
+      entry.valueAt = Date.now();
+      if (failed(snap)) entry.ttl = FAILED_MS;
       return snap;
     },
     (e) => {
-      entries.delete(gameId);
+      if (entry.value) entry.ttl = 0;
+      else entries.delete(gameId);
       throw e;
     },
   );
@@ -115,18 +125,15 @@ export function warmInstall(gameId: GameId): void {
 
 export function peekInstall(gameId: GameId): InstallSnapshot | null {
   const entry = entries.get(gameId);
-  return entry?.value && Date.now() - entry.at < entry.ttl ? entry.value : null;
+  if (!entry?.value) return null;
+  return Date.now() - entry.valueAt < (failed(entry.value) ? FAILED_MS : USABLE_MS) ? entry.value : null;
 }
 
-// Drop the cached answer after the user changes something it depended on (voice pack, quality, packs), then fetch
-// the new one in the background so the next open is still instant.
 export function refreshInstall(gameId: GameId): void {
   entries.delete(gameId);
   warmInstall(gameId);
 }
 
-// Resolves once the dialog can open without anything popping in: either everything is loaded, or the wait ran out
-// and the dialog will fill in the rest itself.
 export async function whenInstallReady(gameId: GameId): Promise<void> {
   if (!isManaged(gameId) || peekInstall(gameId)) return;
   let timer: number | undefined;
@@ -136,7 +143,6 @@ export async function whenInstallReady(gameId: GameId): Promise<void> {
   try {
     await Promise.race([preloadInstall(gameId).then(() => undefined), timeout]);
   } catch {
-    // The dialog shows its own unavailable state.
   } finally {
     window.clearTimeout(timer);
   }

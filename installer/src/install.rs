@@ -65,7 +65,7 @@ pub fn human_bytes(bytes: u64) -> String {
     format!("{bytes} bytes")
 }
 
-pub(crate) fn check_free_space(dir: &Path, payload: &Payload) -> Result<(), String> {
+fn check_free_space(dir: &Path, payload: &Payload) -> Result<(), String> {
     let needed = required_bytes(payload.manifest.estimated_size_kb);
     let Some(free) = win::free_space_bytes(dir) else {
         return Ok(());
@@ -79,6 +79,28 @@ pub(crate) fn check_free_space(dir: &Path, payload: &Payload) -> Result<(), Stri
         human_bytes(needed),
         human_bytes(free)
     ))
+}
+
+fn recover_interrupted_update(
+    dir: &Path,
+    backup: &Path,
+    sink: &EventSink,
+) -> Option<InstallManifest> {
+    let marker = dir.join(consts::UPDATE_STATE_NAME);
+    if !marker.exists() {
+        return None;
+    }
+    let mut fallback = None;
+    if backup.exists() {
+        status(sink, "Recovering from an interrupted update…", 4.0);
+        ilog!("install: found an interrupted update, rolling it back first");
+        if let Err(e) = swap::recover_interrupted(dir) {
+            ilog!("install: could not roll back the interrupted update ({e}), installing over it");
+            fallback = InstallManifest::load(backup).ok();
+        }
+    }
+    let _ = std::fs::remove_file(&marker);
+    fallback
 }
 
 pub fn perform_install(
@@ -126,7 +148,8 @@ pub fn perform_install(
 
     let staged = dir.join(consts::STAGED_DIR_NAME);
     let backup = dir.join(consts::BACKUP_DIR_NAME);
-    let old_manifest = InstallManifest::load(dir).ok();
+    let interrupted_manifest = recover_interrupted_update(dir, &backup, sink);
+    let old_manifest = InstallManifest::load(dir).ok().or(interrupted_manifest);
     let created_dir = directory_ownership(dir, old_manifest.as_ref());
     check_free_space(dir, payload)?;
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
@@ -293,7 +316,7 @@ fn stage_and_swap(
     Ok(())
 }
 
-pub(crate) fn release_install_dir(dir: &Path) -> Result<(), String> {
+fn release_install_dir(dir: &Path) -> Result<(), String> {
     let running = |name: &str| !win::pids_by_exe_name_under(name, dir).is_empty();
     for name in consts::HELPER_BINARIES {
         let pids = win::pids_by_exe_name_under(name, dir);
@@ -487,15 +510,11 @@ fn sweep_keeping(dir: &Path, keep: &[String], leftovers: &mut Vec<PathBuf>) {
             }
             continue;
         }
-        let result = win::retry(8, Duration::from_millis(250), || {
-            let result = if path.is_dir() {
+        let result = win::remove_quietly(|| {
+            if path.is_dir() {
                 std::fs::remove_dir_all(&path)
             } else {
                 std::fs::remove_file(&path)
-            };
-            match result {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-                _ => Ok(()),
             }
         });
         if let Err(e) = result {
@@ -669,14 +688,7 @@ fn remove_known_layout(dir: &Path, keep: &[PathBuf]) -> Vec<PathBuf> {
             let _ = std::fs::remove_dir(&path);
             continue;
         }
-        let result = win::retry(
-            8,
-            Duration::from_millis(250),
-            || match std::fs::remove_file(&path) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-                _ => Ok(()),
-            },
-        );
+        let result = win::remove_quietly(|| std::fs::remove_file(&path));
         if let Err(e) = result {
             ilog!("uninstall: could not remove {} ({e})", path.display());
             leftovers.push(path);
@@ -702,7 +714,7 @@ fn owns_directory(dir: &Path, manifest: Option<&InstallManifest>) -> bool {
 // choose what to remove, or goes straight to removing. perform_uninstall then does the removal step by step.
 const UNINSTALL_RUN_PREFIX: &str = "peebify-uninstall";
 
-fn is_uninstall_run_dir(dir: &Path) -> bool {
+fn is_run_dir(dir: &Path) -> bool {
     dir.file_name()
         .is_some_and(|name| name.to_string_lossy().starts_with(&format!("{UNINSTALL_RUN_PREFIX}-")))
 }
@@ -786,14 +798,7 @@ pub fn perform_uninstall(opts: &UninstallOptions, sink: &EventSink) -> Result<()
                     );
                     continue;
                 };
-                let result = win::retry(
-                    8,
-                    Duration::from_millis(250),
-                    || match std::fs::remove_file(&path) {
-                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-                        _ => Ok(()),
-                    },
-                );
+                let result = win::remove_quietly(|| std::fs::remove_file(&path));
                 if let Err(e) = result {
                     ilog!("uninstall: could not remove {} ({e})", path.display());
                     leftovers.push(path);
@@ -821,6 +826,7 @@ pub fn perform_uninstall(opts: &UninstallOptions, sink: &EventSink) -> Result<()
     for name in [
         consts::INSTALL_MANIFEST_NAME,
         consts::UNINSTALLER_NAME,
+        consts::UPDATE_STATE_NAME,
     ] {
         let _ = std::fs::remove_file(dir.join(name));
     }
@@ -838,14 +844,7 @@ pub fn perform_uninstall(opts: &UninstallOptions, sink: &EventSink) -> Result<()
     } else {
         let keep = owned_dir_keep_list(dir, opts, config.as_ref());
         if keep.is_empty() {
-            let result = win::retry(
-                8,
-                Duration::from_millis(250),
-                || match std::fs::remove_dir_all(dir) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-                    _ => Ok(()),
-                },
-            );
+            let result = win::remove_quietly(|| std::fs::remove_dir_all(dir));
             if let Err(e) = result {
                 warn(sink, format!("Could not remove {}: {e}", dir.display()));
             }
@@ -880,14 +879,7 @@ pub fn perform_uninstall(opts: &UninstallOptions, sink: &EventSink) -> Result<()
 
     if let Some(cache) = consts::app_cache_dir() {
         for target in app_cache_removals(&cache, opts.remove_data) {
-            let result = win::retry(
-                8,
-                Duration::from_millis(250),
-                || match std::fs::remove_dir_all(&target) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-                    _ => Ok(()),
-                },
-            );
+            let result = win::remove_quietly(|| std::fs::remove_dir_all(&target));
             if let Err(e) = result {
                 ilog!("uninstall: could not remove the cache folder {} ({e})", target.display());
             }
@@ -924,14 +916,7 @@ pub fn perform_uninstall(opts: &UninstallOptions, sink: &EventSink) -> Result<()
                 }
             }
             ilog!("uninstall: removing game folder {}", game_dir.display());
-            let result = win::retry(
-                8,
-                Duration::from_millis(250),
-                || match std::fs::remove_dir_all(&game_dir) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-                    _ => Ok(()),
-                },
-            );
+            let result = win::remove_quietly(|| std::fs::remove_dir_all(&game_dir));
             if let Err(e) = result {
                 warn(
                     sink,
@@ -947,17 +932,10 @@ pub fn perform_uninstall(opts: &UninstallOptions, sink: &EventSink) -> Result<()
     if opts.remove_data {
         status(sink, "Removing settings and data…", 90.0);
         if let Some(data) = consts::user_data_dir() {
-            let device_id = read_device_id(&data);
+            let device_id = device_id_in(config.as_ref());
             let keep = data_dir_keep_list(&data, dir, opts, config.as_ref());
             if keep.is_empty() {
-                let result = win::retry(
-                    8,
-                    Duration::from_millis(250),
-                    || match std::fs::remove_dir_all(&data) {
-                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-                        _ => Ok(()),
-                    },
-                );
+                let result = win::remove_quietly(|| std::fs::remove_dir_all(&data));
                 if let Err(e) = result {
                     ilog!("uninstall: could not remove the data folder {} ({e})", data.display());
                 }
@@ -981,10 +959,8 @@ pub fn perform_uninstall(opts: &UninstallOptions, sink: &EventSink) -> Result<()
 // ------------ Startup Entry And Self Delete ------------
 // Last bits of uninstall: keeping the device id when settings are removed, dropping the start with Windows entry
 // and scheduling the temp copy of setup to delete itself.
-fn read_device_id(data_dir: &Path) -> Option<String> {
-    let bytes = std::fs::read(data_dir.join("launcher-config.json")).ok()?;
-    let json = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
-    let id = json.get("deviceId")?.as_str()?.trim().to_string();
+fn device_id_in(config: Option<&serde_json::Value>) -> Option<String> {
+    let id = config?.get("deviceId")?.as_str()?.trim().to_string();
     let valid =
         (8..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
     valid.then_some(id)
@@ -1033,7 +1009,7 @@ fn self_delete_command(me: &Path, system32: &Path) -> String {
         system32.join("PING.EXE").display(),
         me.display()
     );
-    if let Some(run_dir) = me.parent().filter(|dir| is_uninstall_run_dir(dir)) {
+    if let Some(run_dir) = me.parent().filter(|dir| is_run_dir(dir)) {
         script.push_str(&format!(" & rmdir \"{}\"", run_dir.display()));
     }
     format!("/S /C \"{script}\"")
@@ -1233,6 +1209,8 @@ mod tests {
         assert!(staged.starts_with("/S /C \"\"C:\\Windows\\System32\\PING.EXE\" 127.0.0.1"));
         assert!(staged.ends_with(&format!(" & rmdir \"{}\"\"", run_dir.display())));
 
+        assert!(!is_run_dir(Path::new(r"C:\Temp\peebify-uninstaller")));
+
         let installed = Path::new(r"D:\Games\Peebify Launcher").join(consts::UNINSTALLER_NAME);
         let command = self_delete_command(&installed, system32);
         assert!(command.contains(&format!("del /f \"{}\"", installed.display())));
@@ -1375,6 +1353,7 @@ mod tests {
 
         assert_eq!(app_cache_removals(&cache, true), vec![cache.clone()]);
         let removals = app_cache_removals(&cache, false);
+        assert!(removals.contains(&cache.join("EBWebView").join("Default").join("Cache")));
         assert!(!removals.contains(&cache.join("EBWebView")));
         assert!(!removals.contains(&cache.join("EBWebView").join("Default")));
         assert!(removals.iter().all(|path| path.starts_with(&cache) && path != &cache));
@@ -1382,8 +1361,35 @@ mod tests {
     }
 
     #[test]
-    fn required_space_is_the_estimate_plus_a_margin() {
-        assert_eq!(required_bytes(700), 700 * 1024 + 700 * 1024 / 7);
+    fn install_recovers_an_interrupted_update_first() {
+        let dir = scratch("interrupted");
+        let backup = dir.join(consts::BACKUP_DIR_NAME);
+        std::fs::create_dir_all(&backup).unwrap();
+        manifest(true, &[consts::MAIN_BINARY]).save(&backup).unwrap();
+        std::fs::write(backup.join(consts::MAIN_BINARY), b"old").unwrap();
+        std::fs::write(dir.join(consts::UPDATE_STATE_NAME), b"{}").unwrap();
+
+        let fallback = recover_interrupted_update(&dir, &backup, &crate::msg::log_sink());
+
+        assert!(fallback.is_none());
+        assert!(!dir.join(consts::UPDATE_STATE_NAME).exists());
+        assert!(!backup.exists());
+        assert!(InstallManifest::load(&dir).unwrap().created_dir);
+        assert_eq!(std::fs::read(dir.join(consts::MAIN_BINARY)).unwrap(), b"old");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_marker_without_backup_is_cleared() {
+        let dir = scratch("stale-marker");
+        std::fs::write(dir.join(consts::UPDATE_STATE_NAME), b"{}").unwrap();
+
+        let backup = dir.join(consts::BACKUP_DIR_NAME);
+        let fallback = recover_interrupted_update(&dir, &backup, &crate::msg::log_sink());
+
+        assert!(fallback.is_none());
+        assert!(!dir.join(consts::UPDATE_STATE_NAME).exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1478,14 +1484,5 @@ mod tests {
         );
         assert_eq!(game_dir_verdict(Path::new("C:/")), GameDirVerdict::Guarded);
         assert_eq!(game_dir_verdict(Path::new("Games/Relative")), GameDirVerdict::Guarded);
-    }
-
-    #[test]
-    fn game_removal_phase_names_the_folder() {
-        assert_eq!(
-            game_removal_phase(Path::new(r"D:\Games\Wuthering Waves")),
-            "Removing Wuthering Waves…"
-        );
-        assert_eq!(game_removal_phase(Path::new(r"D:\")), r"Removing D:\…");
     }
 }

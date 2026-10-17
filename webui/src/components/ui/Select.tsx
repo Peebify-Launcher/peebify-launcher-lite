@@ -1,14 +1,17 @@
 // ------------ Select ------------
-// The dropdown used instead of the browser's own. Opens a styled list that flips upwards if needed, with arrow
-// keys and type-to-jump.
+// The dropdown used instead of the browser's own, in the same glass as Quick settings. The panel opens right over
+// its button and the list grows out of it (upwards if there is no room below), with arrow keys and type-to-jump.
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AnimatePresence, m } from "framer-motion";
+import { m } from "framer-motion";
 import { Check, ChevronDown } from "lucide-react";
-import { useReducedMotionSafe } from "../../lib/motion";
-import { useClickOutside } from "../../lib/useClickOutside";
+import { Collapse, springThumb, useReducedMotionSafe } from "../../lib/motion";
+import { useClickOutside, useDismissOnViewportChange, useEscapeKey } from "../../lib/hooks";
+import { MENU_DIVIDER, MENU_PANEL, popoutRoot } from "./PopoverMenu";
 
 const TYPEAHEAD_MS = 500;
+
+const BOX = "expand-trigger flex items-center gap-2 pl-[14px] pr-[11px] text-[13px] font-medium text-white";
 
 export function Select({
   value,
@@ -95,21 +98,12 @@ export function Select({
   }, [open, options.length]);
 
   useClickOutside([btnRef, menuRef], close, open);
+  useEscapeKey(() => {
+    close();
+    btnRef.current?.focus();
+  }, open);
 
-  useEffect(() => {
-    if (!open && !closing) return;
-    const onScroll = (e: Event) => {
-      if (menuRef.current?.contains(e.target as Node)) return;
-      dismissNow();
-    };
-    const onResize = () => dismissNow();
-    window.addEventListener("scroll", onScroll, true);
-    window.addEventListener("resize", onResize);
-    return () => {
-      window.removeEventListener("scroll", onScroll, true);
-      window.removeEventListener("resize", onResize);
-    };
-  }, [open, closing]);
+  useDismissOnViewportChange(menuRef, dismissNow, open || closing);
 
   useEffect(() => {
     const list = listRef.current;
@@ -157,10 +151,7 @@ export function Select({
       }
       return;
     }
-    if (e.key === "Escape") {
-      e.preventDefault();
-      close();
-    } else if (e.key === "ArrowDown") {
+    if (e.key === "ArrowDown") {
       e.preventDefault();
       setActive((i) => Math.min(i + 1, options.length - 1));
     } else if (e.key === "ArrowUp") {
@@ -185,21 +176,25 @@ export function Select({
       role="button"
       aria-hidden
       onClick={close}
-      className="flex cursor-pointer select-none items-center gap-2 pl-[14px] pr-[11px] text-[13px] font-medium text-white transition-colors hover:bg-white/[0.05]"
+      className={`${BOX} cursor-pointer select-none`}
       style={{ height: layout.triggerH - 2 }}
     >
       <span className="min-w-0 flex-1 truncate">{selected?.label ?? value}</span>
-      <ChevronDown
-        size={15}
-        className={`shrink-0 text-white/50 transition-transform duration-150 ${open ? "rotate-180" : ""}`}
-      />
+      <m.span
+        className="shrink-0 text-white/45"
+        initial={{ rotate: 0 }}
+        animate={{ rotate: open ? 180 : 0 }}
+        transition={reduce ? { duration: 0 } : springThumb}
+      >
+        <ChevronDown size={15} />
+      </m.span>
     </div>
   );
 
   const optionsPanel = (
     <div
       ref={listRef}
-      className="relative overflow-y-auto py-[5px]"
+      className="relative overflow-y-auto py-[6px]"
       style={{ maxHeight: layout?.maxH ?? 320 }}
     >
       {options.map((o, i) => (
@@ -212,8 +207,8 @@ export function Select({
           aria-selected={o.value === value}
           onMouseEnter={() => setActive(i)}
           onClick={() => pick(o.value)}
-          className={`flex w-full items-center justify-between gap-2 py-[7px] pl-[14px] pr-[11px] text-left text-[13px] font-medium transition-colors ${
-            i === active ? "bg-white/10 text-white" : "text-white/80"
+          className={`flex w-full items-center justify-between gap-2 py-[7px] pl-[14px] pr-[11px] text-left text-[13px] transition-colors ${
+            i === active ? "bg-white/[0.06] text-white" : "text-white/85"
           }`}
         >
           <span className="truncate">{o.label}</span>
@@ -224,6 +219,7 @@ export function Select({
   );
 
   const overlayVisible = (open || closing) && layout;
+  const divider = <div className={MENU_DIVIDER} />;
 
   return (
     <>
@@ -239,12 +235,10 @@ export function Select({
         aria-activedescendant={open ? `${listId}-${active}` : undefined}
         onClick={() => (open ? close() : openMenu())}
         onKeyDown={onKeyDown}
-        className={`flex items-center gap-2 rounded-ui border border-white/15 bg-black/30 py-[8px] pl-[14px] pr-[11px] text-[13px] font-medium text-white transition duration-150 hover:bg-black/40 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 ${
-          open && layout ? "opacity-0" : ""
+        className={`glass ${BOX} rounded-ui py-[8px] disabled:cursor-not-allowed disabled:opacity-50 disabled:before:hidden ${
+          overlayVisible ? "opacity-0" : ""
         }`}
       >
-        {/* Every label sits invisibly in the same grid cell, so the box is always as wide as the longest option and
-            picking one never resizes it (or nudges what sits next to it). */}
         <span className="grid min-w-0 text-left">
           {options.map((o) => (
             <span key={o.value} aria-hidden className="invisible col-start-1 row-start-1 truncate">
@@ -253,55 +247,38 @@ export function Select({
           ))}
           <span className="col-start-1 row-start-1 truncate">{selected?.label ?? value}</span>
         </span>
-        <ChevronDown
-          size={15}
-          className={`shrink-0 text-white/50 transition-transform duration-150 ${open ? "rotate-180" : ""}`}
-        />
+        <span className="shrink-0 text-white/45">
+          <ChevronDown size={15} />
+        </span>
       </button>
 
       {overlayVisible &&
         createPortal(
-          // While closing, the real button is already showing underneath and this fades out over it, so the box
-          // never shows as the menu's solid dark background on its way back.
-          <m.div
+          <div
             ref={menuRef}
             id={listId}
             role="listbox"
             aria-label={ariaLabel}
             style={layout.style}
-            initial={false}
-            animate={{ opacity: open ? 1 : 0 }}
-            transition={{ duration: reduce ? 0 : 0.22, ease: [0.4, 0, 0.2, 1] }}
-            className="z-(--z-tooltip) flex flex-col overflow-hidden rounded-ui border border-white/15 bg-[rgba(20,20,26,0.97)] shadow-2xl"
+            className={`z-(--z-tooltip) flex flex-col ${MENU_PANEL}`}
           >
             {!layout.flipUp && triggerRow}
-            <AnimatePresence onExitComplete={() => setClosing(false)}>
-              {open && (
-                <m.div
-                  key="content"
-                  initial={{ height: 0, opacity: 0 }}
-                  animate={{ height: "auto", opacity: 1 }}
-                  exit={{ height: 0, opacity: 0 }}
-                  transition={{ duration: reduce ? 0 : 0.26, ease: [0.4, 0, 0.2, 1] }}
-                  className="overflow-hidden"
-                >
-                  {layout.flipUp ? (
-                    <>
-                      {optionsPanel}
-                      <div className="mx-[12px] h-px bg-white/[0.08]" />
-                    </>
-                  ) : (
-                    <>
-                      <div className="mx-[12px] h-px bg-white/[0.08]" />
-                      {optionsPanel}
-                    </>
-                  )}
-                </m.div>
+            <Collapse open={open} initial onExitComplete={() => setClosing(false)}>
+              {layout.flipUp ? (
+                <>
+                  {optionsPanel}
+                  {divider}
+                </>
+              ) : (
+                <>
+                  {divider}
+                  {optionsPanel}
+                </>
               )}
-            </AnimatePresence>
+            </Collapse>
             {layout.flipUp && triggerRow}
-          </m.div>,
-          document.body,
+          </div>,
+          popoutRoot(),
         )}
     </>
   );

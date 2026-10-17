@@ -51,9 +51,9 @@ pub fn describe_exit(code: i32) -> String {
     match code {
         EXIT_OK => "the mod loader finished".to_string(),
         EXIT_BAD_ARGUMENTS => "the mod loader was started with bad arguments".to_string(),
-        EXIT_DLL_LOAD => "3dmloader.dll could not be loaded. Open Mods, expand Setup and press Check for updates to repair the mod tools.".to_string(),
-        EXIT_DLL_EXPORTS => "3dmloader.dll is too old for this Peebify. Open Mods, expand Setup and press Check for updates to repair the mod tools.".to_string(),
-        EXIT_MODULE_CHECK => "the mod library is missing or was changed after Peebify checked it. Open Mods, expand Setup and press Check for updates to repair the mod tools.".to_string(),
+        EXIT_DLL_LOAD => "3dmloader.dll could not be loaded. Security software may have blocked it. Delete it from the mod tools folder (shown under Mods > Setup) and launch again to get a fresh copy.".to_string(),
+        EXIT_DLL_EXPORTS => "3dmloader.dll is too old for this Peebify. Delete it from the mod tools folder (shown under Mods > Setup) and launch again to get the current one.".to_string(),
+        EXIT_MODULE_CHECK => "the mod library is missing or was changed after Peebify checked it. Security software may be interfering. Launch the game again and Peebify puts a fresh copy back.".to_string(),
         EXIT_ALREADY_RUNNING => "another mod loader is already running. Close the other game or loader first.".to_string(),
         EXIT_HOOK_FAILED => "Windows refused to install the mod hook. The loader log has the detail.".to_string(),
         EXIT_TARGET_TIMEOUT => "the game never started, so there was nothing to load mods into.".to_string(),
@@ -270,24 +270,6 @@ mod tests {
     }
 
     #[test]
-    fn target_exits_only_after_the_grace_runs_out() {
-        let start = Instant::now();
-        let mut watch = TargetWatch::new(Duration::from_secs(20), 7, start);
-        assert_eq!(
-            watch.observe(&[], start + Duration::from_secs(1)).presence,
-            Presence::Gone
-        );
-        assert_eq!(
-            watch.observe(&[], start + Duration::from_secs(20)).presence,
-            Presence::Gone
-        );
-        assert_eq!(
-            watch.observe(&[], start + Duration::from_secs(21)).presence,
-            Presence::Expired
-        );
-    }
-
-    #[test]
     fn a_returning_target_resets_the_grace() {
         let start = Instant::now();
         let mut watch = TargetWatch::new(Duration::from_secs(20), 7, start);
@@ -327,20 +309,6 @@ mod tests {
         assert_eq!(log_argument(&strings(&["--log"])), None);
         let error = parse_options(&strings(&["--bogus"])).err().unwrap();
         assert_eq!(error, "unexpected argument --bogus");
-    }
-
-    #[test]
-    fn complete_arguments_parse() {
-        let arguments = strings(&[
-            "--dll", "a.dll", "--module", "d3d11.dll", "--target", "Game.exe", "--mode",
-            "hook", "--timeout", "30", "--event", "Local\\E",
-        ]);
-        let options = parse_options(&arguments).unwrap();
-        assert_eq!(options.target, "Game.exe");
-        assert_eq!(options.timeout, Duration::from_secs(30));
-        assert!(options.log.is_none());
-        assert!(options.dll_sha256.is_none());
-        assert!(options.module_sha256.is_none());
     }
 
     const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";

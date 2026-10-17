@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "overlay",
-  "description": "Permissions for the in-game drawer and the HUD window (capture toasts and the recording badge): listen for backend events, plus the Ctrl+Shift+I devtools toggle that only exists in debug builds. The rpc app command needs no grant, and positioning, focus and click-through are set from Rust (overlay_window.rs).",
+  "description": "Permissions for the in-game drawer and the HUD window (capture toasts and the recording badge): listen for backend events, plus the Ctrl+Shift+I devtools toggle that only exists in debug builds. The rpc app command needs no grant, and positioning, focus and click-through are set from Rust (overlay.rs).",
   "windows": ["overlay", "overlay-hud"],
   "permissions": [
     "core:event:allow-listen",

@@ -1,8 +1,6 @@
 // ------------ Bottom Right Actions ------------
-// The pair of buttons at the bottom right of the Home screen. Community tools opens the game's list of links
-// (wiki, maps and so on), and Quick settings holds repair, move, uninstall, folder shortcuts, DirectX and
-// resource quality for the selected game.
-import { Fragment, useEffect, useState } from "react";
+// The Home screen's bottom right buttons and the panel they open upwards, which the playtime pill uses too.
+import { Fragment, useEffect, useState, useId, useLayoutEffect, useRef, type ReactNode } from "react";
 import {
   Users,
   Settings,
@@ -24,17 +22,17 @@ import {
   LineChart,
   BookOpen,
   Share2,
+  ChevronUp,
+  type LucideIcon,
 } from "lucide-react";
-import type { GameId } from "../../types/game";
-import { ExpandUp } from "./ExpandUp";
 import { Hint } from "../ui/Tooltip";
 import { useUiStore } from "../../store/uiStore";
 import { useCustomizationStore } from "../../store/customizationStore";
 import { useGameLinksStore } from "../../store/remoteContentStore";
-import { gameById, supportsQuickRepair } from "../../data/games";
+import { type GameId, GRAPHICS_APIS, gameById, supportsQuickRepair } from "../../data/games";
 import { openExternal } from "../../lib/tauri";
 import {
-  JOB_ACTIVE_BLOCKER,
+  jobActiveBlocker,
   qualityLabel,
   useGameActions,
   useModsForceDx11,
@@ -46,9 +44,16 @@ import {
   getCustomLauncher,
   defaultGraphicsApi,
   RESOURCE_QUALITY_OPTIONS,
-  type GraphicsApi,
 } from "../../lib/ipc";
+import { useT } from "../../lib/useT";
+import { m } from "framer-motion";
+import { useClickOutside, useEscapeKey } from "../../lib/hooks";
+import { Collapse, springThumb, useReducedMotionSafe } from "../../lib/motion";
 
+// ------------ Buttons ------------
+// The pair of buttons at the bottom right of the Home screen. Community tools opens the game's list of links
+// (wiki, maps and so on), and Quick settings holds repair, move, uninstall, folder shortcuts, DirectX and
+// resource quality for the selected game.
 const MENU_WIDTH = "w-[200px] min-[1000px]:w-[236px]";
 
 export function BottomRightActions() {
@@ -70,7 +75,7 @@ const TOOL_ICONS: { match: RegExp; icon: typeof Globe }[] = [
   { match: /network|hub|community/i, icon: Share2 },
 ];
 
-function toolMeta(rawName: string, game: { name: string; short: string }) {
+function toolMeta(rawName: string, game: { name: string; short: string }, officialSite: string) {
   let label = rawName.trim();
   for (const prefix of [game.name, game.short]) {
     if (label.toLowerCase().startsWith(prefix.toLowerCase())) {
@@ -81,8 +86,8 @@ function toolMeta(rawName: string, game: { name: string; short: string }) {
       }
     }
   }
-  if (/^official$/i.test(label)) label = "Official Site";
-  const icon = TOOL_ICONS.find((t) => t.match.test(rawName))?.icon ?? ExternalLink;
+  if (/^official$/i.test(label)) label = officialSite;
+  const icon = TOOL_ICONS.find((tool) => tool.match.test(rawName))?.icon ?? ExternalLink;
   return { label, icon };
 }
 
@@ -90,18 +95,19 @@ function CommunityToolsMenu() {
   const activeId = useUiStore((s) => s.activeGameId);
   const game = gameById(activeId);
   const tools = useGameLinksStore((s) => s.links[activeId]?.communityTools) ?? [];
+  const t = useT();
   return (
-    <ExpandUp className={MENU_WIDTH} icon={Users} label="Community tools">
+    <ExpandUp className={MENU_WIDTH} icon={Users} label={t("home.communityTools.title")}>
       {(close) => (
         <div className="py-[6px]">
-          {tools.map((t) => {
-            const { label, icon: Icon } = toolMeta(t.name, game);
+          {tools.map((tool) => {
+            const { label, icon: Icon } = toolMeta(tool.name, game, t("home.communityTools.officialSite"));
             return (
-              <Hint key={t.name} tip={t.name} placement="left" className="block w-full">
+              <Hint key={tool.name} tip={tool.name} placement="left" className="block w-full">
                 <button
                   onClick={() => {
                     close();
-                    void openExternal(t.url);
+                    void openExternal(tool.url);
                   }}
                   className="group flex w-full items-center gap-[10px] px-[12px] py-[7px] text-left text-[13px] text-white/85 transition-colors hover:bg-white/[0.06]"
                 >
@@ -122,11 +128,6 @@ function CommunityToolsMenu() {
     </ExpandUp>
   );
 }
-
-const GRAPHICS_APIS: { value: GraphicsApi; label: string }[] = [
-  { value: "dx11", label: "DX11" },
-  { value: "dx12", label: "DX12" },
-];
 
 function PillSwitch<T extends string>({
   options,
@@ -183,8 +184,6 @@ function useCustomLauncherSet(gameId: string): boolean {
   return set;
 }
 
-const NOT_USED_WITH_CUSTOM_LAUNCHER = "Not used while another program starts the game.";
-
 function DirectXRow({
   gameId,
   installed,
@@ -198,11 +197,12 @@ function DirectXRow({
 }) {
   const api = useCustomizationStore((s) => s.graphicsApi[gameId]) ?? defaultGraphicsApi(gameId);
   const setGraphicsApi = useCustomizationStore((s) => s.setGraphicsApi);
+  const t = useT();
   const locked = !installed || forceDx11 || customLauncher;
 
   return (
     <Hint
-      tip={forceDx11 && !customLauncher ? "Mods need DirectX 11" : undefined}
+      tip={forceDx11 && !customLauncher ? t("home.quickSettings.modsNeedDx11") : undefined}
       placement="left"
       className="block w-full"
     >
@@ -219,10 +219,10 @@ function DirectXRow({
           <Cpu size={14} />
         </span>
         <span className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate">DirectX</span>
+          <span className="truncate">DirectX</span>{/* i18n-ignore */}
           {customLauncher && (
             <span className="whitespace-normal text-[11px] leading-snug text-white/35">
-              {NOT_USED_WITH_CUSTOM_LAUNCHER}
+              {t("home.quickSettings.notUsedWithCustomLauncher")}
             </span>
           )}
         </span>
@@ -250,14 +250,15 @@ function ResourceQualityRow({
   customLauncher: boolean;
   resourceQuality: ReturnType<typeof useResourceQuality>;
 }) {
+  const t = useT();
   const locked = customLauncher;
   const hint = customLauncher
-    ? NOT_USED_WITH_CUSTOM_LAUNCHER
-    : `${installedLabel} is installed. Apply to switch to ${qualityLabel(quality)}.`;
+    ? t("home.quickSettings.notUsedWithCustomLauncher")
+    : t("home.quickSettings.qualityPending", { installed: installedLabel, quality: qualityLabel(quality) });
 
   return (
     <Hint
-      tip={!customLauncher && !pending && !installed ? "The quality that gets installed." : undefined}
+      tip={!customLauncher && !pending && !installed ? t("home.quickSettings.qualityHint") : undefined}
       placement="left"
       className="block w-full"
     >
@@ -270,7 +271,7 @@ function ResourceQualityRow({
           >
             <Layers size={14} />
           </span>
-          <span className="min-w-0 flex-1 truncate">Quality</span>
+          <span className="min-w-0 flex-1 truncate">{t("home.quickSettings.quality")}</span>
           <PillSwitch
             options={RESOURCE_QUALITY_OPTIONS}
             value={quality}
@@ -287,7 +288,7 @@ function ResourceQualityRow({
                 disabled={jobActive || running}
                 className="shrink-0 rounded-[6px] bg-white/[0.12] px-[9px] py-[5px] text-[11px] font-semibold leading-none text-white transition-colors hover:bg-white/[0.2] disabled:opacity-40"
               >
-                Apply
+                {t("home.quickSettings.apply")}
               </button>
             )}
           </div>
@@ -317,7 +318,8 @@ function QuickSettingsMenu() {
   } = useGameActions(activeId);
   const forceDx11 = useModsForceDx11(activeId);
   const customLauncher = useCustomLauncherSet(activeId);
-  const resourceQuality = useResourceQuality(activeId, { installed, steamCopy, jobActive });
+  const resourceQuality = useResourceQuality(activeId, { installed, jobActive });
+  const t = useT();
 
   type Item = {
     icon: typeof Wrench;
@@ -332,58 +334,57 @@ function QuickSettingsMenu() {
   const options: Item[] = [
     {
       icon: RefreshCw,
-      label: "Check for updates",
+      label: t("home.quickSettings.checkUpdates"),
       disabled: !installed || !managed,
       onClick: () => void checkUpdates(),
     },
     {
       icon: Zap,
-      label: "Quick repair",
+      label: t("home.quickSettings.quickRepair"),
       hint:
-        installed && managed && !steamCopy && !supportsQuickRepair(activeId)
-          ? "Only a full repair works here"
-          : installed && managed && !steamCopy && jobActive
-            ? JOB_ACTIVE_BLOCKER
+        installed && managed && !supportsQuickRepair(activeId)
+          ? t("home.quickSettings.onlyFullRepair")
+          : installed && managed && jobActive
+            ? jobActiveBlocker()
             : undefined,
-      disabled:
-        !installed || !managed || steamCopy || !supportsQuickRepair(activeId) || jobActive,
+      disabled: !installed || !managed || !supportsQuickRepair(activeId) || jobActive,
       onClick: quickRepair,
     },
     {
       icon: Wrench,
-      label: "Full repair",
-      hint: installed && managed && !steamCopy && jobActive ? JOB_ACTIVE_BLOCKER : undefined,
-      disabled: !installed || !managed || steamCopy || jobActive,
+      label: t("home.quickSettings.fullRepair"),
+      hint: installed && managed && jobActive ? jobActiveBlocker() : undefined,
+      disabled: !installed || !managed || jobActive,
       onClick: confirmFullRepair,
     },
     {
       icon: FolderOpen,
-      label: "Game folder",
+      label: t("home.quickSettings.gameFolder"),
       dividerBefore: true,
       disabled: !installed,
       onClick: () => void openGameFolder(activeId),
     },
     {
       icon: Images,
-      label: "Screenshots",
+      label: t("common.screenshots"),
       onClick: () => void openScreenshotFolder(activeId),
     },
     {
       icon: FolderSearch,
-      label: "Locate existing install",
+      label: t("home.quickSettings.locateInstall"),
       dividerBefore: true,
       onClick: () => void locate(),
     },
     {
       icon: FolderInput,
-      label: "Move game",
+      label: t("home.quickSettings.moveGame"),
       hint: installed && !steamCopy ? (uninstallBlocker ?? undefined) : undefined,
       disabled: !installed || steamCopy || running || jobActive,
       onClick: confirmMove,
     },
     {
       icon: Trash2,
-      label: partial ? "Discard download" : "Uninstall game",
+      label: partial ? t("home.quickSettings.discardDownload") : t("home.quickSettings.uninstallGame"),
       hint: installed || partial ? (uninstallBlocker ?? undefined) : undefined,
       danger: true,
       disabled: (!installed && !partial) || !!uninstallBlocker,
@@ -392,7 +393,7 @@ function QuickSettingsMenu() {
   ];
 
   return (
-    <ExpandUp className={MENU_WIDTH} icon={Settings} label="Quick settings">
+    <ExpandUp className={MENU_WIDTH} icon={Settings} label={t("home.quickSettings.title")}>
       {(close) => (
         <div className="max-h-[calc(100vh-124px)] overflow-y-auto overscroll-contain py-[6px]">
           {options.map(({ icon: Icon, label, hint, danger, disabled, dividerBefore, onClick }) => (
@@ -459,5 +460,86 @@ function QuickSettingsMenu() {
         </div>
       )}
     </ExpandUp>
+  );
+}
+
+// ------------ Expand Up Panel ------------
+// A button on the Home screen that opens a panel upwards from itself, like the playtime pill. Closes on Escape
+// or a click outside.
+export function ExpandUp({
+  width,
+  className,
+  icon: Icon,
+  label,
+  triggerClass,
+  trigger,
+  children,
+}: {
+  width?: number | string;
+  className?: string;
+  icon?: LucideIcon;
+  label?: string;
+  triggerClass?: string;
+  trigger?: ReactNode;
+  children: ReactNode | ((close: () => void) => ReactNode);
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const contentId = useId();
+  const [triggerH, setTriggerH] = useState(42);
+  const reduce = useReducedMotionSafe();
+  useClickOutside(ref, () => setOpen(false), open);
+
+  useLayoutEffect(() => {
+    if (btnRef.current) setTriggerH(btnRef.current.offsetHeight);
+  }, []);
+
+  useEscapeKey(() => {
+    setOpen(false);
+    btnRef.current?.focus();
+  }, open);
+
+  return (
+    <div
+      ref={ref}
+      className={className ? `relative ${className}` : "relative"}
+      style={{ width, height: triggerH }}
+    >
+      <div className="glass absolute bottom-0 left-0 right-0 flex flex-col overflow-hidden rounded-ui shadow-2xl">
+        <Collapse open={open} id={contentId}>
+          {typeof children === "function" ? children(() => setOpen(false)) : children}
+          <div className="mx-[12px] h-px bg-white/[0.08]" />
+        </Collapse>
+        <button
+          ref={btnRef}
+          aria-expanded={open}
+          aria-controls={open ? contentId : undefined}
+          onClick={() => setOpen((o) => !o)}
+          className={
+            triggerClass ??
+            "expand-trigger flex h-[46px] w-full items-center gap-[10px] px-[13px] text-white"
+          }
+        >
+          {Icon ? (
+            <>
+              <span className="grid h-[28px] w-[28px] shrink-0 place-items-center rounded-[8px] bg-white/[0.07] text-white/70">
+                <Icon size={15} />
+              </span>
+              <span className="flex-1 truncate text-left text-[13px] font-medium">{label}</span>
+              <m.span
+                className="shrink-0 text-white/45"
+                animate={{ rotate: open ? 180 : 0 }}
+                transition={reduce ? { duration: 0 } : springThumb}
+              >
+                <ChevronUp size={16} />
+              </m.span>
+            </>
+          ) : (
+            trigger
+          )}
+        </button>
+      </div>
+    </div>
   );
 }

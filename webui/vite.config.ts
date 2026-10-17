@@ -38,8 +38,21 @@ function archiveSourcemaps(): Plugin {
   };
 }
 
+function hudStrings(): Plugin {
+  return {
+    name: "peebify-hud-strings",
+    enforce: "pre",
+    load(id) {
+      const [file, query = ""] = id.split("?");
+      if (!file.endsWith(".json") || !new URLSearchParams(query).has("hud")) return null;
+      const { _meta, hud } = JSON.parse(readFileSync(file, "utf-8").replace(/^﻿/, ""));
+      return { code: `export default ${JSON.stringify({ _meta, hud })};`, moduleType: "js" };
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), archiveSourcemaps()],
+  plugins: [react(), archiveSourcemaps(), hudStrings()],
   clearScreen: false,
   build: {
     sourcemap: "hidden",

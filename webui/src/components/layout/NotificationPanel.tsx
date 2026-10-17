@@ -1,52 +1,22 @@
 // ------------ Notification Panel ------------
-// The panel that drops down from the bell in the title bar, listing recent notifications with relative times.
-// Individual ones can be dismissed or all of them cleared.
-import { useRef, useState, type ReactNode } from "react";
+// The panel that slides in from the right edge under the bell in the title bar, listing recent notifications with
+// relative times. Individual ones can be dismissed or all of them cleared.
+import { useRef, useState } from "react";
+import { m } from "framer-motion";
 import { Trash2, X } from "lucide-react";
-import { useNotificationStore } from "../../store/notificationStore";
-import { NOTIF_ICONS, NOTIF_ICON_COLORS } from "../../lib/notifIcons";
-import { useNow } from "../../lib/useRelativeTime";
+import { springPour, useReducedMotionSafe } from "../../lib/motion";
+import { useNotificationStore, NOTIF_ICONS, NOTIF_ICON_COLORS } from "../../store/notifications";
+import { useNow, useClickOutside, useEscapeKey } from "../../lib/hooks";
 import { fmtRelTime } from "../../lib/format";
-import { useClickOutside, useEscapeKey } from "../../lib/useClickOutside";
 import { notificationBellRef } from "./WindowControls";
-import { TooltipPortal, useAnchoredTip } from "../ui/Tooltip";
+import { IconButton } from "../ui/Tooltip";
+import { useT } from "../../lib/useT";
+
+const CLOSED_X = 376;
 
 function RelTime({ ts }: { ts: number }) {
   const now = useNow();
   return <>{fmtRelTime(ts, now)}</>;
-}
-
-function IconButton({
-  label,
-  disabled,
-  className,
-  onClick,
-  children,
-}: {
-  label: string;
-  disabled?: boolean;
-  className: string;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  const tip = useAnchoredTip<HTMLButtonElement>("bottom");
-  return (
-    <button
-      ref={tip.anchorRef}
-      {...tip.bind}
-      onClick={onClick}
-      aria-label={label}
-      disabled={disabled}
-      className={className}
-    >
-      {children}
-      {tip.shown && !disabled && (
-        <TooltipPortal x={tip.pos.x} y={tip.pos.y} placement="bottom">
-          {label}
-        </TooltipPortal>
-      )}
-    </button>
-  );
 }
 
 export function NotificationPanel() {
@@ -55,12 +25,14 @@ export function NotificationPanel() {
   const dismiss = useNotificationStore((s) => s.dismiss);
   const clearAll = useNotificationStore((s) => s.clearAll);
   const setOpen = useNotificationStore((s) => s.setOpen);
+  const t = useT();
+  const reduce = useReducedMotionSafe();
 
   const ref = useRef<HTMLElement>(null);
   const [listMounted, setListMounted] = useState(open);
   if (open && !listMounted) setListMounted(true);
 
-  useClickOutside(ref, () => setOpen(false), open, (t) => !!t.closest("[data-window-controls]"));
+  useClickOutside(ref, () => setOpen(false), open, (el) => !!el.closest("[data-window-controls]"));
   function close() {
     const restore = !!ref.current?.contains(document.activeElement);
     setOpen(false);
@@ -70,22 +42,25 @@ export function NotificationPanel() {
   useEscapeKey(close, open);
 
   return (
-    <aside
+    <m.aside
       ref={ref}
-      className="glass absolute bottom-[8px] right-[8px] top-[52px] z-(--z-panel) flex w-[360px] flex-col rounded-ui shadow-2xl transition-transform duration-300"
-      style={{ transform: open ? "translateX(0)" : "translateX(calc(100% + 16px))" }}
-      aria-label="Notifications"
+      className="glass absolute bottom-[8px] right-[8px] top-[52px] z-(--z-panel) flex w-[360px] flex-col rounded-ui shadow-2xl"
+      initial={false}
+      animate={{ x: open ? 0 : CLOSED_X }}
+      transition={reduce ? { duration: 0 } : springPour}
+      onAnimationComplete={() => {
+        if (!useNotificationStore.getState().open) setListMounted(false);
+      }}
+      aria-label={t("common.notifications")}
       aria-hidden={!open}
       inert={!open}
-      onTransitionEnd={(e) => {
-        if (!open && e.target === e.currentTarget && e.propertyName === "transform") setListMounted(false);
-      }}
     >
       <header className="flex items-center justify-between gap-3 border-b border-white/[0.08] px-[18px] py-[14px]">
-        <h3 className="text-[15px] font-semibold">Notifications</h3>
+        <h3 className="text-[15px] font-semibold">{t("common.notifications")}</h3>
         <div className="flex items-center gap-1">
           <IconButton
-            label="Clear all notifications"
+            label={t("layout.notifications.clearAll")}
+            tip={items.length > 0 && t("layout.notifications.clearAll")}
             onClick={clearAll}
             disabled={items.length === 0}
             className="grid h-[28px] w-[28px] place-items-center rounded-md text-white/55 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-white/55"
@@ -93,7 +68,7 @@ export function NotificationPanel() {
             <Trash2 size={14} />
           </IconButton>
           <IconButton
-            label="Close"
+            label={t("common.close")}
             onClick={close}
             className="grid h-[28px] w-[28px] place-items-center rounded-md text-white/55 transition-colors hover:bg-white/10 hover:text-white"
           >
@@ -107,7 +82,7 @@ export function NotificationPanel() {
           <>
             {items.length === 0 && (
               <div className="px-5 py-16 text-center text-[13px] text-white/45">
-                No notifications yet.
+                {t("layout.notifications.empty")}
               </div>
             )}
 
@@ -119,8 +94,8 @@ export function NotificationPanel() {
                   key={n.id}
                   className="mb-[6px] flex gap-[10px] rounded-ui border px-[10px] py-[10px]"
                   style={{
-                    background: n.read ? "rgba(255,255,255,.03)" : "rgba(var(--accent-a-rgb), .07)",
-                    borderColor: n.read ? "rgba(255,255,255,.05)" : "rgba(var(--accent-a-rgb), .18)",
+                    background: n.read ? "rgba(255,255,255,.03)" : c.tint,
+                    borderColor: n.read ? "rgba(255,255,255,.05)" : c.edge,
                   }}
                 >
                   <span
@@ -148,7 +123,7 @@ export function NotificationPanel() {
                     <div className="mt-[4px] text-[11px] text-white/55"><RelTime ts={n.time} /></div>
                   </div>
                   <IconButton
-                    label="Dismiss"
+                    label={t("common.dismiss")}
                     onClick={() => dismiss(n.id)}
                     className="grid h-[22px] w-[22px] shrink-0 place-items-center self-start rounded-md text-white/45 transition-colors hover:bg-white/10 hover:text-white"
                   >
@@ -160,6 +135,6 @@ export function NotificationPanel() {
           </>
         )}
       </div>
-    </aside>
+    </m.aside>
   );
 }

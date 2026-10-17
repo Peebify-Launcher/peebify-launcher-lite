@@ -6,85 +6,31 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use peebify_helpers::common::{process::list_processes, wide};
+use peebify_helpers::fps::cmdline::quote_always;
 use tokio::process::{Child, Command};
 
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-fn quote_launch_arg(arg: &str) -> String {
-    let mut quoted = String::with_capacity(arg.len() + 2);
-    quoted.push('"');
-    let mut backslashes = 0usize;
-    for c in arg.chars() {
-        match c {
-            '\\' => {
-                backslashes += 1;
-                quoted.push('\\');
-            }
-            '"' => {
-                quoted.extend(std::iter::repeat_n('\\', backslashes + 1));
-                quoted.push('"');
-                backslashes = 0;
-            }
-            other => {
-                backslashes = 0;
-                quoted.push(other);
-            }
-        }
-    }
-    quoted.extend(std::iter::repeat_n('\\', backslashes));
-    quoted.push('"');
-    quoted
-}
-
-fn snapshot_entries() -> Option<Vec<(String, u32, u32)>> {
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-        TH32CS_SNAPPROCESS,
-    };
-
-    unsafe {
-        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if snapshot == INVALID_HANDLE_VALUE {
-            log::warn!("Process listing failed: CreateToolhelp32Snapshot returned invalid handle");
-            return None;
-        }
-        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
-        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-        let mut out = Vec::new();
-        if Process32FirstW(snapshot, &mut entry) != 0 {
-            loop {
-                let len = entry
-                    .szExeFile
-                    .iter()
-                    .position(|&c| c == 0)
-                    .unwrap_or(entry.szExeFile.len());
-                out.push((
-                    String::from_utf16_lossy(&entry.szExeFile[..len]).to_lowercase(),
-                    entry.th32ProcessID,
-                    entry.th32ParentProcessID,
-                ));
-                if Process32NextW(snapshot, &mut entry) == 0 {
-                    break;
-                }
-            }
-        }
-        CloseHandle(snapshot);
-        Some(out)
-    }
-}
-
-pub(crate) fn snapshot_processes() -> Option<Vec<(String, u32)>> {
-    snapshot_entries().map(|entries| {
-        entries
-            .into_iter()
-            .map(|(name, pid, _)| (name, pid))
-            .collect()
-    })
+pub(super) fn wide_path(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
 }
 
 pub fn snapshot_with_parents() -> Vec<(String, u32, u32)> {
-    snapshot_entries().unwrap_or_default()
+    let mut entries = list_processes();
+    if entries.is_empty() {
+        log::warn!("Process listing failed: the snapshot came back empty");
+    }
+    for (name, _, _) in &mut entries {
+        *name = name.to_lowercase();
+    }
+    entries
+}
+
+pub(crate) fn snapshot_processes() -> Option<Vec<(String, u32)>> {
+    let entries = snapshot_with_parents();
+    (!entries.is_empty()).then(|| entries.into_iter().map(|(name, pid, _)| (name, pid)).collect())
 }
 
 fn rewrite_subst(path: &str, device: &str) -> Option<String> {
@@ -112,11 +58,7 @@ fn subst_step(path: &Path) -> Option<PathBuf> {
     use windows_sys::Win32::Storage::FileSystem::QueryDosDeviceW;
 
     let text = path.to_str()?;
-    let drive: Vec<u16> = text
-        .get(..2)?
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let drive = wide(text.get(..2)?);
     let mut buffer = vec![0u16; 1024];
     let written =
         unsafe { QueryDosDeviceW(drive.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) };
@@ -229,7 +171,7 @@ async fn shell_start(
 
     let parameters = args
         .iter()
-        .map(|a| quote_launch_arg(a))
+        .map(|a| quote_always(a))
         .collect::<Vec<_>>()
         .join(" ");
     let file = executable_path.to_path_buf();
@@ -255,7 +197,6 @@ fn shell_execute(
     working_dir: &Path,
     minimized: bool,
 ) -> Result<(), u32> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::UI::Shell::{
         ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOZONECHECKS,
@@ -263,13 +204,9 @@ fn shell_execute(
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{SW_SHOWMINNOACTIVE, SW_SHOWNORMAL};
 
-    fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
-        s.encode_wide().chain(std::iter::once(0)).collect()
-    }
-
-    let file = wide(executable_path.as_os_str());
-    let params = wide(std::ffi::OsStr::new(parameters));
-    let dir = wide(working_dir.as_os_str());
+    let file = wide_path(executable_path);
+    let params = wide(parameters);
+    let dir = wide_path(working_dir);
 
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
@@ -311,12 +248,8 @@ pub async fn spawn_tool(
 }
 
 fn normalized_path(path: &str) -> String {
-    let lowered = path.replace('/', "\\").to_lowercase();
-    lowered
-        .strip_prefix("\\\\?\\")
-        .unwrap_or(&lowered)
-        .trim_end_matches('\\')
-        .to_string()
+    let path = super::fs_util::normalize_path(path);
+    path.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(path)
 }
 
 fn image_is_under(image: &str, roots: &[String]) -> bool {
@@ -337,7 +270,7 @@ fn install_roots(root: &Path) -> [String; 2] {
     ]
 }
 
-unsafe fn image_path(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<String> {
+pub(crate) unsafe fn image_path(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<String> {
     use windows_sys::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_WIN32};
 
     let mut buf = vec![0u16; 32768];
@@ -477,13 +410,8 @@ impl Drop for EventHandle {
 
 impl NamedEvent {
     pub fn create(name: &str) -> Option<NamedEvent> {
-        use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::System::Threading::CreateEventW;
-        let wide: Vec<u16> = std::ffi::OsStr::new(name)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, wide.as_ptr()) };
+        let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, wide(name).as_ptr()) };
         (!handle.is_null()).then(|| NamedEvent(std::sync::Arc::new(EventHandle(handle as isize))))
     }
 
@@ -528,7 +456,6 @@ pub fn spawn_tool_elevated_handle(
     args: &[String],
     cwd: &Path,
 ) -> Result<ProcessHandle, SpawnError> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{GetLastError, ERROR_CANCELLED};
     use windows_sys::Win32::UI::Shell::{
         ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS,
@@ -537,20 +464,16 @@ pub fn spawn_tool_elevated_handle(
 
     const SW_HIDE: i32 = 0;
 
-    fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
-        s.encode_wide().chain(std::iter::once(0)).collect()
-    }
-
     let line = args
         .iter()
         .map(|arg| peebify_helpers::fps::cmdline::quote_argument(arg))
         .collect::<Vec<_>>()
         .join(" ");
 
-    let verb = wide(std::ffi::OsStr::new("runas"));
-    let file = wide(resolve_subst(executable_path).as_os_str());
-    let params = wide(std::ffi::OsStr::new(&line));
-    let dir = wide(resolve_subst(cwd).as_os_str());
+    let verb = wide("runas");
+    let file = wide_path(&resolve_subst(executable_path));
+    let params = wide(&line);
+    let dir = wide_path(&resolve_subst(cwd));
 
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
@@ -576,22 +499,8 @@ pub fn spawn_tool_elevated_handle(
 
 #[cfg(test)]
 mod tests {
-    use super::{image_is_under, quote_launch_arg, rewrite_subst};
-
-    #[test]
-    fn quote_launch_arg_doubles_trailing_backslashes() {
-        assert_eq!(quote_launch_arg(r"D:\logs\"), r#""D:\logs\\""#);
-        assert_eq!(quote_launch_arg(r"D:\a\\"), r#""D:\a\\\\""#);
-        assert_eq!(quote_launch_arg(r"D:\logs"), r#""D:\logs""#);
-        assert_eq!(quote_launch_arg("-screen-width 1920"), "\"-screen-width 1920\"");
-        assert_eq!(quote_launch_arg(""), "\"\"");
-    }
-
-    #[test]
-    fn quote_launch_arg_escapes_embedded_quotes() {
-        assert_eq!(quote_launch_arg(r#"a"b\"#), r#""a\"b\\""#);
-        assert_eq!(quote_launch_arg(r#"a\"b"#), r#""a\\\"b""#);
-    }
+    use super::{image_is_under, rewrite_subst};
+    use peebify_helpers::fps::cmdline::quote_always;
 
     #[cfg(windows)]
     #[test]
@@ -609,7 +518,7 @@ mod tests {
             "-dx11",
         ];
         let line = std::iter::once("game.exe".to_string())
-            .chain(args.iter().map(|a| quote_launch_arg(a)))
+            .chain(args.iter().map(|a| quote_always(a)))
             .collect::<Vec<_>>()
             .join(" ");
         let wide: Vec<u16> = line.encode_utf16().chain(std::iter::once(0)).collect();
@@ -672,11 +581,10 @@ pub mod front_end {
     use std::collections::HashSet;
     use std::time::{Duration, Instant};
 
-    use windows_sys::core::BOOL;
-    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use peebify_helpers::common::process::visible_windows_of;
+    use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, IsWindow, IsWindowVisible, ShowWindow, SW_HIDE,
-        SW_RESTORE,
+        IsWindow, IsWindowVisible, ShowWindow, SW_HIDE, SW_RESTORE,
     };
 
     const SWEEP_INTERVAL: Duration = Duration::from_millis(100);
@@ -710,31 +618,13 @@ pub mod front_end {
             .collect()
     }
 
-    struct Sweep<'a> {
-        pids: &'a HashSet<u32>,
-        hidden: &'a mut Vec<HWND>,
-    }
-
-    unsafe extern "system" fn hide_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let sweep = &mut *(lparam as *mut Sweep);
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, &mut pid);
-        if !sweep.pids.contains(&pid) || IsWindowVisible(hwnd) == 0 {
-            return 1;
-        }
-        ShowWindow(hwnd, SW_HIDE);
-        if !sweep.hidden.contains(&hwnd) {
-            sweep.hidden.push(hwnd);
-        }
-        1
-    }
-
     fn hide_windows(pids: &HashSet<u32>, hidden: &mut Vec<HWND>) {
-        if pids.is_empty() {
-            return;
+        for hwnd in pids.iter().flat_map(|&pid| visible_windows_of(pid)) {
+            unsafe { ShowWindow(hwnd, SW_HIDE) };
+            if !hidden.contains(&hwnd) {
+                hidden.push(hwnd);
+            }
         }
-        let mut sweep = Sweep { pids, hidden };
-        unsafe { EnumWindows(Some(hide_proc), &mut sweep as *mut Sweep as LPARAM) };
     }
 
     fn reveal_windows(hidden: &[HWND]) -> usize {

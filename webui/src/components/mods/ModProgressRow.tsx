@@ -1,7 +1,7 @@
 // ------------ Mod Progress Row ------------
 // A thin progress bar with a message that shows while a mod is being downloaded or installed for this game.
-import { useModsStore } from "../../store/modsStore";
-import { ProgressBar } from "../ui/ProgressBar";
+import { useModsStore } from "../../store/mods";
+import { ProgressBar } from "../ui/panels";
 
 export function ModProgressRow({ gameId }: { gameId: string }) {
   const progress = useModsStore((s) => s.progress);

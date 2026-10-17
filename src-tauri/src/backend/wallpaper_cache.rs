@@ -14,7 +14,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::AsyncWriteExt;
 
 use super::api_config::ApiConfig;
-use super::state::BackendState;
+use super::BackendState;
 use super::{game_profiles, http};
 
 fn server_wallpaper_dir(game_id: &str) -> &str {
@@ -35,7 +35,6 @@ const STARTUP_DELAY: std::time::Duration = std::time::Duration::from_secs(8);
 const WAKE_SETTLE: std::time::Duration = std::time::Duration::from_secs(1);
 const HIDDEN_GRACE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const HIDDEN_AT: &str = "hiddenAt";
-// Each poll is a conditional GET on the feed, so an unchanged feed costs one 304.
 const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const DOWNLOAD_RETRIES: u32 = 2;
@@ -50,9 +49,6 @@ pub(super) fn is_video_ext(ext: &str) -> bool {
         .any(|video| video.eq_ignore_ascii_case(ext))
 }
 
-/// Media types a cached wallpaper may be stored as. The cache folder is readable by the
-/// webview through the asset protocol, so the feed must not be able to drop an .html, .svg,
-/// .exe or other active file there by naming its URL that way.
 const CACHEABLE_EXTENSIONS: [&str; 9] = [
     ".mp4", ".webm", ".mov", ".m4v", ".png", ".jpg", ".jpeg", ".webp", ".gif",
 ];
@@ -219,12 +215,7 @@ impl WallpaperCache {
     }
 
     fn wallpaper_json_url(&self, game_id: &str, api_config: &ApiConfig) -> String {
-        let profile = game_profiles::profile(game_id);
-        let client_key = profile
-            .get("apiClientKey")
-            .and_then(|v| v.as_str())
-            .unwrap_or(game_id);
-        if let Some(url) = api_config.wallpapers_slogan_url_for_client(Some(client_key)) {
+        if let Some(url) = api_config.wallpapers_slogan_url_for_client(Some(game_id)) {
             return url;
         }
         let origin = super::api_config::api_origin();
@@ -489,6 +480,10 @@ impl WallpaperCache {
         if !super::http::is_online_cached() {
             log::info!("Wallpaper cache: offline, serving the existing cache.");
             return true;
+        }
+        if !super::api_config::peebify_content_on(&self.app) {
+            log::info!("Wallpaper cache: Peebify online content is off, serving the existing cache.");
+            return false;
         }
 
         let started = std::time::Instant::now();

@@ -1,34 +1,84 @@
 // ------------ Appearance Editors ------------
-// The cards on the Appearance settings tab for picking a custom wallpaper, a custom icon and a color for each
-// game, with a preview and a reset button for each.
-import { useCallback, useRef, useState } from "react";
-import { FolderOpen, Gamepad2, Image as ImageIcon, Palette, RotateCcw } from "lucide-react";
-import { GAMES, gameById } from "../../data/games";
-import type { GameId } from "../../types/game";
+// The Appearance settings tab's custom sections: the home screen switches beside a preview of the launcher, the
+// per-game wallpaper and icon cards with their previews, and the playtime chart colors with a sample chart.
+import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
+import { FolderOpen, RotateCcw } from "lucide-react";
+import { GAMES, gameById, gameColor, isGameColor, type GameId } from "../../data/games";
+import type { Setting } from "../../data/settings";
 import { useLibraryStore } from "../../store/libraryStore";
 import { useCustomizationStore } from "../../store/customizationStore";
 import { useRemoteMediaStore } from "../../store/remoteContentStore";
 import { useSettingsStore } from "../../store/settingsStore";
 import { useSessionUiStore } from "../../store/sessionUiStore";
-import { selectWallpaperFile, selectGameIconFile, type MediaSlice } from "../../lib/ipc";
+import { selectWallpaperFile, selectGameIconFile, type MediaSlice, type RemoteMedia } from "../../lib/ipc";
 import { iconFallback, iconSrcFor, wallpaperFor } from "../../lib/customMedia";
-import { gameColor, isGameColor } from "../../data/playtime";
-import { CrossfadeMedia } from "../common/CrossfadeMedia";
-import { useRendererSuspended } from "../../lib/useRendererSuspended";
-import { useWindowFocused } from "../../lib/useWindowFocused";
+import { CrossfadeMedia } from "../ui/CrossfadeMedia";
+import { useRendererSuspended, useWindowFocused } from "../../lib/launcherHooks";
 import { useGamesStore } from "../../store/gamesStore";
 import { ColorPopover } from "../ui/ColorPicker";
 import { Hint } from "../ui/Tooltip";
+import { ActionButton } from "../ui/controls";
+import { GroupBox, GroupLabel } from "../ui/panels";
+import { SettingRow } from "./SettingRow";
+import { HomePreview } from "./HomePreview";
+import { formatLocale } from "../../lib/i18n";
+import { useT } from "../../lib/useT";
 
-const BTN =
-  "flex items-center gap-[6px] rounded-ui border border-white/15 bg-white/[0.05] px-3 py-[7px] text-[12.5px] font-medium text-white transition-colors hover:bg-white/10";
+const CARD = "flex min-w-0 flex-col gap-[14px] rounded-[11px] border border-white/[0.08] bg-white/[0.05] p-5";
+const STAGE = "relative overflow-hidden rounded-ui border border-white/[0.12] bg-[#0a0e14]";
+const GLASS = "border border-white/10 bg-[rgba(18,18,22,0.6)] backdrop-blur-[20px] backdrop-saturate-[1.8]";
 
-const CARD = "rounded-ui border border-white/[0.08] bg-white/[0.05] p-5";
-
-// Every game's default color, then a few extras, so the picker opens with two full rows of presets.
 const COLOR_PRESETS = [
   ...new Set([...GAMES.map((g) => gameColor(g.id)), "#ffffff", "#f472b6", "#34d399", "#60a5fa"]),
 ].slice(0, 16);
+
+const SAMPLE_WEEK_MINUTES: number[][] = [
+  [46, 22],
+  [30, 34, 12],
+  [40, 18],
+  [58, 18],
+  [26, 20, 16],
+  [48, 28, 10],
+  [44, 36],
+];
+
+function stillWallpaper(gameId: GameId, slice: MediaSlice | undefined, remote: RemoteMedia | undefined) {
+  const chosen = wallpaperFor(gameId, slice, remote, false);
+  return chosen.video ? wallpaperFor(gameId, undefined, remote, false).src : chosen.src;
+}
+
+function useSidebarGames() {
+  const visible = useLibraryStore((s) => s.visible);
+  return useMemo(() => (visible.length ? visible.map(gameById) : GAMES), [visible]);
+}
+
+function Section({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <section>
+      <GroupLabel label={label} />
+      {children}
+    </section>
+  );
+}
+
+export function HomeScreenGroup({ settings }: { settings: Setting[] }) {
+  const t = useT();
+  const gameId = useSessionUiStore((s) => s.settingsGameId);
+  return (
+    <Section label={t("settings.groups.homeScreen")}>
+      <GroupBox className="flex flex-wrap items-stretch">
+        <div className="flex flex-none flex-col gap-[10px] p-5">
+          <HomePreview gameId={gameId} />
+        </div>
+        <div className="min-w-0 flex-[1_1_420px] border-l border-white/[0.06]">
+          {settings.map((s) => (
+            <SettingRow key={s.id} setting={s} />
+          ))}
+        </div>
+      </GroupBox>
+    </Section>
+  );
+}
 
 function GamePicker({
   value,
@@ -39,34 +89,35 @@ function GamePicker({
   onChange: (id: GameId) => void;
   icons: Record<string, MediaSlice>;
 }) {
-  const visible = useLibraryStore((s) => s.visible);
-  const listed =
-    visible.length === 0
-      ? GAMES
-      : (visible.includes(value) ? visible : [...visible, value]).map(gameById);
+  const t = useT();
+  const sidebar = useSidebarGames();
+  const listed = sidebar.some((g) => g.id === value) ? sidebar : [...sidebar, gameById(value)];
   return (
-    <div className="flex flex-wrap gap-2">
+    <div
+      role="group"
+      aria-label={t("settings.appearance.chooseGame")}
+      className="mb-3 flex gap-[6px] overflow-x-auto p-[3px] [scrollbar-width:thin]"
+    >
       {listed.map((g) => {
         const active = value === g.id;
         return (
-          <Hint key={g.id} tip={g.name}>
+          <Hint key={g.id} tip={g.name} className="inline-flex shrink-0">
             <button
               onClick={() => onChange(g.id)}
               aria-pressed={active}
               aria-label={g.name}
-              className={`flex items-center gap-[8px] rounded-ui border px-[10px] py-[7px] text-[12.5px] font-medium transition-colors ${
+              className={`grid h-[42px] w-[42px] place-items-center rounded-ui border transition-colors ${
                 active
-                  ? "border-(--accent-b)/60 bg-(--accent-b)/12 text-white"
-                  : "border-white/10 text-white/60 hover:border-white/25 hover:bg-white/[0.06] hover:text-white/90"
+                  ? "border-white/60 bg-white/[0.12]"
+                  : "border-transparent opacity-60 hover:border-white/20 hover:bg-white/[0.06] hover:opacity-100"
               }`}
             >
               <img
                 src={iconSrcFor(g.id, icons)}
                 onError={iconFallback(g.id)}
                 alt=""
-                className="h-[22px] w-[22px] rounded-[5px] object-cover"
+                className="h-[30px] w-[30px] rounded-[7px] object-cover"
               />
-              <span>{g.short ?? g.name}</span>
             </button>
           </Hint>
         );
@@ -75,22 +126,45 @@ function GamePicker({
   );
 }
 
-export function CustomWallpaperCard() {
+export function GameArtwork() {
+  const t = useT();
+  const gameId = useSessionUiStore((s) => s.settingsGameId);
+  const setGameId = useSessionUiStore((s) => s.setSettingsGameId);
+  const gameIcons = useCustomizationStore((s) => s.gameIcons);
+  return (
+    <Section label={`${t("settings.appearance.wallpaperAndIcon")} · ${gameById(gameId).name}`}>
+      <GamePicker value={gameId} onChange={setGameId} icons={gameIcons} />
+      <div className="flex flex-wrap items-stretch gap-4">
+        <WallpaperCard gameId={gameId} />
+        <IconCard gameId={gameId} />
+      </div>
+    </Section>
+  );
+}
+
+function StageTag({ custom, side = "left-[10px]" }: { custom: boolean; side?: string }) {
+  const t = useT();
+  return (
+    <span
+      className={`absolute ${side} top-[10px] rounded-full px-[9px] py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-white/85 ${GLASS}`}
+    >
+      {custom ? t("settings.appearance.customTag") : t("settings.appearance.defaultTag")}
+    </span>
+  );
+}
+
+function WallpaperCard({ gameId }: { gameId: GameId }) {
+  const t = useT();
   const suspended = useRendererSuspended();
   const focused = useWindowFocused();
   const gameRunning = useGamesStore((s) => s.runningGames.length > 0);
-  const gameId = useSessionUiStore((s) => s.settingsGameId);
-  const setGameId = useSessionUiStore((s) => s.setSettingsGameId);
-  const wallpaper = useCustomizationStore((s) => s.wallpaper);
-  const gameIcons = useCustomizationStore((s) => s.gameIcons);
+  const slice = useCustomizationStore((s) => s.wallpaper[gameId]);
   const setWallpaper = useCustomizationStore((s) => s.setWallpaper);
-  const game = gameById(gameId);
-
-  const animated = useSettingsStore((s) => s.values.animatedWallpaper) !== "false";
-  const slice = wallpaper[gameId];
   const remote = useRemoteMediaStore((s) => s.media[gameId]);
+  const animated = useSettingsStore((s) => s.values.animatedWallpaper) !== "false";
   const { src, video } = wallpaperFor(gameId, slice, remote, animated);
   const custom = slice?.type === "custom";
+  const game = gameById(gameId);
 
   const pick = async () => {
     const p = await selectWallpaperFile();
@@ -98,50 +172,57 @@ export function CustomWallpaperCard() {
   };
 
   return (
-    <div className={CARD}>
-      <h5 className="flex items-center gap-2 text-[14px] font-medium text-white">
-        <ImageIcon size={15} /> Custom wallpaper
-      </h5>
-      <p className="mb-3 mt-1 text-[12.5px] text-white/55">
-        Use a local image or video as the background.
-      </p>
-      <div className="mb-3">
-        <GamePicker value={gameId} onChange={setGameId} icons={gameIcons} />
+    <div className={`${CARD} flex-[3_1_460px]`}>
+      <div>
+        <h5 className="text-[14px] font-medium text-white">{t("settings.appearance.wallpaper")}</h5>
+        <p className="mt-[2px] text-[12.5px] leading-snug text-white/55">
+          {t("settings.appearance.customWallpaperDescription")}
+        </p>
       </div>
-      <div className="relative mb-3 aspect-video w-full max-w-[420px] overflow-hidden rounded-ui bg-black/40">
+      <div className={`${STAGE} aspect-video w-full`}>
         <CrossfadeMedia
           src={src}
           video={video}
           autoPlay={animated}
           playing={!suspended && (focused || !gameRunning)}
         />
+        <StageTag custom={custom} />
       </div>
-      <p className="mb-3 text-[11.5px] text-white/55">
-        {custom ? `Custom wallpaper for ${game.name}` : `Default wallpaper for ${game.name}`}
-      </p>
-      <div className="flex gap-2">
-        <button onClick={() => void pick()} className={BTN}>
-          <FolderOpen size={14} /> Select file
-        </button>
-        {custom && (
-          <button onClick={() => setWallpaper(gameId, { type: "default", path: null })} className={BTN}>
-            <RotateCcw size={14} /> Reset
-          </button>
-        )}
+      <div className="flex flex-wrap items-center justify-between gap-[10px]">
+        <span className="text-[11.5px] text-white/55">
+          {custom
+            ? t("settings.appearance.customWallpaperFor", { game: game.name })
+            : t("settings.appearance.defaultWallpaperFor", { game: game.name })}
+        </span>
+        <div className="flex gap-2">
+          <ActionButton icon={<FolderOpen size={14} />} onClick={() => void pick()}>
+            {t("settings.appearance.selectFile")}
+          </ActionButton>
+          <ActionButton
+            icon={<RotateCcw size={14} />}
+            disabled={!custom}
+            onClick={() => setWallpaper(gameId, { type: "default", path: null })}
+          >
+            {t("common.reset")}
+          </ActionButton>
+        </div>
       </div>
     </div>
   );
 }
 
-export function CustomIconCard() {
-  const gameId = useSessionUiStore((s) => s.settingsGameId);
-  const setGameId = useSessionUiStore((s) => s.setSettingsGameId);
-  const gameIcons = useCustomizationStore((s) => s.gameIcons);
+function IconCard({ gameId }: { gameId: GameId }) {
+  const t = useT();
+  const icons = useCustomizationStore((s) => s.gameIcons);
   const setGameIcon = useCustomizationStore((s) => s.setGameIcon);
+  const wallSlice = useCustomizationStore((s) => s.wallpaper[gameId]);
+  const remote = useRemoteMediaStore((s) => s.media[gameId]);
+  const sidebar = useSidebarGames();
+  const rail = railWindow(sidebar.some((g) => g.id === gameId) ? sidebar : [...sidebar, gameById(gameId)], gameId);
+  const custom = icons[gameId]?.type === "custom";
   const game = gameById(gameId);
-
-  const slice = gameIcons[gameId];
-  const custom = slice?.type === "custom";
+  const [failed, setFailed] = useState<ReadonlySet<string>>(() => new Set());
+  const iconSrc = iconSrcFor(gameId, icons);
 
   const pick = async () => {
     const p = await selectGameIconFile();
@@ -149,85 +230,144 @@ export function CustomIconCard() {
   };
 
   return (
-    <div className={CARD}>
-      <h5 className="flex items-center gap-2 text-[14px] font-medium text-white">
-        <Gamepad2 size={15} /> Custom game icons
-      </h5>
-      <p className="mb-3 mt-1 text-[12.5px] text-white/55">
-        Replace the sidebar icon for each game. Static or animated (WebP, GIF).
-      </p>
-      <div className="mb-3">
-        <GamePicker value={gameId} onChange={setGameId} icons={gameIcons} />
+    <div className={`${CARD} flex-[2_1_320px]`}>
+      <div>
+        <h5 className="text-[14px] font-medium text-white">{t("settings.appearance.gameIcon")}</h5>
+        <p className="mt-[2px] text-[12.5px] leading-snug text-white/55">
+          {t("settings.appearance.gameIconDescription")}
+        </p>
       </div>
-      <div className="mb-3 flex items-center gap-3 rounded-ui bg-black/30 p-3">
-        <img
-          src={iconSrcFor(gameId, gameIcons)}
-          onError={iconFallback(gameId)}
-          alt=""
-          className="h-[52px] w-[52px] shrink-0 rounded-ui object-cover"
-        />
-        <div>
-          <p className="text-[13px] font-medium text-white">{game.name}</p>
-          <p className="text-[11.5px] text-white/55">{custom ? "Custom icon" : "Default icon"}</p>
+      <div className={`${STAGE} flex min-h-[200px] flex-auto`}>
+        <div className="absolute inset-0 scale-110 blur-[6px] brightness-[.55]">
+          <CrossfadeMedia src={stillWallpaper(gameId, wallSlice, remote)} video={false} />
         </div>
+        <div
+          aria-hidden="true"
+          className="relative flex w-[52px] flex-none flex-col items-center justify-center gap-1 overflow-hidden border-r border-white/[0.07] bg-[rgba(14,14,18,0.7)] py-3"
+        >
+          {rail.map((g) => (
+            <span
+              key={g.id}
+              className={`grid h-[34px] w-[34px] shrink-0 place-items-center rounded-[8px] transition-colors ${
+                g.id === gameId ? "bg-white/[0.08]" : ""
+              }`}
+            >
+              <img
+                src={iconSrcFor(g.id, icons)}
+                onError={iconFallback(g.id)}
+                alt=""
+                className="h-6 w-6 rounded-[6px] object-cover"
+              />
+            </span>
+          ))}
+        </div>
+        <div className="relative flex flex-auto flex-col items-center justify-center gap-[10px] p-4">
+          <div
+            className="relative h-[84px] w-[84px] overflow-hidden rounded-[18px]"
+            style={{ boxShadow: "0 0 0 1px rgba(255,255,255,.12), 0 10px 24px -8px rgba(0,0,0,.7)" }}
+          >
+            <CrossfadeMedia
+              src={failed.has(iconSrc) ? game.icon : iconSrc}
+              video={false}
+              onError={(src) => setFailed((prev) => new Set(prev).add(src))}
+            />
+          </div>
+          <span className="text-center text-[13px] font-medium text-white">{game.name}</span>
+        </div>
+        <StageTag custom={custom} side="right-[10px]" />
       </div>
-      <div className="flex gap-2">
-        <button onClick={() => void pick()} className={BTN}>
-          <FolderOpen size={14} /> Select icon
-        </button>
-        {custom && (
-          <button onClick={() => setGameIcon(gameId, { type: "default", path: null })} className={BTN}>
-            <RotateCcw size={14} /> Reset
-          </button>
-        )}
+      <div className="flex flex-wrap items-center justify-between gap-[10px]">
+        <span className="text-[11.5px] text-white/55">
+          {custom ? t("settings.appearance.customIcon") : t("settings.appearance.defaultIcon")}
+        </span>
+        <div className="flex gap-2">
+          <ActionButton icon={<FolderOpen size={14} />} onClick={() => void pick()}>
+            {t("settings.appearance.selectIcon")}
+          </ActionButton>
+          <ActionButton
+            icon={<RotateCcw size={14} />}
+            disabled={!custom}
+            onClick={() => setGameIcon(gameId, { type: "default", path: null })}
+          >
+            {t("common.reset")}
+          </ActionButton>
+        </div>
       </div>
     </div>
   );
 }
 
+const RAIL_WINDOW = 5;
+
+function railWindow<T extends { id: GameId }>(games: T[], selected: GameId): T[] {
+  const at = Math.max(0, games.findIndex((g) => g.id === selected));
+  const start = Math.min(Math.max(0, at - Math.floor(RAIL_WINDOW / 2)), Math.max(0, games.length - RAIL_WINDOW));
+  return games.slice(start, start + RAIL_WINDOW);
+}
+
+function weekdayLabels(): string[] {
+  const fmt = new Intl.DateTimeFormat(formatLocale(), { weekday: "short" });
+  return Array.from({ length: 7 }, (_, i) => fmt.format(new Date(2024, 0, 1 + i)));
+}
+
 export function GameColorsCard() {
+  const t = useT();
   const overrides = useCustomizationStore((s) => s.playtimeColor);
   const setPlaytimeColor = useCustomizationStore((s) => s.setPlaytimeColor);
   const gameIcons = useCustomizationStore((s) => s.gameIcons);
-  const visible = useLibraryStore((s) => s.visible);
-
-  const listed = visible.length ? GAMES.filter((g) => visible.includes(g.id)) : GAMES;
-  const customCount = listed.filter((g) => isGameColor(overrides[g.id])).length;
+  const listed = useSidebarGames();
+  const days = weekdayLabels();
+  const colorAt = (slot: number) => gameColor(listed[slot % listed.length].id, overrides);
+  let nextSlot = 0;
+  const week = SAMPLE_WEEK_MINUTES.map((day) => day.map((minutes) => [nextSlot++, minutes] as const));
 
   return (
-    <div className={CARD}>
-      <div className="mb-3 flex items-start justify-between gap-4">
-        <div>
-          <h5 className="flex items-center gap-2 text-[14px] font-medium text-white">
-            <Palette size={15} /> Game colors
-          </h5>
-          <p className="mt-1 text-[12.5px] text-white/55">
-            The color each game is drawn in on the Playtime charts.
-          </p>
+    <Section label={t("settings.appearance.gameColors")}>
+      <div className={`${CARD} flex-row flex-wrap gap-6`}>
+        <div className="flex min-w-[260px] flex-[0_1_340px] flex-col gap-[10px]">
+          <div>
+            <h5 className="text-[14px] font-medium text-white">{t("settings.appearance.chartColors")}</h5>
+            <p className="mt-[2px] text-[12.5px] leading-snug text-white/55">
+              {t("settings.appearance.gameColorsDescription")}
+            </p>
+          </div>
+          <div
+            role="img"
+            aria-label={t("settings.appearance.chartPreviewLabel")}
+            className={`${STAGE} flex h-[170px] items-end gap-[10px] bg-black/30 px-4 pb-[26px] pt-4`}
+          >
+            {week.map((parts, i) => (
+              <div key={i} className="relative flex flex-1 flex-col-reverse gap-[2px]">
+                {parts.map(([slot, minutes], j) => (
+                  <span
+                    key={j}
+                    className="block rounded-[3px] transition-colors duration-200"
+                    style={{ height: minutes, background: colorAt(slot) }}
+                  />
+                ))}
+                <span className="absolute inset-x-0 -bottom-[18px] text-center text-[10px] text-white/45">
+                  {days[i]}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
-        {customCount > 0 && (
-          <Hint tip="Put every game back to its default color" placement="left">
-            <button onClick={() => listed.forEach((g) => setPlaytimeColor(g.id, null))} className={BTN}>
-              <RotateCcw size={14} /> Reset all
-            </button>
-          </Hint>
-        )}
-      </div>
 
-      <div className="flex flex-col gap-[2px]">
-        {listed.map((game) => (
-          <GameColorRow
-            key={game.id}
-            gameId={game.id}
-            name={game.name}
-            icons={gameIcons}
-            custom={isGameColor(overrides[game.id])}
-            value={gameColor(game.id, overrides)}
-            onChange={setPlaytimeColor}
-          />
-        ))}
+        <div className="grid min-w-0 flex-[1_1_360px] content-start gap-x-4 gap-y-[2px] [grid-template-columns:repeat(auto-fill,minmax(250px,1fr))]">
+          {listed.map((game) => (
+            <GameColorRow
+              key={game.id}
+              gameId={game.id}
+              name={game.name}
+              icons={gameIcons}
+              custom={isGameColor(overrides[game.id])}
+              value={gameColor(game.id, overrides)}
+              onChange={setPlaytimeColor}
+            />
+          ))}
+        </div>
       </div>
-    </div>
+    </Section>
   );
 }
 
@@ -246,6 +386,7 @@ function GameColorRow({
   value: string;
   onChange: (id: GameId, color: string | null) => void;
 }) {
+  const t = useT();
   const swatchRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
@@ -258,14 +399,14 @@ function GameColorRow({
         src={iconSrcFor(gameId, icons)}
         onError={iconFallback(gameId)}
         alt=""
-        className="h-[22px] w-[22px] shrink-0 rounded-[4px] object-cover"
+        className="h-[22px] w-[22px] shrink-0 rounded-[5px] object-cover"
       />
       <span className="min-w-0 flex-1 truncate text-[13px] text-white/80">{name}</span>
       <span className="shrink-0 font-mono text-[11.5px] uppercase text-white/55">{value}</span>
       <button
         ref={swatchRef}
         onClick={() => setOpen((o) => !o)}
-        aria-label={`Change the color for ${name}`}
+        aria-label={t("settings.appearance.changeColor", { game: name })}
         aria-haspopup="dialog"
         aria-expanded={open}
         className={`h-[24px] w-[34px] shrink-0 rounded-[6px] border transition duration-150 hover:scale-[1.06] active:scale-[0.96] ${
@@ -280,13 +421,17 @@ function GameColorRow({
         value={value}
         onChange={(hex) => onChange(gameId, hex)}
         presets={COLOR_PRESETS}
-        label={`Color for ${name}`}
+        label={t("settings.appearance.colorFor", { game: name })}
       />
-      <Hint tip={custom ? `Reset ${name} to its default color` : undefined} placement="left" className="flex shrink-0">
+      <Hint
+        tip={custom ? t("settings.appearance.resetColorTip", { game: name }) : undefined}
+        placement="left"
+        className="flex shrink-0"
+      >
         <button
           onClick={() => onChange(gameId, null)}
           disabled={!custom}
-          aria-label={`Reset the color for ${name}`}
+          aria-label={t("settings.appearance.resetColor", { game: name })}
           className="grid h-[24px] w-[24px] place-items-center rounded-[6px] border border-white/[0.08] bg-white/[0.04] text-white/60 transition-colors hover:bg-white/[0.1] hover:text-white disabled:cursor-not-allowed disabled:opacity-25"
         >
           <RotateCcw size={12} />

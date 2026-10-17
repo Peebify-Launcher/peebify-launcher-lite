@@ -2,8 +2,7 @@
 // The current page, active game, app version, online state and window state. The page and game are
 // remembered across restarts.
 import { create } from "zustand";
-import { GAMES } from "../data/games";
-import type { GameId } from "../types/game";
+import { GAMES, type GameId } from "../data/games";
 import type { BuildType } from "../lib/ipc";
 
 export type View = "home" | "playtime" | "gallery" | "mods" | "settings" | "downloads";

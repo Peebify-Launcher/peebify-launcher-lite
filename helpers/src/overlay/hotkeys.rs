@@ -12,7 +12,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_HOTKEY,
 };
 
-use crate::overlay::section::Signal;
 use crate::overlay::shared::{OverlayShared, HOTKEY_COUNT};
 use crate::overlay::telemetry::log_line;
 
@@ -22,15 +21,17 @@ pub struct Registrations {
     suspended: bool,
 }
 
-impl Registrations {
-    pub fn new() -> Self {
+impl Default for Registrations {
+    fn default() -> Self {
         Self {
             registered: [false; HOTKEY_COUNT],
             generation: u32::MAX,
             suspended: false,
         }
     }
+}
 
+impl Registrations {
     pub fn sync(&mut self, shared: &OverlayShared) {
         let reason = release_reason(
             shared.hotkey_suspend.load(Ordering::Acquire) != 0,
@@ -97,12 +98,6 @@ impl Registrations {
 
     pub fn any_registered(&self) -> bool {
         self.registered.iter().any(|r| *r)
-    }
-}
-
-impl Default for Registrations {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -180,10 +175,6 @@ pub fn allow_foreground(launcher_pid: u32) {
     if launcher_pid != 0 {
         unsafe { AllowSetForegroundWindow(launcher_pid) };
     }
-}
-
-pub fn notify(signal: &Signal) {
-    signal.raise();
 }
 
 #[cfg(test)]

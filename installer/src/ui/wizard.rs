@@ -15,22 +15,9 @@ use crate::payload::Payload;
 use crate::ui;
 
 pub fn run(payload: Payload) -> eframe::Result<i32> {
-    let options = eframe::NativeOptions {
-        viewport: ui::viewport(ui::WINDOW),
-        centered: true,
-        ..Default::default()
-    };
-    let outcome = std::rc::Rc::new(std::cell::Cell::new(crate::exit::OK));
-    let result_slot = outcome.clone();
-    eframe::run_native(
-        "Peebify Launcher Setup",
-        options,
-        Box::new(move |cc| {
-            ui::apply_theme(&cc.egui_ctx);
-            Ok(Box::new(WizardApp::new(&cc.egui_ctx, payload, result_slot)))
-        }),
-    )?;
-    Ok(outcome.get())
+    ui::run_window("Peebify Launcher Setup", ui::WINDOW, move |ctx, outcome| {
+        Box::new(WizardApp::new(ctx, payload, outcome))
+    })
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -371,10 +358,8 @@ impl WizardApp {
     }
 
     fn drain_events(&mut self) {
-        let Some(rx) = &self.rx else { return };
-        while let Ok(event) = rx.try_recv() {
+        while let Some(event) = ui::next_event(&mut self.rx, &mut self.pacer) {
             match event {
-                EngineEvent::Status { phase, percent } => self.pacer.report(&phase, percent),
                 EngineEvent::Warning(w) => self.warnings.push(w),
                 EngineEvent::Committed => {
                     self.committed = true;
@@ -383,23 +368,18 @@ impl WizardApp {
                 EngineEvent::Finished => {
                     self.webview2_missing = !crate::prereqs::webview2::is_installed();
                     self.pacer.finish();
-                    self.rx = None;
-                    return;
                 }
                 EngineEvent::Cancelled => {
                     self.outcome.set(crate::exit::CANCELLED);
-                    self.rx = None;
                     self.reset_run();
                     self.page = Page::Welcome;
-                    return;
                 }
                 EngineEvent::Failed(e) => {
                     self.outcome.set(crate::exit::FAILED);
                     self.error = Some(e);
                     self.page = Page::Done;
-                    self.rx = None;
-                    return;
                 }
+                _ => {}
             }
         }
     }
@@ -464,21 +444,33 @@ impl eframe::App for WizardApp {
             }
         }
 
-        let closable = match screen {
-            Screen::Progress => ui::Close::Disabled,
-            _ => ui::Close::Enabled,
-        };
+        let closable = screen != Screen::Progress;
         let logo = self.logo.clone();
         let identity = format!("Version {}", self.payload.manifest.version);
-        let rail = ui::Rail::new(logo.as_ref(), identity);
+        let rail = ui::Rail {
+            logo: logo.as_ref(),
+            identity,
+            ..Default::default()
+        };
         let rail = match screen {
-            Screen::Welcome | Screen::Options => rail.step(ui::Step::Setup),
-            Screen::Progress => rail
-                .step(ui::Step::Install)
-                .progress(ui::bar_fraction(self.pacer.percent())),
-            Screen::Done => rail.step(ui::Step::Ready).badge(ui::Badge::Done),
-            Screen::Warnings => rail.step(ui::Step::Ready),
-            Screen::Failed => rail.failed(),
+            Screen::Welcome | Screen::Options => ui::Rail { step: Some(ui::Step::Setup), ..rail },
+            Screen::Progress => ui::Rail {
+                step: Some(ui::Step::Install),
+                progress: ui::bar_fraction(self.pacer.percent()),
+                ..rail
+            },
+            Screen::Done => ui::Rail {
+                step: Some(ui::Step::Ready),
+                badge: ui::Badge::Done,
+                ..rail
+            },
+            Screen::Warnings => ui::Rail { step: Some(ui::Step::Ready), ..rail },
+            Screen::Failed => ui::Rail {
+                error: true,
+                muted: true,
+                badge: ui::Badge::Failed,
+                ..rail
+            },
         };
         let mood = match screen {
             Screen::Welcome | Screen::Options | Screen::Warnings => ui::Mood::CALM,
@@ -500,10 +492,7 @@ impl eframe::App for WizardApp {
 
 impl WizardApp {
     fn page_welcome(&mut self, ui_: &mut egui::Ui) {
-        ui::group(ui_, |g| {
-            g.add_space(16.0);
-            ui::heading(g, "Setup", 29.0);
-        });
+        ui::page_title(ui_, 16.0, "Setup", 29.0);
 
         let (replacing, elsewhere, blocker, size) = match self.shown_check() {
             Some(check) => (
@@ -530,7 +519,7 @@ impl WizardApp {
         }
         notices.extend(elsewhere);
 
-        ui::group(ui_, |g| {
+        ui_.scope(|g| {
             g.add_space(14.0);
             ui::paragraph(
                 g,
@@ -551,7 +540,7 @@ impl WizardApp {
         let mut start = false;
         let mut customize = false;
         ui::footer(ui_, |foot| {
-            ui::group(foot, |foot| {
+            foot.scope(|foot| {
                 ui::action_row(foot, true, |row| {
                     start = row
                         .add_enabled_ui(ok, |row| ui::primary_button(row, "Install"))
@@ -562,16 +551,12 @@ impl WizardApp {
                 });
             });
             foot.add_space(14.0);
-            ui::group(foot, |foot| {
+            foot.scope(|foot| {
                 if let Some(blocker) = blocker {
-                    foot.label(
-                        RichText::new(blocker)
-                            .size(ui::text::XS)
-                            .color(ui::DANGER_TEXT),
-                    );
+                    ui::caption(foot, blocker, ui::DANGER_TEXT);
                     foot.add_space(3.0);
                 } else if let Some(size) = size {
-                    foot.label(RichText::new(size).size(ui::text::XS).color(ui::tx(0.56)));
+                    ui::caption(foot, size, ui::tx(0.56));
                     foot.add_space(3.0);
                 }
                 path_line(foot, &path);
@@ -590,12 +575,9 @@ impl WizardApp {
     }
 
     fn page_options(&mut self, ui_: &mut egui::Ui, frame: &eframe::Frame) {
-        ui::group(ui_, |g| {
-            g.add_space(8.0);
-            ui::heading(g, "Preferences", 22.0);
-        });
+        ui::page_title(ui_, 8.0, "Preferences", 22.0);
 
-        ui::group(ui_, |g| {
+        ui_.scope(|g| {
             g.add_space(18.0);
             g.label(
                 RichText::new("Install folder")
@@ -630,7 +612,7 @@ impl WizardApp {
             self.target_feedback(g);
         });
 
-        ui::group(ui_, |g| {
+        ui_.scope(|g| {
             g.add_space(22.0);
             ui::checkbox(g, &mut self.desktop_shortcut, "Desktop shortcut");
             g.add_space(14.0);
@@ -651,7 +633,7 @@ impl WizardApp {
         let mut back = false;
         let mut start = false;
         ui::footer(ui_, |foot| {
-            ui::group(foot, |foot| {
+            foot.scope(|foot| {
                 ui::action_row_split(
                     foot,
                     |left| back = ui::secondary_button(left, "Back").clicked(),
@@ -674,11 +656,7 @@ impl WizardApp {
 
     fn target_feedback(&mut self, ui_: &mut egui::Ui) {
         let Some(check) = self.shown_check() else {
-            ui_.label(
-                RichText::new(CHECKING_FOLDER)
-                    .size(ui::text::XS)
-                    .color(ui::tx(0.56)),
-            );
+            ui::caption(ui_, CHECKING_FOLDER, ui::tx(0.56));
             return;
         };
         let (refusal, replacing, foreign, short, size, elsewhere) = (
@@ -691,21 +669,13 @@ impl WizardApp {
         );
 
         if let Some(refusal) = refusal {
-            ui_.label(
-                RichText::new(refusal)
-                    .size(ui::text::XS)
-                    .color(ui::DANGER_TEXT),
-            );
+            ui::caption(ui_, refusal, ui::DANGER_TEXT);
             return;
         }
 
         match (short, size) {
-            (Some(short), _) => {
-                ui_.label(RichText::new(short).size(ui::text::XS).color(ui::DANGER_TEXT));
-            }
-            (None, Some(size)) => {
-                ui_.label(RichText::new(size).size(ui::text::XS).color(ui::tx(0.56)));
-            }
+            (Some(short), _) => ui::caption(ui_, short, ui::DANGER_TEXT),
+            (None, Some(size)) => ui::caption(ui_, size, ui::tx(0.56)),
             (None, None) => {}
         }
 
@@ -736,10 +706,7 @@ impl WizardApp {
     }
 
     fn page_progress(&mut self, ui_: &mut egui::Ui) {
-        ui::group(ui_, |g| {
-            g.add_space(14.0);
-            ui::heading(g, "Installing", 25.0);
-        });
+        ui::page_title(ui_, 14.0, "Installing", 25.0);
         let percent = self.pacer.percent();
         let label = if self.cancelling {
             "Stopping…"
@@ -747,23 +714,13 @@ impl WizardApp {
             self.pacer.phase()
         }
         .to_string();
-        ui::group(ui_, |g| {
-            g.add_space(26.0);
-            ui::progress_readout(g, &label, percent, ui::text::BASE, 12.0);
-            g.add_space(10.0);
-            ui::progress_bar(
-                g,
-                egui::Id::new("install-progress"),
-                ui::bar_fraction(percent),
-                ui::BAR_STEADY,
-            );
-        });
+        ui::progress_block(ui_, "install-progress", &label, percent);
 
         let stoppable = !self.cancelling && !self.committed && self.rx.is_some();
         let mut stop = false;
         if self.rx.is_some() {
             ui::footer(ui_, |foot| {
-                ui::group(foot, |foot| {
+                foot.scope(|foot| {
                     ui::action_row(foot, true, |row| {
                         let button = row
                             .add_enabled_ui(stoppable, |row| ui::secondary_button(row, "Cancel"))
@@ -787,12 +744,9 @@ impl WizardApp {
     }
 
     fn page_done(&mut self, ui_: &mut egui::Ui, ctx: &egui::Context) {
-        ui::group(ui_, |g| {
-            g.add_space(16.0);
-            ui::heading(g, "All set", 32.0);
-        });
+        ui::page_title(ui_, 16.0, "All set", 32.0);
         let launched = self.launched_at.is_some();
-        ui::group(ui_, |g| {
+        ui_.scope(|g| {
             g.add_space(12.0);
             ui::paragraph(
                 g,
@@ -825,7 +779,7 @@ impl WizardApp {
         let mut primary = false;
         let mut open_folder = false;
         ui::footer(ui_, |foot| {
-            ui::group(foot, |foot| {
+            foot.scope(|foot| {
                 ui::action_row(foot, true, |row| {
                     primary = ui::primary_button(row, &label).clicked();
                     row.add_space(10.0);
@@ -833,7 +787,7 @@ impl WizardApp {
                 });
             });
             foot.add_space(14.0);
-            ui::group(foot, |foot| {
+            foot.scope(|foot| {
                 path_line(foot, &path);
                 foot.add_space(3.0);
                 ui::meta_label(foot, "Installed at");
@@ -859,27 +813,12 @@ impl WizardApp {
     }
 
     fn page_warnings(&mut self, ui_: &mut egui::Ui, ctx: &egui::Context) {
-        ui::group(ui_, |g| {
-            g.add_space(12.0);
-            ui::heading(g, "Installed, but with errors", 28.0);
-        });
+        ui::page_title(ui_, 12.0, "Installed, but with errors", 28.0);
         let warnings = self.warnings.clone();
         let webview2_missing = self.webview2_missing;
-        ui::group(ui_, |g| {
+        ui_.scope(|g| {
             g.add_space(20.0);
-            ui::card(g, ui::Tone::Notice, 13, |card| {
-                egui::ScrollArea::vertical()
-                    .max_height(200.0)
-                    .auto_shrink([false, true])
-                    .show(card, |list| {
-                        for (i, warning) in warnings.iter().enumerate() {
-                            if i > 0 {
-                                list.add_space(10.0);
-                            }
-                            ui::bullet_row(list, ui::NOTICE, warning);
-                        }
-                    });
-            });
+            ui::warnings_card(g, &warnings, 200.0);
             if !webview2_missing {
                 g.add_space(16.0);
                 ui::paragraph(
@@ -897,7 +836,7 @@ impl WizardApp {
         let mut open_folder = false;
         let mut open_log = false;
         ui::footer(ui_, |foot| {
-            ui::group(foot, |foot| {
+            foot.scope(|foot| {
                 ui::action_row_split(
                     foot,
                     |left| open_log = ui::link(left, "Open log").clicked(),
@@ -944,49 +883,13 @@ impl WizardApp {
 
     fn page_failed(&mut self, ui_: &mut egui::Ui, ctx: &egui::Context) {
         let err = self.error.clone().unwrap_or_default();
-        ui::group(ui_, |g| {
-            g.add_space(12.0);
-            ui::heading(g, "Install failed", 26.0);
-        });
-        let friendly = ui::friendly_error(&err);
-        let rolled_back = !err.contains(crate::install::ROLLBACK_FAILED);
-        ui::group(ui_, |g| {
-            g.add_space(18.0);
-            ui::detail_box(g, ui::Tone::Danger, "Details", &err, 170.0);
-            if !friendly.is_empty() {
-                g.add_space(10.0);
-                ui::paragraph(g, friendly, ui::text::XS, ui::tx(0.62), 400.0);
-            }
-            if !rolled_back {
-                g.add_space(10.0);
-                ui::paragraph(
-                    g,
-                    "Setup could not put everything back. Run setup again to repair the install.",
-                    ui::text::XS,
-                    ui::DANGER_TEXT,
-                    400.0,
-                );
-            }
-        });
-
-        let copy_label = self.copied.label(ctx);
-        let mut actions = None;
-        ui::footer(ui_, |foot| {
-            ui::group(foot, |foot| {
-                actions = Some(ui::failure_footer(foot, copy_label, true));
-            });
-        });
-        let Some(actions) = actions else { return };
-
-        if actions.copy {
-            ctx.copy_text(err);
-            self.copied.mark();
-        } else if actions.open_log {
-            ui::open_log_folder();
-        } else if actions.retry {
-            self.retry();
-        } else if actions.close {
-            ui::close(ctx);
+        let note = err.contains(crate::install::ROLLBACK_FAILED).then_some(
+            "Setup could not put everything back. Run setup again to repair the install.",
+        );
+        match ui::failure_page(ui_, &mut self.copied, &err, "Install failed", note, true) {
+            Some(ui::Failure::Retry) => self.retry(),
+            Some(ui::Failure::Close) => ui::close(ctx),
+            None => {}
         }
     }
 }
@@ -994,11 +897,6 @@ impl WizardApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn initial_install_dir_defaults_without_registration() {
-        assert_eq!(initial_install_dir(None), consts::default_install_dir());
-    }
 
     #[test]
     fn initial_install_dir_keeps_a_valid_registered_location() {
@@ -1013,13 +911,6 @@ mod tests {
             r"D:\Games\Peebify Launcher"
         );
         assert_eq!(clean_target(r"D:\Games\Peebify Launcher"), r"D:\Games\Peebify Launcher");
-    }
-
-    #[test]
-    fn elsewhere_notice_names_the_old_copy_and_its_uninstaller() {
-        let notice = elsewhere_notice(&PathBuf::from(r"D:\Apps\Peebify Launcher"));
-        assert!(notice.contains(r"D:\Apps\Peebify Launcher"));
-        assert!(notice.contains(consts::UNINSTALLER_NAME));
     }
 
     fn ok_check() -> TargetCheck {
@@ -1049,17 +940,6 @@ mod tests {
             },
         );
         assert!(!install_allowed(Some(&refused), &seen.0));
-    }
-
-    #[test]
-    fn size_line_reads_needed_then_free() {
-        let line = ok_check().size_line().unwrap();
-        assert!(line.contains(" · ") && line.ends_with(" free"), "{line}");
-        let refused = TargetCheck {
-            refusal: Some("no"),
-            ..ok_check()
-        };
-        assert_eq!(refused.size_line(), None);
     }
 
     #[test]

@@ -10,8 +10,9 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 
+use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, HANDLE, HMODULE, INVALID_HANDLE_VALUE, NTSTATUS,
+    CloseHandle, HANDLE, HMODULE, HWND, INVALID_HANDLE_VALUE, LPARAM, NTSTATUS,
 };
 use windows_sys::Win32::Security::Cryptography::{BCRYPT_ALG_HANDLE, BCRYPT_SHA256_ALG_HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
@@ -31,6 +32,9 @@ use windows_sys::Win32::System::LibraryLoader::{
 use windows_sys::Win32::System::Threading::{
     GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+};
 
 use super::wide;
 
@@ -48,12 +52,11 @@ fn in_own_session(own: Option<u32>, other: Option<u32>) -> bool {
     }
 }
 
-pub fn find_processes(name: &str) -> Vec<u32> {
+pub fn list_processes() -> Vec<(String, u32, u32)> {
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
         return Vec::new();
     }
-    let own_session = session_of(std::process::id());
     let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
     entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
     let mut found = Vec::new();
@@ -64,11 +67,8 @@ pub fn find_processes(name: &str) -> Vec<u32> {
                 .iter()
                 .position(|&c| c == 0)
                 .unwrap_or(entry.szExeFile.len());
-            if String::from_utf16_lossy(&entry.szExeFile[..end]).eq_ignore_ascii_case(name)
-                && in_own_session(own_session, session_of(entry.th32ProcessID))
-            {
-                found.push(entry.th32ProcessID);
-            }
+            let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
+            found.push((name, entry.th32ProcessID, entry.th32ParentProcessID));
             if unsafe { Process32NextW(snapshot, &mut entry) } == 0 {
                 break;
             }
@@ -76,6 +76,41 @@ pub fn find_processes(name: &str) -> Vec<u32> {
     }
     unsafe { CloseHandle(snapshot) };
     found
+}
+
+pub fn find_processes(name: &str) -> Vec<u32> {
+    let own_session = session_of(std::process::id());
+    list_processes()
+        .into_iter()
+        .filter(|(exe, pid, _)| {
+            exe.eq_ignore_ascii_case(name) && in_own_session(own_session, session_of(*pid))
+        })
+        .map(|(_, pid, _)| pid)
+        .collect()
+}
+
+pub fn visible_windows_of(pid: u32) -> Vec<HWND> {
+    struct Search {
+        pid: u32,
+        found: Vec<HWND>,
+    }
+
+    unsafe extern "system" fn collect(window: HWND, param: LPARAM) -> BOOL {
+        let search = &mut *(param as *mut Search);
+        let mut owner = 0u32;
+        GetWindowThreadProcessId(window, &mut owner);
+        if owner == search.pid && IsWindowVisible(window) != 0 {
+            search.found.push(window);
+        }
+        1
+    }
+
+    let mut search = Search {
+        pid,
+        found: Vec::new(),
+    };
+    unsafe { EnumWindows(Some(collect), &mut search as *mut Search as LPARAM) };
+    search.found
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]

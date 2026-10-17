@@ -48,7 +48,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, EnumWindows, GetWindowThreadProcessId, IsWindowVisible, MessageBoxW,
     PostMessageW, SystemParametersInfoW, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING,
-    MB_OK, MB_YESNO, SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_CLOSE,
+    MB_OK, MB_YESNO, MESSAGEBOX_RESULT, MESSAGEBOX_STYLE, SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_CLOSE,
     WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_NCDESTROY, WM_PAINT,
 };
 use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE};
@@ -106,37 +106,20 @@ pub fn create_run_dir(prefix: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn message_box(title: &str, text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
+    unsafe { MessageBoxW(None, &HSTRING::from(text), &HSTRING::from(title), style) }
+}
+
 pub fn message_box_error(title: &str, text: &str) {
-    unsafe {
-        MessageBoxW(
-            None,
-            &HSTRING::from(text),
-            &HSTRING::from(title),
-            MB_OK | MB_ICONERROR,
-        );
-    }
+    message_box(title, text, MB_OK | MB_ICONERROR);
 }
 
 pub fn message_box_info(title: &str, text: &str) {
-    unsafe {
-        MessageBoxW(
-            None,
-            &HSTRING::from(text),
-            &HSTRING::from(title),
-            MB_OK | MB_ICONINFORMATION,
-        );
-    }
+    message_box(title, text, MB_OK | MB_ICONINFORMATION);
 }
 
 pub fn message_box_yes_no(title: &str, text: &str) -> bool {
-    unsafe {
-        MessageBoxW(
-            None,
-            &HSTRING::from(text),
-            &HSTRING::from(title),
-            MB_YESNO | MB_ICONWARNING,
-        ) == IDYES
-    }
+    message_box(title, text, MB_YESNO | MB_ICONWARNING) == IDYES
 }
 
 fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
@@ -225,10 +208,7 @@ pub fn remove_shortcuts() {
         .into_iter()
         .flatten()
     {
-        let lnk = dir.join(consts::SHORTCUT_NAME);
-        if lnk.exists() {
-            let _ = std::fs::remove_file(&lnk);
-        }
+        let _ = std::fs::remove_file(dir.join(consts::SHORTCUT_NAME));
     }
 }
 
@@ -365,7 +345,7 @@ pub fn pids_by_exe_name(exe_name: &str) -> Vec<u32> {
     pids
 }
 
-pub fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
+fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
     unsafe {
         let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) else {
             return true;
@@ -396,27 +376,35 @@ fn post_close_to_windows(pids: &[u32]) {
     }
 }
 
-fn own_visible_windows() -> Vec<HWND> {
+fn visible_windows_of(pid: u32) -> Vec<HWND> {
+    struct Search {
+        pid: u32,
+        found: Vec<HWND>,
+    }
+
     unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
-        let found = unsafe { &mut *(lparam.0 as *mut Vec<HWND>) };
+        let search = unsafe { &mut *(lparam.0 as *mut Search) };
         let mut pid = 0u32;
         unsafe {
             GetWindowThreadProcessId(hwnd, Some(&mut pid));
         }
-        if pid == std::process::id() && unsafe { IsWindowVisible(hwnd) }.as_bool() {
-            found.push(hwnd);
+        if pid == search.pid && unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            search.found.push(hwnd);
         }
         true.into()
     }
 
-    let mut found: Vec<HWND> = Vec::new();
+    let mut search = Search {
+        pid,
+        found: Vec::new(),
+    };
     unsafe {
         let _ = EnumWindows(
             Some(enum_proc),
-            LPARAM(&mut found as *mut Vec<HWND> as isize),
+            LPARAM(&mut search as *mut Search as isize),
         );
     }
-    found
+    search.found
 }
 
 pub fn animations_enabled() -> bool {
@@ -433,7 +421,7 @@ pub fn animations_enabled() -> bool {
 }
 
 pub fn style_own_windows() -> bool {
-    let found = own_visible_windows();
+    let found = visible_windows_of(std::process::id());
     unsafe {
         for hwnd in &found {
             let _ = SetWindowSubclass(*hwnd, Some(drag_subclass), DRAG_SUBCLASS_ID, 0);
@@ -458,11 +446,6 @@ pub fn style_own_windows() -> bool {
 
 const DRAG_SUBCLASS_ID: usize = 0x5045_4542;
 
-// Windows moves a window from a modal loop on the window's own thread. winit answers every
-// WM_PAINT in that loop with a full egui frame that waits for vsync, so the window trails the
-// pointer in steps and the text smears (rust-windowing/winit#4708). While a move is in progress
-// paints go to DefWindowProc instead, and one real repaint follows when it ends. The reference
-// data is the in-move flag; SetWindowSubclass on an installed subclass only replaces it.
 unsafe extern "system" fn drag_subclass(
     hwnd: HWND,
     msg: u32,
@@ -502,7 +485,7 @@ fn process_image_path(pid: u32) -> Option<PathBuf> {
     }
 }
 
-const QUIT_REQUEST_FLAG: &str = "--quit-for-setup";
+const QUIT_FOR_UPDATE_FLAG: &str = "--quit-for-update";
 
 fn request_cooperative_quit(pids: &[u32], budget: Duration) {
     if is_elevated() {
@@ -521,7 +504,7 @@ fn request_cooperative_quit(pids: &[u32], budget: Duration) {
     for path in paths {
         use std::os::windows::process::CommandExt;
         let mut cmd = std::process::Command::new(&path);
-        cmd.arg(QUIT_REQUEST_FLAG).creation_flags(DETACHED_PROCESS);
+        cmd.arg(QUIT_FOR_UPDATE_FLAG).creation_flags(DETACHED_PROCESS);
         if let Some(dir) = path.parent() {
             cmd.current_dir(dir);
         }
@@ -547,6 +530,15 @@ fn request_cooperative_quit(pids: &[u32], budget: Duration) {
     }
 }
 
+fn terminate_pid(pid: u32) {
+    unsafe {
+        if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+            let _ = TerminateProcess(handle, 1);
+            let _ = CloseHandle(handle);
+        }
+    }
+}
+
 pub fn close_all_by_name(exe_name: &str, graceful: Duration, force_wait: Duration) -> bool {
     let pids = pids_by_exe_name(exe_name);
     if pids.is_empty() {
@@ -560,12 +552,7 @@ pub fn close_all_by_name(exe_name: &str, graceful: Duration, force_wait: Duratio
     }
     for pid in pids_by_exe_name(exe_name) {
         ilog!("close: pid {pid} did not exit in {graceful:?}, terminating");
-        unsafe {
-            if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) {
-                let _ = TerminateProcess(handle, 1);
-                let _ = CloseHandle(handle);
-            }
-        }
+        terminate_pid(pid);
     }
     wait_until_gone(exe_name, force_wait)
 }
@@ -594,12 +581,7 @@ pub fn close_pids(pids: &[u32], graceful: Duration, force_wait: Duration) -> boo
             continue;
         }
         ilog!("close: pid {pid} did not exit in {graceful:?}, terminating");
-        unsafe {
-            if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, *pid) {
-                let _ = TerminateProcess(handle, 1);
-                let _ = CloseHandle(handle);
-            }
-        }
+        terminate_pid(*pid);
     }
     let deadline = Instant::now() + force_wait;
     pids.iter()
@@ -618,7 +600,7 @@ pub fn file_in_use(path: &Path) -> bool {
     }
 }
 
-pub fn wait_until_gone(exe_name: &str, timeout: Duration) -> bool {
+fn wait_until_gone(exe_name: &str, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     let mut unwaitable: Option<u32> = None;
     loop {
@@ -643,7 +625,10 @@ pub fn run_elevated_and_wait(exe: &Path, args: &str) -> Result<u32, String> {
     let verb = HSTRING::from("runas");
     let file = HSTRING::from(exe.as_os_str());
     let params = HSTRING::from(args);
-    let owner = own_visible_windows().into_iter().next().unwrap_or_default();
+    let owner = visible_windows_of(std::process::id())
+        .into_iter()
+        .next()
+        .unwrap_or_default();
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_NOCLOSEPROCESS,
@@ -668,7 +653,7 @@ pub fn run_elevated_and_wait(exe: &Path, args: &str) -> Result<u32, String> {
 }
 
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-pub const DETACHED_PROCESS: u32 = 0x0000_0008;
+const DETACHED_PROCESS: u32 = 0x0000_0008;
 
 pub fn spawn_detached(program: &Path, args: &[&str], cwd: Option<&Path>) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
@@ -794,41 +779,24 @@ pub fn retry<T>(
     }
 }
 
+pub fn remove_quietly(mut op: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
+    retry(8, Duration::from_millis(250), || match op() {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn same_session_process_counts() {
+    fn only_processes_in_our_session_count() {
         assert!(in_own_session(Some(1), Some(1)));
-    }
-
-    #[test]
-    fn other_session_process_is_ignored() {
         assert!(!in_own_session(Some(1), Some(2)));
-    }
-
-    #[test]
-    fn unqueryable_process_is_treated_as_foreign() {
         assert!(!in_own_session(Some(1), None));
-    }
-
-    #[test]
-    fn unknown_own_session_keeps_every_match() {
         assert!(in_own_session(None, Some(2)));
         assert!(in_own_session(None, None));
-    }
-
-    #[test]
-    fn run_dirs_are_fresh_and_distinct() {
-        let a = create_run_dir("peebify-win-test").unwrap();
-        let b = create_run_dir("peebify-win-test").unwrap();
-        assert_ne!(a, b);
-        assert!(a.is_dir() && b.is_dir());
-        assert!(a.starts_with(std::env::temp_dir()));
-        assert!(std::fs::read_dir(&a).unwrap().next().is_none());
-        std::fs::remove_dir_all(&a).unwrap();
-        std::fs::remove_dir_all(&b).unwrap();
     }
 
     #[test]

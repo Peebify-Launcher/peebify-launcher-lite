@@ -3,7 +3,7 @@
 // left; install folder, quality and voice options and the actions on the right. Games installed through Steam get
 // a short two-step guide instead. Everything it shows is preloaded before it opens so it never resizes. Can also
 // find a game that is already on this PC.
-import { useCallback, useEffect, useRef, useState } from "react";
+﻿import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   FolderOpen,
@@ -13,22 +13,21 @@ import {
   ScanSearch,
   ExternalLink,
 } from "lucide-react";
-import { gameById, isManaged } from "../../data/games";
-import type { GameId } from "../../types/game";
-import { useNotificationStore } from "../../store/notificationStore";
+import { gameById, isManaged, type GameId, type ResourceQuality } from "../../data/games";
+import { useNotificationStore } from "../../store/notifications";
 import { useGamesStore } from "../../store/gamesStore";
 import { useCustomizationStore } from "../../store/customizationStore";
 import { openExternal } from "../../lib/tauri";
 import { fmtBytes } from "../../lib/format";
+import type { TKey } from "../../lib/i18n";
+import { useT } from "../../lib/useT";
 import {
   checkLinkedInstall,
-  LINKED_UNCHECKED_TEXT,
+  linkedUncheckedText,
   useResourceQuality,
 } from "../../lib/gameActions";
-import { SegmentedControl } from "./SegmentedControl";
+import { SegmentedControl, Toggle, ActionButton } from "./controls";
 import { Hint } from "./Tooltip";
-import { Toggle } from "./Toggle";
-import { ActionButton } from "./ActionButton";
 import { peekInstall, preloadInstall, refreshInstall, type InstallSnapshot } from "../../lib/installPreload";
 import {
   getDiskSpace,
@@ -39,14 +38,12 @@ import {
   startDownload,
   locateGameInstall,
   detectDefaultGameInstall,
-  getSteamInstall,
   DEFAULT_VOICE_PACK,
   DEFAULT_RESOURCE_QUALITY,
   RESOURCE_QUALITY_OPTIONS,
   VOICE_PACK_OPTIONS,
   type ContentPack,
   type InstallPreview,
-  type ResourceQuality,
   type VoicePackLanguage,
 } from "../../lib/ipc";
 
@@ -57,10 +54,10 @@ const CARD = "rounded-ui border border-white/[0.08] bg-white/[0.04]";
 const TEXT_LINK =
   "flex items-center gap-[5px] text-white/75 transition-colors duration-150 hover:text-white disabled:cursor-not-allowed disabled:opacity-50";
 
-const QUALITY_DESCRIPTIONS: Record<ResourceQuality, string> = {
-  sd: "Lower-resolution textures. Smallest install.",
-  hd: "Balanced sharpness and size.",
-  uhd: "Highest-resolution textures.",
+const QUALITY_DESCRIPTIONS: Record<ResourceQuality, TKey> = {
+  sd: "install.quality.sd",
+  hd: "install.quality.hd",
+  uhd: "install.quality.uhd",
 };
 
 function folderNameFor(name: string): string {
@@ -95,10 +92,10 @@ function fmtSize(bytes: number | null, approximate: boolean): string {
   return `${approximate ? "~" : ""}${fmtBytes(bytes)}`;
 }
 
-function previewReason(error: string | null): string {
+function previewReason(error: string | null, t: ReturnType<typeof useT>): string {
   if (error && error.length <= 100 && /[.!]$/.test(error) && !/https?:|[{}]|HTTP|status|error/i.test(error))
     return error;
-  return "Could not reach the update server.";
+  return t("install.details.unreachable");
 }
 
 function Skeleton({ width }: { width: number }) {
@@ -174,11 +171,10 @@ function StepRow({
 }
 
 export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose: () => void }) {
+  const t = useT();
   const game = gameById(gameId);
   const managed = isManaged(gameId);
   const push = useNotificationStore((s) => s.push);
-  // Everything the dialog shows is normally loaded before it opens (see lib/installPreload), so it starts at its
-  // final size. The fallback effect below only runs when that wait timed out.
   const [seed] = useState(() => (managed ? peekInstall(gameId) : null));
   const [path, setPath] = useState(seed?.path ?? "");
   const [maxRootLength, setMaxRootLength] = useState(seed?.maxRootLength ?? 0);
@@ -202,7 +198,7 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
   const setVoicePack = useCustomizationStore((s) => s.setVoicePack);
   const resourceQuality = useResourceQuality(
     gameId,
-    { installed: false, steamCopy: false, jobActive: false },
+    { installed: false, jobActive: false },
     { sizes: true, initial: seed?.quality ?? null },
   );
   const [qualityBusy, setQualityBusy] = useState(false);
@@ -228,6 +224,19 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
   }, []);
 
   useEffect(() => {
+    if (!seed?.path) return;
+    let alive = true;
+    void getDiskSpace(seed.path).then((disk) => {
+      if (!alive || !disk) return;
+      setFree(disk.free);
+      setTotalSpace(disk.total);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [seed]);
+
+  useEffect(() => {
     if (!managed || seed) return;
     let alive = true;
     preloadInstall(gameId)
@@ -244,7 +253,6 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
     };
   }, [gameId, managed, seed, applySnapshot]);
 
-  // Changing voice, quality or packs makes the cached answer out of date; fetch a fresh one for the next open.
   useEffect(
     () => () => {
       if (changed.current) refreshInstall(gameId);
@@ -252,8 +260,6 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
     [gameId],
   );
 
-  // A refresh keeps the numbers on screen (dimmed) until the new ones arrive, so nothing collapses into
-  // placeholders. Only a retry after a failure starts from blank.
   const loadPreview = useCallback(
     async (fromBlank = false) => {
       const token = ++previewRequest.current;
@@ -297,8 +303,6 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
     if (!packsRef.current) await loadPacks();
   };
 
-  // Toggles apply instantly and are saved one after another, so flipping several quickly never blocks or
-  // dims the list. The size summary refreshes once, after the last save.
   const togglePack = (tag: string, on: boolean) => {
     const current = packsRef.current;
     if (!current) return;
@@ -353,8 +357,9 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
     setStarting(true);
     void startDownload(path, gameId, () =>
       push({
-        title: `Installing ${game.name}`,
-        text: "Added to the download queue. Track it on the Downloads page.",
+        type: "progress",
+        title: t("install.toast.installingTitle", { game: game.name }),
+        text: t("install.toast.installingText"),
       }),
     );
     onClose();
@@ -364,12 +369,11 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
     void useCustomizationStore.getState().hydrate();
     const installed = useGamesStore.getState().installed;
     if (!installed.includes(gameId)) useGamesStore.getState().setInstalled([...installed, gameId]);
-    const linked = managed && !(await getSteamInstall(gameId)).isSteamInstall;
-    const checking = linked && checkLinkedInstall(gameId);
+    const checking = managed && checkLinkedInstall(gameId);
     push({
       type: "success",
       title,
-      text: checking ? text : linked ? LINKED_UNCHECKED_TEXT : "Linked your existing installation.",
+      text: checking ? text : managed ? linkedUncheckedText() : t("install.toast.linked"),
     });
     onClose();
   };
@@ -378,11 +382,11 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
     const r = await locateGameInstall(gameId);
     if (r.ok) {
       await linkGame(
-        `${game.name} located`,
-        "Verifying your installation. Track it on the Downloads page.",
+        t("install.toast.locatedTitle", { game: game.name }),
+        t("install.toast.locatedText"),
       );
     } else if (r.error) {
-      push({ type: "warning", title: `Couldn't locate ${game.name}`, text: r.error });
+      push({ type: "warning", title: t("install.toast.locateFailed", { game: game.name }), text: r.error });
     }
   };
 
@@ -393,11 +397,11 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
       const r = await detectDefaultGameInstall(gameId);
       if (r.ok) {
         await linkGame(
-          `${game.name} found`,
-          "Found it at Peebify's default install location. Verifying it now.",
+          t("install.toast.foundTitle", { game: game.name }),
+          t("install.toast.foundText"),
         );
       } else if (r.error) {
-        push({ type: "warning", title: `Couldn't find ${game.name}`, text: r.error });
+        push({ type: "warning", title: t("install.toast.findFailed", { game: game.name }), text: r.error });
       }
     } finally {
       setDetecting(false);
@@ -405,8 +409,8 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
   };
 
   const betaNote = (note: string) => (
-    <div className="flex items-start gap-[9px] rounded-ui border border-(--color-warning,#fcd34d)/30 bg-(--color-warning,#fcd34d)/[0.08] px-[12px] py-[10px]">
-      <AlertTriangle size={15} className="mt-[2px] shrink-0 text-(--color-warning,#fcd34d)" />
+    <div className="flex items-start gap-[9px] rounded-ui border border-warning/30 bg-warning/[0.08] px-[12px] py-[10px]">
+      <AlertTriangle size={15} className="mt-[2px] shrink-0 text-warning" />
       <p className="text-[12.5px] leading-[1.5] text-white/85">{note}</p>
     </div>
   );
@@ -422,8 +426,10 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
   const drive = driveOf(path);
   const driveText =
     free > 0 && totalSpace > 0
-      ? `${drive ? `${drive} · ` : ""}${fmtBytes(free)} free of ${fmtBytes(totalSpace)}`
-      : "Checking drive space…";
+      ? drive
+        ? t("install.drive.freeOnDrive", { drive, free: fmtBytes(free), total: fmtBytes(totalSpace) })
+        : t("install.drive.free", { free: fmtBytes(free), total: fmtBytes(totalSpace) })
+      : t("install.drive.checking");
 
   const identity = (
     <div className="relative flex flex-col gap-[10px]">
@@ -436,13 +442,13 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
         <div className="font-display text-[19px] font-semibold leading-[1.2]">{game.name}</div>
         <div className="mt-[3px] text-[12px] text-white/60">
           {!managed ? (
-            "Distributed through Steam"
+            t("install.distributedSteam")
           ) : preview?.version ? (
-            `Version ${preview.version}`
+            t("install.version", { version: preview.version })
           ) : summaryPending ? (
             <Skeleton width={72} />
           ) : (
-            "Version unavailable"
+            t("install.versionUnavailable")
           )}
         </div>
       </div>
@@ -472,25 +478,25 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
           className={`relative flex flex-col gap-[9px] border-t border-white/[0.12] pt-[14px] text-[12.5px] tabular-nums transition-opacity duration-150 ${refreshing ? "opacity-60" : ""}`}
         >
           <SummaryLine
-            label="Download"
+            label={t("install.summary.download")}
             value={preview ? fmtSize(preview.downloadBytes, preview.approximate) : "—"}
             pending={summaryPending}
           />
           {(!preview || preview.installBytes !== null) && (
             <SummaryLine
-              label="Size on disk"
+              label={t("install.summary.sizeOnDisk")}
               value={preview ? fmtSize(preview.installBytes, preview.approximate) : "—"}
               pending={summaryPending}
             />
           )}
           <SummaryLine
-            label="Free after install"
+            label={t("install.summary.freeAfter")}
             value={freeAfter !== null ? fmtBytes(freeAfter) : "—"}
             pending={summaryPending}
           />
           <SpaceBar usedPct={usedPct} installPct={installPct} />
           <div
-            className={`flex items-center gap-[6px] text-[11.5px] ${shortOnSpace ? "text-(--color-warning,#fcd34d)" : "text-white/50"}`}
+            className={`flex items-center gap-[6px] text-[11.5px] ${shortOnSpace ? "text-warning" : "text-white/50"}`}
           >
             <HardDrive size={12} className="shrink-0" />
             <span className="min-w-0">{driveText}</span>
@@ -506,16 +512,18 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
       <div className="flex">
         {sidebar}
         <div className="flex min-w-0 flex-1 flex-col gap-[16px] p-[22px]">
-          <h2 className="text-[16px] font-semibold leading-[1.25]">Install {game.name}</h2>
+          <h2 className="text-[16px] font-semibold leading-[1.25]">
+          {t("install.title", { game: game.name })}
+        </h2>
           <p className="text-[13px] leading-[1.55] text-white/65">
             {game.betaNote ??
-              `${game.name} is installed and updated through Steam. Install it there, then point Peebify at it.`}
+              t("install.steam.body", { game: game.name })}
           </p>
           <div className="flex flex-col gap-[8px]">
             <StepRow
               step={1}
-              title="Install in Steam"
-              text={`Find ${game.name} in your Steam library and let it finish installing.`}
+              title={t("install.steam.stepInstall")}
+              text={t("install.steam.stepInstallText", { game: game.name })}
               onClick={
                 steamUrl
                   ? () => {
@@ -526,14 +534,14 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
             />
             <StepRow
               step={2}
-              title="Locate install"
-              text="Pick the installed folder so Peebify can launch and update it."
+              title={t("install.locateInstall")}
+              text={t("install.steam.stepLocateText")}
             />
           </div>
           <div className="mt-[4px] flex justify-end gap-[10px]">
-            <ActionButton onClick={onClose}>Cancel</ActionButton>
+            <ActionButton onClick={onClose}>{t("common.cancel")}</ActionButton>
             <ActionButton variant="accent" onClick={() => void locate()}>
-              Locate install
+              {t("install.locateInstall")}
             </ActionButton>
           </div>
         </div>
@@ -545,16 +553,18 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
     <div className="flex">
       {sidebar}
       <div className="flex min-w-0 flex-1 flex-col gap-[16px] p-[22px]">
-        <h2 className="text-[16px] font-semibold leading-[1.25]">Install {game.name}</h2>
+        <h2 className="text-[16px] font-semibold leading-[1.25]">
+          {t("install.title", { game: game.name })}
+        </h2>
 
         <div className="flex flex-col gap-[7px]">
-          <div className={SECTION_LABEL}>Install folder</div>
+          <div className={SECTION_LABEL}>{t("install.folder.label")}</div>
           <div className="flex items-center gap-[8px]">
             <Hint tip={path || undefined} className="flex min-w-0 flex-1">
               <div className="flex min-w-0 flex-1 items-center rounded-ui border border-white/[0.08] bg-black/30 px-[12px] py-[9px] text-[12.5px]">
                 {loading || !path ? (
                   <span className="truncate text-white/80">
-                    {loading ? "Resolving default location…" : "No location selected"}
+                    {loading ? t("install.folder.resolving") : t("install.folder.none")}
                   </span>
                 ) : (
                   <>
@@ -568,17 +578,17 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
               onClick={() => void pickFolder()}
               className={`flex shrink-0 items-center gap-[7px] px-[12px] py-[9px] text-[12.5px] font-medium transition duration-150 active:scale-[0.97] hover:bg-white/[0.08] ${CARD}`}
             >
-              <FolderOpen size={14} /> Browse
+              <FolderOpen size={14} /> {t("install.folder.browse")}
             </button>
           </div>
           <div className="flex flex-wrap items-center gap-x-[14px] gap-y-[4px] text-[12px] text-white/50">
-            <span>Already installed?</span>
+            <span>{t("install.folder.alreadyInstalled")}</span>
             <button onClick={() => void locate()} className={TEXT_LINK}>
-              <FolderSearch size={13} /> Locate existing
+              <FolderSearch size={13} /> {t("install.folder.locateExisting")}
             </button>
             <button disabled={detecting} onClick={() => void detectDefault()} className={TEXT_LINK}>
               {detecting ? <Loader2 size={13} className="animate-spin" /> : <ScanSearch size={13} />}
-              Check default location
+              {t("install.folder.checkDefault")}
             </button>
           </div>
         </div>
@@ -587,8 +597,8 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
 
         {game.resourceQualityChoice && (
           <div className="flex flex-col gap-[7px]">
-            <div className={SECTION_LABEL}>Resource quality</div>
-            <div role="radiogroup" aria-label="Resource quality" className="grid grid-cols-3 gap-[8px]">
+            <div className={SECTION_LABEL}>{t("install.quality.title")}</div>
+            <div role="radiogroup" aria-label={t("install.quality.title")} className="grid grid-cols-3 gap-[8px]">
               {RESOURCE_QUALITY_OPTIONS.map(({ value, label }) => {
                 const active = value === resourceQuality.quality;
                 const size = resourceQuality.sizes?.[value];
@@ -611,12 +621,12 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
                       <span className="text-[14px] font-semibold">{label}</span>
                       {value === DEFAULT_RESOURCE_QUALITY && (
                         <span className="rounded-full bg-white/[0.12] px-[7px] py-px text-[10.5px] font-medium text-white/80">
-                          Default
+                          {t("install.quality.default")}
                         </span>
                       )}
                     </div>
                     <div className="min-h-[34px] text-[11.5px] leading-[1.4] text-white/55">
-                      {QUALITY_DESCRIPTIONS[value]}
+                      {t(QUALITY_DESCRIPTIONS[value])}
                     </div>
                     {size || resourceQuality.loaded ? (
                       <>
@@ -635,7 +645,7 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
                           />
                         </div>
                         <div className="mt-[3px] text-[11px] tabular-nums text-white/50">
-                          {size ? `${fmtBytes(size.downloadBytes)} download` : "—"}
+                          {size ? t("install.quality.download", { size: fmtBytes(size.downloadBytes) }) : "—"}
                         </div>
                       </>
                     ) : (
@@ -650,7 +660,7 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
               })}
             </div>
             <div className="text-[11.5px] leading-[1.5] text-white/50">
-              Higher quality looks sharper and needs more disk space. You can switch later in settings.
+              {t("install.quality.note")}
             </div>
           </div>
         )}
@@ -658,11 +668,11 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
         {game.voicePackChoice && (
           <div className={`flex items-center justify-between gap-[12px] px-[12px] py-[9px] ${CARD}`}>
             <div>
-              <div className="text-[12.5px] font-medium">Voice pack</div>
-              <div className="text-[11.5px] text-white/50">The language used for audio</div>
+              <div className="text-[12.5px] font-medium">{t("install.voice.title")}</div>
+              <div className="text-[11.5px] text-white/50">{t("install.voice.hint")}</div>
             </div>
             <SegmentedControl
-              ariaLabel="Voice-over language"
+              ariaLabel={t("install.voice.aria")}
               options={VOICE_PACK_OPTIONS}
               value={voice}
               onChange={(v) => void pickVoice(v as VoicePackLanguage)}
@@ -673,8 +683,8 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
         {packs && packs.length > 0 && (
           <div className="flex flex-col gap-[7px]">
             <div className="flex items-baseline justify-between">
-              <span className={SECTION_LABEL}>Voice packs</span>
-              <span className="text-[11.5px] text-white/50">Change them later</span>
+              <span className={SECTION_LABEL}>{t("common.voicePacks")}</span>
+              <span className="text-[11.5px] text-white/50">{t("install.voice.changeLater")}</span>
             </div>
             <div className="grid grid-cols-2 gap-[8px]">
               {packs.map((pack) => (
@@ -701,8 +711,8 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
         {game.contentPackChoice && !packs && !packsFailed && (
           <div className="flex flex-col gap-[7px]">
             <div className="flex items-baseline justify-between">
-              <span className={SECTION_LABEL}>Voice packs</span>
-              <span className="text-[11.5px] text-white/50">Change them later</span>
+              <span className={SECTION_LABEL}>{t("common.voicePacks")}</span>
+              <span className="text-[11.5px] text-white/50">{t("install.voice.changeLater")}</span>
             </div>
             <div className="grid grid-cols-2 gap-[8px]">
               {[0, 1, 2, 3].map((i) => (
@@ -713,12 +723,12 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
         )}
         {!packs && packsFailed && (
           <div className={`flex items-center justify-between gap-[10px] px-[12px] py-[8px] ${CARD}`}>
-            <span className="text-[12.5px] text-white/50">Couldn't load the voice pack list.</span>
+            <span className="text-[12.5px] text-white/50">{t("install.voice.loadFailed")}</span>
             <button
               onClick={() => void loadPacks()}
               className="shrink-0 text-[12.5px] font-medium text-white/60 underline-offset-2 transition-colors duration-150 hover:text-white hover:underline"
             >
-              Retry
+              {t("common.retry")}
             </button>
           </div>
         )}
@@ -732,50 +742,51 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
           <div className="text-[11.5px] leading-[1.5] text-white/55">
             {previewFailed ? (
               <>
-                Size details unavailable. {previewReason(previewError)}{" "}
+                {t("install.details.unavailable", { reason: previewReason(previewError, t) })}{" "}
                 <button
                   onClick={() => void retryDetails()}
                   className="font-medium text-white/60 underline-offset-2 transition-colors duration-150 hover:text-white hover:underline"
                 >
-                  Retry
+                  {t("common.retry")}
                 </button>
               </>
             ) : (
-              `Includes ${includes}`
+              t("install.details.includes", { parts: includes })
             )}
           </div>
         )}
 
         {shortOnSpace && (
-          <div className="flex items-start gap-[9px] rounded-ui border border-(--color-warning,#fcd34d)/30 bg-(--color-warning,#fcd34d)/[0.08] px-[12px] py-[10px]">
-            <AlertTriangle size={15} className="mt-[1px] shrink-0 text-(--color-warning,#fcd34d)" />
+          <div className="flex items-start gap-[9px] rounded-ui border border-warning/30 bg-warning/[0.08] px-[12px] py-[10px]">
+            <AlertTriangle size={15} className="mt-[1px] shrink-0 text-warning" />
             <p className="text-[12.5px] leading-[1.5] text-white/85">
-              Needs about {fmtBytes(requiredBytes)} free while installing. Only {fmtBytes(free)} is free
-              on this drive. Pick another location or free up space first.
+              {t("install.shortOnSpace", { required: fmtBytes(requiredBytes), free: fmtBytes(free) })}
             </p>
           </div>
         )}
         {tooDeep && (
-          <div className="flex items-start gap-[9px] rounded-ui border border-(--color-danger,#f87171)/30 bg-(--color-danger,#f87171)/[0.08] px-[12px] py-[10px]">
-            <AlertTriangle size={15} className="mt-[1px] shrink-0 text-(--color-danger-soft,#fca5a5)" />
+          <div className="flex items-start gap-[9px] rounded-ui border border-danger/30 bg-danger/[0.08] px-[12px] py-[10px]">
+            <AlertTriangle size={15} className="mt-[1px] shrink-0 text-danger-soft" />
             <p className="text-[12.5px] leading-[1.5] text-white/85">
-              This folder is {rootLength - maxRootLength} character
-              {rootLength - maxRootLength === 1 ? "" : "s"} too deep for {game.name}. Windows won't let
-              the game reach its own files from here, so its updates would fail after installing. Pick
-              a folder of at most {maxRootLength} characters. One directly off {"C:\\"} works.
+              {t("install.tooDeep", {
+                count: rootLength - maxRootLength,
+                game: game.name,
+                max: maxRootLength,
+                root: "C:\\",
+              })}
             </p>
           </div>
         )}
 
         <div className="flex justify-end gap-[10px]">
-          <ActionButton onClick={onClose}>Cancel</ActionButton>
+          <ActionButton onClick={onClose}>{t("common.cancel")}</ActionButton>
           <ActionButton
             variant="accent"
             disabled={!path || loading || starting || tooDeep}
             onClick={begin}
             icon={starting ? <Loader2 size={14} className="animate-spin" /> : undefined}
           >
-            Install
+            {t("common.install")}
           </ActionButton>
         </div>
       </div>

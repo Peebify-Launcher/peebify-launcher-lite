@@ -1,17 +1,27 @@
-// ------------ Brown Dust II Package ------------
+// ------------ Brown Dust II ------------
 // Brown Dust II ships as one big .tied.dat package instead of a list of files. This file works out where to get it, which version it is, and how to unpack it.
-// It also keeps a manifest of the files it installed so updates and repairs know what belongs to the game.
+// The files of an install come from the package as it unpacks, so the install record lists them for updates and repairs; it also holds the install preview and the check of an install Peebify did not make.
+use std::collections::HashSet;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
+use futures::future::BoxFuture;
+use parking_lot::Mutex;
+use peebify_transfer::fsx::ContentHasher;
+use peebify_transfer::Sealed;
 use serde_json::{json, Value};
 
-use super::fs_util::{finalize_replace, fmt_io, manifest_key, safe_join};
-use super::http;
+use super::engine::{package_preview, JobCore, JobKind, Preview};
+use super::extract::Extracted;
+use super::fs_util::{safe_join, CRC32_PREFIX};
+use super::game_manager::local_game_version_at;
+use super::game_profiles::{self, profile_str, required_str};
+use super::manifest::{json_u64, origin_of, Container, Cx, Entry, Hash, Manifest, Policy, Publisher, Shape, Unpacked, Unpacker};
+use super::{http, validator};
 
 pub const SETTINGS_FILE: &str = "launcher.settings";
-pub const MANIFEST_FILE: &str = "peebify_bd2_files.json";
 pub const PACKAGE_SUFFIX: &str = ".tied.dat";
 
 const LOCAL_FILE_SIG: u32 = 0x0403_4b50;
@@ -32,18 +42,6 @@ fn le_u16(bytes: &[u8], at: usize) -> u16 {
 
 fn le_u32(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
-}
-
-fn number(value: &Value, key: &str) -> u64 {
-    match value.get(key) {
-        Some(Value::Number(n)) => n.as_u64().unwrap_or(0),
-        Some(Value::String(s)) => s.trim().parse().unwrap_or(0),
-        _ => 0,
-    }
-}
-
-fn text<'a>(value: &'a Value, key: &str) -> &'a str {
-    value.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
 fn merge_into(base: &mut Value, overlay: Value) {
@@ -67,25 +65,9 @@ fn merge_into(base: &mut Value, overlay: Value) {
 
 // ------------ Package Lookup ------------
 // Asks Neowiz's starter config for this game's download manifest and turns it into the package URL, size and checksum to download.
-fn starter_config_url(profile: &Value) -> Result<&str, String> {
-    profile
-        .get("bdStarterConfigUrl")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "profile is missing 'bdStarterConfigUrl' for the Brown Dust II API".to_string())
-}
-
-fn game_key(profile: &Value) -> Result<&str, String> {
-    profile
-        .get("bdGameKey")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "profile is missing 'bdGameKey' for the Brown Dust II API".to_string())
-}
-
 pub async fn fetch_game_manifest(profile: &Value) -> Result<Value, String> {
-    let starter = http::get_json(starter_config_url(profile)?).await?;
-    let key = game_key(profile)?;
+    let starter = http::get_json(required_str(profile, "bdStarterConfigUrl")?).await?;
+    let key = required_str(profile, "bdGameKey")?;
 
     let entry = starter
         .get("game_config_urls")
@@ -146,11 +128,11 @@ pub async fn fetch_package(profile: &Value) -> Result<Package, String> {
         .filter(|v| v.is_object())
         .ok_or("The Brown Dust II manifest carries no 'last_file' package entry.")?;
 
-    let relative = text(last, "file");
+    let relative = profile_str(last, "file");
     if relative.is_empty() {
         return Err("The Brown Dust II manifest's 'last_file' has no file name.".to_string());
     }
-    let base = text(&manifest, "download_url");
+    let base = profile_str(&manifest, "download_url");
     if base.is_empty() {
         return Err("The Brown Dust II manifest has no 'download_url'.".to_string());
     }
@@ -164,14 +146,14 @@ pub async fn fetch_package(profile: &Value) -> Result<Package, String> {
 
     let version = manifest_version(&manifest)?;
 
-    let tied_crc = u32::from_str_radix(text(last, "tied_crc").trim(), 16).map_err(|_| {
+    let tied_crc = u32::from_str_radix(profile_str(last, "tied_crc"), 16).map_err(|_| {
         format!(
             "The Brown Dust II manifest's tied_crc ('{}') is not a hex checksum.",
-            text(last, "tied_crc")
+            profile_str(last, "tied_crc")
         )
     })?;
 
-    let listed_bytes = number(last, "file_size");
+    let listed_bytes = json_u64(last.get("file_size")).unwrap_or(0);
     let download_bytes = match http::content_length(&url).await {
         Some(bytes) if bytes > 0 => bytes,
         _ => {
@@ -191,23 +173,19 @@ pub async fn fetch_package(profile: &Value) -> Result<Package, String> {
         url,
         file_name,
         download_bytes,
-        install_bytes: number(last, "unziped_size"),
+        install_bytes: json_u64(last.get("unziped_size")).unwrap_or(0),
         tied_crc,
         settings: manifest.get("settings").cloned().unwrap_or(Value::Null),
     })
 }
 
-pub async fn fetch_version(profile: &Value) -> Result<String, String> {
-    manifest_version(&fetch_game_manifest(profile).await?)
-}
-
 fn manifest_version(manifest: &Value) -> Result<String, String> {
     let from_file = manifest
         .get("last_file")
-        .map(|last| text(last, "version"))
+        .map(|last| profile_str(last, "version"))
         .unwrap_or_default();
     let version = if from_file.is_empty() {
-        text(manifest, "last_version")
+        profile_str(manifest, "last_version")
     } else {
         from_file
     };
@@ -240,82 +218,11 @@ fn fallback_download_bytes(listed_bytes: u64) -> u64 {
     }
 }
 
-// ------------ Install Manifest ------------
-// The record of every file we unpacked, plus helpers for finding, reusing and cleaning up packages left on disk.
-#[derive(Clone, Debug)]
-pub struct FileEntry {
-    pub path: String,
-    pub size: u64,
-    pub crc: u32,
-}
-
-pub struct Manifest {
-    pub version: String,
-    pub files: Vec<FileEntry>,
-}
-
-pub fn write_manifest(
-    install_path: &Path,
-    version: &str,
-    files: &[FileEntry],
-) -> Result<(), String> {
-    let payload = json!({
-        "version": version,
-        "files": files
-            .iter()
-            .map(|f| json!({ "path": f.path, "size": f.size, "crc": format!("{:08X}", f.crc) }))
-            .collect::<Vec<Value>>(),
-    });
-    let text = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
-    let path = install_path.join(MANIFEST_FILE);
-    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
-    std::fs::write(&tmp, text)
-        .map_err(|e| fmt_io(&format!("Could not write {}", tmp.display()), &e))?;
-    finalize_replace(&tmp, &path)
-}
-
-pub fn load_manifest(install_path: &Path) -> Option<Manifest> {
-    let path = install_path.join(MANIFEST_FILE);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(e) => {
-            log::warn!("Could not read the Brown Dust II manifest {}: {e}", path.display());
-            return None;
-        }
-    };
-    let doc: Value = match serde_json::from_str(&text) {
-        Ok(doc) => doc,
-        Err(e) => {
-            log::warn!("The Brown Dust II manifest {} does not parse: {e}", path.display());
-            return None;
-        }
-    };
-    let files = doc
-        .get("files")
-        .and_then(Value::as_array)?
-        .iter()
-        .filter_map(|f| {
-            let path = f.get("path").and_then(Value::as_str)?.to_string();
-            if path.is_empty() {
-                return None;
-            }
-            Some(FileEntry {
-                path,
-                size: number(f, "size"),
-                crc: u32::from_str_radix(f.get("crc").and_then(Value::as_str).unwrap_or(""), 16)
-                    .unwrap_or(0),
-            })
-        })
-        .collect();
-    Some(Manifest {
-        version: doc
-            .get("version")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        files,
-    })
+// ------------ Installed Version ------------
+// The install record names the version. An install the official starter made names it by the package it left behind.
+fn package_version(name: &str) -> Option<&str> {
+    name.strip_suffix(PACKAGE_SUFFIX)
+        .filter(|version| !version.is_empty() && version.chars().all(|c| c.is_ascii_digit()))
 }
 
 fn version_key(version: &str) -> (usize, &str) {
@@ -323,63 +230,17 @@ fn version_key(version: &str) -> (usize, &str) {
     (trimmed.len(), trimmed)
 }
 
-fn packages_on_disk(install_path: &Path) -> Vec<(String, PathBuf)> {
-    let Ok(entries) = std::fs::read_dir(install_path) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let version = name.strip_suffix(PACKAGE_SUFFIX)?.to_string();
-            if version.is_empty() || !version.chars().all(|c| c.is_ascii_digit()) {
-                return None;
-            }
-            Some((version, entry.path()))
-        })
-        .collect()
-}
-
-pub fn package_on_disk(install_path: &Path) -> Option<(String, PathBuf)> {
-    packages_on_disk(install_path)
-        .into_iter()
-        .max_by(|a, b| version_key(&a.0).cmp(&version_key(&b.0)))
-}
-
 pub fn installed_version(install_path: &Path) -> Option<String> {
-    if let Some(manifest) = load_manifest(install_path) {
-        if !manifest.version.is_empty() {
-            return Some(manifest.version);
-        }
+    if let Some(recorded) = validator::Record::version_at(install_path) {
+        return Some(recorded);
     }
-    if install_path
-        .join(super::download_engine::INSTALL_MARKER_FILE)
-        .exists()
-    {
+    if install_path.join(validator::INSTALL_MARKER_FILE).exists() {
         return None;
     }
-    package_on_disk(install_path).map(|(version, _)| version)
-}
-
-pub fn reusable_package(install_path: &Path, file_name: &str, download_bytes: u64) -> Option<PathBuf> {
-    let path = safe_join(install_path, file_name).ok()?;
-    let meta = std::fs::metadata(&path).ok()?;
-    (download_bytes > 0 && meta.is_file() && meta.len() == download_bytes).then_some(path)
-}
-
-pub fn remove_stale_packages(install_path: &Path, current_version: &str) -> usize {
-    let current = version_key(current_version);
-    let mut removed = 0usize;
-    for (version, path) in packages_on_disk(install_path) {
-        if version_key(&version) >= current {
-            continue;
-        }
-        match std::fs::remove_file(&path) {
-            Ok(()) => removed += 1,
-            Err(e) => log::warn!("Could not remove the old package {}: {e}", path.display()),
-        }
-    }
-    removed
+    std::fs::read_dir(install_path)
+        .ok()?
+        .filter_map(|entry| package_version(&entry.ok()?.file_name().to_string_lossy()).map(str::to_string))
+        .max_by(|a, b| version_key(a).cmp(&version_key(b)))
 }
 
 pub fn write_launcher_settings(install_path: &Path, settings: &Value) -> Result<(), String> {
@@ -392,15 +253,11 @@ pub fn write_launcher_settings(install_path: &Path, settings: &Value) -> Result<
     super::fs_util::write_atomic(&install_path.join(SETTINGS_FILE), text.as_bytes())
 }
 
-pub fn data_dir(install_path: &Path, executable_name: &str) -> PathBuf {
-    install_path.join(format!("{}_Data", executable_name.trim_end_matches(".exe")))
-}
-
 // ------------ Package Extraction ------------
-// Streams the package straight into the game folder while checking its CRC, then removes files an update replaced and verifies what is on disk.
+// Streams the package straight into the game folder while checking its CRC.
 struct Counting<R: Read> {
     inner: R,
-    hasher: crc32fast::Hasher,
+    hasher: ContentHasher,
     total: u64,
 }
 
@@ -413,6 +270,10 @@ impl<R: Read> Read for Counting<R> {
         }
         Ok(read)
     }
+}
+
+fn crc_of(hasher: ContentHasher) -> u32 {
+    hasher.finish().strip_prefix(CRC32_PREFIX).and_then(|crc| crc.parse().ok()).unwrap_or_default()
 }
 
 fn open_outer_stream(package: &Path) -> Result<(Box<dyn Read>, String), String> {
@@ -486,12 +347,12 @@ fn skip_entry_data(entry: &mut impl Read, name: &str) -> Result<(), String> {
 pub fn extract_package(
     package: &Path,
     install_path: &Path,
-    wanted: Option<&std::collections::HashSet<String>>,
+    wanted: Option<&HashSet<String>>,
     expect_crc: u32,
     expect_bytes: u64,
     cancel: &AtomicBool,
     mut on_progress: impl FnMut(u64),
-) -> Result<Vec<FileEntry>, String> {
+) -> Result<Vec<Entry>, String> {
     let (stream, inner_name) = open_outer_stream(package)?;
     log::info!(
         "Brown Dust II: unpacking {inner_name} out of {}",
@@ -502,12 +363,12 @@ pub fn extract_package(
         COPY_BUFFER,
         Counting {
             inner: stream,
-            hasher: crc32fast::Hasher::new(),
+            hasher: ContentHasher::for_expected(CRC32_PREFIX),
             total: 0,
         },
     );
 
-    let mut files: Vec<FileEntry> = Vec::new();
+    let mut files: Vec<Entry> = Vec::new();
     let mut buffer = vec![0u8; COPY_BUFFER];
     let mut written: u64 = 0;
     let mut next_tick: u64 = PROGRESS_STEP;
@@ -607,7 +468,7 @@ pub fn extract_package(
             Box::new(std::io::sink())
         };
 
-        let mut hasher = crc32fast::Hasher::new();
+        let mut hasher = ContentHasher::for_expected(CRC32_PREFIX);
         let mut remaining = uncompressed as u64;
         while remaining > 0 {
             if cancel.load(Ordering::SeqCst) {
@@ -632,18 +493,14 @@ pub fn extract_package(
         sink.flush()
             .map_err(|e| format!("Could not finish writing {name}: {e}"))?;
 
-        let actual = hasher.finalize();
+        let actual = crc_of(hasher);
         if actual != crc {
             return Err(format!(
                 "{name} failed its checksum after unpacking (expected {crc:08X}, got {actual:08X}). {DAMAGED}"
             ));
         }
 
-        files.push(FileEntry {
-            path: name,
-            size: uncompressed as u64,
-            crc,
-        });
+        files.push(Entry::new(name, uncompressed as u64, Hash::Crc32(crc), ""));
     }
 
     std::io::copy(&mut reader, &mut std::io::sink())
@@ -654,7 +511,7 @@ pub fn extract_package(
 
     let counting = reader.into_inner();
     let stream_bytes = counting.total;
-    let stream_crc = counting.hasher.finalize();
+    let stream_crc = crc_of(counting.hasher);
 
     if expect_bytes > 0 && stream_bytes != expect_bytes {
         return Err(format!(
@@ -674,112 +531,152 @@ pub fn extract_package(
     Ok(files)
 }
 
-pub fn prune_replaced(install_path: &Path, previous: &[FileEntry], next: &[FileEntry]) -> usize {
-    if previous.is_empty() {
-        return 0;
-    }
-    let keep: std::collections::HashSet<String> = next.iter().map(|f| manifest_key(&f.path)).collect();
-    let mut removed = 0usize;
-    for entry in previous {
-        if keep.contains(&manifest_key(&entry.path)) {
-            continue;
-        }
-        let Ok(path) = safe_join(install_path, &entry.path) else {
-            continue;
-        };
-        if !path.is_file() {
-            continue;
-        }
-        match std::fs::remove_file(&path) {
-            Ok(()) => removed += 1,
-            Err(e) => log::warn!("Could not remove the replaced file {}: {e}", path.display()),
-        }
-    }
-    removed
+// ------------ Install Preview ------------
+// The size of the game package.
+pub(super) async fn preview(profile: &Value) -> Result<Preview, String> {
+    let package = fetch_package(profile).await?;
+    Ok(package_preview(package.version.clone(), package.download_bytes, package.install_bytes, 1))
 }
 
-pub fn verify_files(
-    install_path: &Path,
-    files: &[FileEntry],
-    cancel: &AtomicBool,
-    mut on_progress: impl FnMut(u64),
-) -> Result<Vec<FileEntry>, String> {
-    let mut broken: Vec<FileEntry> = Vec::new();
-    let mut buffer = vec![0u8; COPY_BUFFER];
+// ------------ Publisher ------------
+// An install fetches the package and unpacks it. A repair and a verify check the files the install record lists by CRC32,
+// and a repair fetches the package again for the bad ones. An install with no record, such as the official starter's, can
+// only be checked by its shape, and a repair of it unpacks the whole package over it to make the record.
+#[derive(Default)]
+pub(super) struct Bd2 {
+    settings: Mutex<Value>,
+}
 
-    for entry in files {
-        if cancel.load(Ordering::SeqCst) {
-            return Err("Verification cancelled".to_string());
-        }
-        let Ok(path) = safe_join(install_path, &entry.path) else {
-            continue;
-        };
-        let Ok(meta) = std::fs::metadata(&path) else {
-            broken.push(entry.clone());
-            on_progress(entry.size);
-            continue;
-        };
-        if meta.len() != entry.size {
-            broken.push(entry.clone());
-            on_progress(entry.size);
-            continue;
-        }
-
-        let Ok(handle) = std::fs::File::open(&path) else {
-            broken.push(entry.clone());
-            on_progress(entry.size);
-            continue;
-        };
-        let mut reader = BufReader::with_capacity(COPY_BUFFER, handle);
-        let mut hasher = crc32fast::Hasher::new();
-        let mut failed = false;
-        loop {
-            if cancel.load(Ordering::SeqCst) {
-                return Err("Verification cancelled".to_string());
+impl Publisher for Bd2 {
+    fn manifest<'a>(&'a self, cx: &'a Cx<'a>) -> BoxFuture<'a, Result<Manifest, String>> {
+        Box::pin(async move {
+            let record = validator::recorded(cx.dir).await;
+            if cx.purpose == JobKind::Verify {
+                return Ok(Manifest { version: record.version.clone(), entries: record.entries(), ..Default::default() });
             }
-            match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(read) => {
-                    hasher.update(&buffer[..read]);
-                    on_progress(read as u64);
-                }
-                Err(_) => {
-                    failed = true;
-                    break;
-                }
-            }
-        }
-        if failed || hasher.finalize() != entry.crc {
-            broken.push(entry.clone());
-        }
+            let package = fetch_package(cx.profile).await?;
+            *self.settings.lock() = package.settings;
+            let part = Entry::new(package.file_name.as_str(), package.download_bytes, Hash::None, package.url.as_str());
+            let recorded = record.entries();
+            let installed: u64 = recorded.iter().map(|f| f.size).sum();
+            let container = Container {
+                parts: vec![part],
+                unpack: Some(Arc::new(Tied { crc: package.tied_crc, bytes: package.install_bytes })),
+                room: package.install_bytes.saturating_sub(installed),
+            };
+            let entries = if cx.purpose == JobKind::Repair { recorded } else { Vec::new() };
+            Ok(Manifest { version: package.version, entries, mirrors: origin_of(&container.parts), containers: vec![container], ..Default::default() })
+        })
     }
 
-    Ok(broken)
+    fn after_seal<'a>(
+        &'a self,
+        _job: &'a Arc<JobCore>,
+        dir: &'a Path,
+        manifest: &'a Manifest,
+        sealed: &'a Sealed,
+    ) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            let settings = self.settings.lock().clone();
+            write_launcher_settings(dir, &settings)?;
+            validator::update_game_config_file(sealed, dir, &manifest.version).map(|()| true)
+        })
+    }
+
+    fn latest<'a>(&'a self, profile: &'a Value, _fresh: bool) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move { Ok(json!({ "version": manifest_version(&fetch_game_manifest(profile).await?)? })) })
+    }
+
+    fn preview<'a>(&'a self, profile: &'a Value, _quality: Option<&'a str>) -> BoxFuture<'a, Result<Preview, String>> {
+        Box::pin(preview(profile))
+    }
+
+    fn write_space(&self, download: u64, install: u64) -> (u64, f64) {
+        (download.saturating_add(install), 1.0)
+    }
+
+    fn installed_version(&self, dir: &Path) -> Option<String> {
+        local_game_version_at(dir).or_else(|| installed_version(dir))
+    }
+
+    fn policy(&self, dir: &Path) -> Policy {
+        Policy { checksums: true, records: true, partial_verify: validator::Record::load(dir).is_empty(), ..Policy::default() }
+    }
+
+    fn shape_check<'a>(&'a self, cx: &'a Cx<'a>) -> Option<BoxFuture<'a, Shape>> {
+        validator::Record::load(cx.dir).is_empty().then(|| -> BoxFuture<'a, Shape> {
+            Box::pin(async move {
+                let name = game_profiles::display_name(cx.profile);
+                let mut problems = Vec::new();
+                if !cx.dir.join(SETTINGS_FILE).is_file() {
+                    problems.push(format!(
+                        "{SETTINGS_FILE} is missing from {}, so {name} cannot tell which service to sign in to. Reinstall it.",
+                        cx.dir.display()
+                    ));
+                }
+                let published = match fetch_package(cx.profile).await {
+                    Ok(package) => Some((package.version, package.install_bytes)),
+                    Err(e) => {
+                        log::warn!("{name} verify: could not reach Neowiz for the published size ({e}); skipped the size check.");
+                        None
+                    }
+                };
+                let note = ". Peebify did not install this copy, so it has no per-file checksums for it. This checks the shape of the install rather than each file. Update or reinstall through Peebify once and every later check compares every file.";
+                Shape { problems, published, note: note.to_string() }
+            })
+        })
+    }
 }
 
-fn profile_str<'a>(profile: &'a Value, key: &str) -> &'a str {
-    profile.get(key).and_then(Value::as_str).unwrap_or_default()
+struct Tied {
+    crc: u32,
+    bytes: u64,
 }
 
-pub fn news_api(profile: &Value) -> &str {
-    profile_str(profile, "bdNewsApiUrl")
-}
+impl Unpacker for Tied {
+    fn is_package(&self, name: &str) -> bool {
+        package_version(name).is_some()
+    }
 
-pub fn news_site(profile: &Value) -> &str {
-    profile_str(profile, "bdNewsUrl")
+    fn unpack<'a>(
+        &'a self,
+        job: &'a Arc<JobCore>,
+        dir: &'a Path,
+        archive: &'a Path,
+        wanted: Option<&'a HashSet<String>>,
+    ) -> BoxFuture<'a, Result<Unpacked, String>> {
+        Box::pin(async move {
+            let name = game_profiles::display_name(job.profile());
+            let report = job.unpacking(archive, self.bytes, wanted.map_or(1, HashSet::len), format!("Unpacking {name}..."));
+            let (package, target, wanted, cancel) = (archive.to_path_buf(), dir.to_path_buf(), wanted.cloned(), Arc::clone(job.gate.flag()));
+            let (crc, bytes) = (self.crc, self.bytes);
+            let files = tauri::async_runtime::spawn_blocking(move || {
+                extract_package(&package, &target, wanted.as_ref(), crc, bytes, &cancel, |done| {
+                    report(if bytes > 0 { done as f64 / bytes as f64 * 100.0 } else { 0.0 });
+                })
+            })
+            .await
+            .map_err(|e| format!("{name} unpack task panicked: {e}"))?
+            .inspect_err(|e| {
+                if is_damaged_package_error(e) {
+                    match std::fs::remove_file(archive) {
+                        Ok(()) => log::warn!("{name}: removed the damaged package so the next attempt downloads it again."),
+                        Err(err) => log::warn!("{name}: could not remove the damaged package ({err})."),
+                    }
+                }
+            })?;
+            Ok(Unpacked { written: Extracted::files(dir, files.iter().map(|f| &*f.path)), files })
+        })
+    }
 }
-
-pub fn news_locale(profile: &Value) -> &str {
-    profile_str(profile, "bdNewsLocale")
-}
-
 
 // ------------ Tests ------------
-// Covers the manifest, package reuse and cleanup, and unpacking a real package when one is available.
+// Unpacking a package, the install's version and record, the leftover packages and the settings file.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use crate::backend::validator::{FileCheck, FileValidator};
+    use std::path::PathBuf;
 
     #[test]
     fn the_size_fallback_adds_the_zip_trailer_to_the_listed_size() {
@@ -788,9 +685,15 @@ mod tests {
     }
 
     fn crc_of(bytes: &[u8]) -> u32 {
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(bytes);
-        hasher.finalize()
+        crc32fast::hash(bytes)
+    }
+
+    fn broken(dir: &Path, files: &[Entry]) -> Vec<String> {
+        files
+            .iter()
+            .filter(|f| FileValidator::check(&dir.join(&*f.path), f.size, &f.hash.expected(), None, |_| {}) != Ok(FileCheck::Valid))
+            .map(|f| f.path.to_string())
+            .collect()
     }
 
     #[derive(Default)]
@@ -972,8 +875,10 @@ mod tests {
             b"unity scene payload"
         );
 
-        let broken = verify_files(out.path(), &files, &cancel, |_| {}).unwrap();
-        assert!(broken.is_empty(), "freshly unpacked files must verify");
+        assert!(broken(out.path(), &files).is_empty(), "freshly unpacked files must verify");
+        std::fs::write(out.path().join("UnityPlayer.dll"), b"engine payloaD").unwrap();
+        std::fs::remove_file(out.path().join("BrownDust II.exe")).unwrap();
+        assert_eq!(broken(out.path(), &files), ["BrownDust II.exe", "UnityPlayer.dll"], "a missing file and one of the same size");
     }
 
     #[test]
@@ -1156,143 +1061,18 @@ mod tests {
     }
 
     #[test]
-    fn verify_flags_a_file_that_changed_on_disk() {
-        let inner = inner_zip(&sample(), 0);
-        let package = wrap_as_package(&inner, "20260905000");
-        let src = Scratch::new("verify-src");
-        let out = Scratch::new("verify-out");
-        let archive = src.write("20260905000.tied.dat", &package);
-
-        let cancel = AtomicBool::new(false);
-        let files = extract_package(
-            &archive,
-            out.path(),
-            None,
-            crc_of(&inner),
-            inner.len() as u64,
-            &cancel,
-            |_| {},
-        )
-        .unwrap();
-
-        std::fs::write(out.path().join("UnityPlayer.dll"), b"engine payloaD").unwrap();
-        std::fs::remove_file(out.path().join("BrownDust II.exe")).unwrap();
-
-        let broken = verify_files(out.path(), &files, &cancel, |_| {}).unwrap();
-        let names: HashSet<&str> = broken.iter().map(|f| f.path.as_str()).collect();
-        assert_eq!(names.len(), 2);
-        assert!(
-            names.contains("UnityPlayer.dll"),
-            "same size, different bytes"
+    fn an_older_peebify_record_gives_the_version_and_the_checked_files() {
+        let out = Scratch::new("record");
+        out.write(
+            "peebify_bd2_files.json",
+            br#"{"version":"20260905000","files":[{"path":"a.bin","size":7,"crc":"F0A0E438"},{"path":"sub/b.bin","size":9,"crc":"00000001"}]}"#,
         );
-        assert!(names.contains("BrownDust II.exe"), "missing file");
-    }
 
-    #[test]
-    fn prunes_only_files_the_previous_build_shipped() {
-        let out = Scratch::new("prune");
-        std::fs::write(out.path().join("gone.bin"), b"old").unwrap();
-        std::fs::write(out.path().join("kept.bin"), b"new").unwrap();
-        std::fs::write(out.path().join("untracked.bin"), b"user file").unwrap();
-
-        let previous = vec![
-            FileEntry {
-                path: "gone.bin".into(),
-                size: 3,
-                crc: 0,
-            },
-            FileEntry {
-                path: "kept.bin".into(),
-                size: 3,
-                crc: 0,
-            },
-        ];
-        let next = vec![FileEntry {
-            path: "kept.bin".into(),
-            size: 3,
-            crc: 0,
-        }];
-
-        assert_eq!(prune_replaced(out.path(), &previous, &next), 1);
-        assert!(!out.path().join("gone.bin").exists());
-        assert!(out.path().join("kept.bin").exists());
-        assert!(
-            out.path().join("untracked.bin").exists(),
-            "files Peebify never installed are left alone"
-        );
-    }
-
-    #[test]
-    fn prune_keeps_a_file_renamed_only_by_case_or_separator() {
-        let out = Scratch::new("prune_case");
-        std::fs::create_dir_all(out.path().join("Data")).unwrap();
-        std::fs::write(out.path().join("Foo.dll"), b"new").unwrap();
-        std::fs::write(out.path().join("Data").join("Pack.bin"), b"new").unwrap();
-
-        let previous = vec![
-            FileEntry {
-                path: "Foo.dll".into(),
-                size: 3,
-                crc: 0,
-            },
-            FileEntry {
-                path: "Data\\Pack.bin".into(),
-                size: 3,
-                crc: 0,
-            },
-        ];
-        let next = vec![
-            FileEntry {
-                path: "foo.dll".into(),
-                size: 3,
-                crc: 0,
-            },
-            FileEntry {
-                path: "data/pack.bin".into(),
-                size: 3,
-                crc: 0,
-            },
-        ];
-
-        assert_eq!(prune_replaced(out.path(), &previous, &next), 0);
-        assert!(out.path().join("Foo.dll").exists());
-        assert!(out.path().join("Data").join("Pack.bin").exists());
-    }
-
-    #[test]
-    fn corrupt_manifest_loads_as_none() {
-        let out = Scratch::new("manifest_corrupt");
-        assert!(load_manifest(out.path()).is_none());
-        std::fs::write(out.path().join(MANIFEST_FILE), b"{not json").unwrap();
-        assert!(load_manifest(out.path()).is_none());
-    }
-
-    #[test]
-    fn manifest_round_trips_and_reports_the_installed_version() {
-        let out = Scratch::new("manifest");
-        let files = vec![
-            FileEntry {
-                path: "a.bin".into(),
-                size: 7,
-                crc: 0xF0A0_E438,
-            },
-            FileEntry {
-                path: "sub/b.bin".into(),
-                size: 9,
-                crc: 0x0000_0001,
-            },
-        ];
-        write_manifest(out.path(), "20260905000", &files).unwrap();
-
-        let loaded = load_manifest(out.path()).expect("manifest reads back");
-        assert_eq!(loaded.version, "20260905000");
-        assert_eq!(loaded.files.len(), 2);
-        assert_eq!(loaded.files[0].crc, 0xF0A0_E438);
-        assert_eq!(loaded.files[1].path, "sub/b.bin");
-        assert_eq!(
-            installed_version(out.path()).as_deref(),
-            Some("20260905000")
-        );
+        assert_eq!(installed_version(out.path()).as_deref(), Some("20260905000"));
+        let files = validator::Record::load(out.path()).entries();
+        assert_eq!(files.len(), 2);
+        assert_eq!((&*files[0].path, files[0].size, files[0].hash), ("a.bin", 7, Hash::Crc32(0xF0A0_E438)));
+        assert_eq!(files[1].hash, Hash::Crc32(1));
     }
 
     #[test]
@@ -1312,20 +1092,39 @@ mod tests {
     fn a_package_left_by_a_failed_peebify_update_does_not_count_as_installed() {
         let out = Scratch::new("adopt_marker");
         out.write("20260905000.tied.dat", b"new");
-        out.write(crate::backend::download_engine::INSTALL_MARKER_FILE, b"{}");
+        out.write(crate::backend::validator::INSTALL_MARKER_FILE, b"{}");
 
         assert_eq!(installed_version(out.path()), None);
     }
 
-    #[test]
-    fn only_a_complete_package_is_reused() {
-        let out = Scratch::new("reuse");
-        out.write("20260905000.tied.dat", b"12345");
+    struct Named;
 
-        assert!(reusable_package(out.path(), "20260905000.tied.dat", 5).is_some());
-        assert!(reusable_package(out.path(), "20260905000.tied.dat", 6).is_none());
-        assert!(reusable_package(out.path(), "20260905000.tied.dat", 0).is_none());
-        assert!(reusable_package(out.path(), "20260912000.tied.dat", 5).is_none());
+    impl Unpacker for Named {
+        fn is_package(&self, name: &str) -> bool {
+            Tied { crc: 0, bytes: 0 }.is_package(name)
+        }
+
+        fn unpack<'a>(&'a self, _: &'a Arc<JobCore>, _: &'a Path, _: &'a Path, _: Option<&'a HashSet<String>>) -> BoxFuture<'a, Result<Unpacked, String>> {
+            Box::pin(async { Err(String::new()) })
+        }
+    }
+
+    #[test]
+    fn packages_of_other_builds_go_and_nothing_else() {
+        let out = Scratch::new("stale");
+        let old = out.write("20260827002.tied.dat", b"old");
+        let old_part = out.write("20260827002.tied.dat.part", b"partial");
+        let current = out.write("20260905000.tied.dat", b"cur");
+        let notes = out.write("notes.tied.dat", b"keep");
+        let container = Container {
+            parts: vec![Entry::new("20260905000.tied.dat", 3, Hash::None, "")],
+            unpack: Some(Arc::new(Named)),
+            room: 0,
+        };
+
+        crate::backend::extract::remove_other_packages(out.path(), &container);
+        assert!(!old.exists() && !old_part.exists());
+        assert!(current.exists() && notes.exists());
     }
 
     #[test]
@@ -1353,32 +1152,6 @@ mod tests {
         ] {
             assert!(package_file_name(bad).is_err(), "{bad:?} was accepted");
         }
-    }
-
-    #[test]
-    fn a_package_outside_the_install_folder_is_never_reused() {
-        let out = Scratch::new("reuse_escape");
-        let inside = out.path().join("inside");
-        std::fs::create_dir_all(&inside).unwrap();
-        out.write("outside.dat", b"12345");
-
-        assert!(reusable_package(&inside, "../outside.dat", 5).is_none());
-        assert!(reusable_package(&inside, r"..\outside.dat", 5).is_none());
-        let absolute = out.path().join("outside.dat");
-        assert!(reusable_package(&inside, &absolute.to_string_lossy(), 5).is_none());
-    }
-
-    #[test]
-    fn stale_packages_older_than_the_current_build_are_removed() {
-        let out = Scratch::new("stale");
-        let old = out.write("20260827002.tied.dat", b"old");
-        let current = out.write("20260905000.tied.dat", b"cur");
-        let notes = out.write("notes.tied.dat", b"keep");
-
-        assert_eq!(remove_stale_packages(out.path(), "20260905000"), 1);
-        assert!(!old.exists());
-        assert!(current.exists());
-        assert!(notes.exists());
     }
 
     #[test]
@@ -1469,7 +1242,7 @@ mod tests {
             677_512
         );
 
-        let broken = verify_files(out.path(), &files, &cancel, |_| {}).unwrap();
+        let broken = broken(out.path(), &files);
         assert!(broken.is_empty(), "{} files failed", broken.len());
     }
 }

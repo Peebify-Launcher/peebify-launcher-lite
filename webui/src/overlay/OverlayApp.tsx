@@ -1,28 +1,44 @@
 // ------------ Overlay Drawer ------------
 // The in-game overlay: a drawer that slides in over the game with tabs for mods, the mods gallery,
 // captures and settings. It follows whichever game is running.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, LazyMotion, MotionConfig, m } from "framer-motion";
 import { X } from "lucide-react";
-import { getModsStatus, getOverlayConfig, onEvent, rpc, type ModsStatus } from "./ipc";
+import {
+  closeOverlay,
+  getModsStatus,
+  getOverlayConfig,
+  getOverlayStatus,
+  type ModsStatus,
+} from "../lib/ipc";
 import { changedSettingKey, changeTouchesSettings, useSettingsStore } from "../store/settingsStore";
-import { useModsStore } from "../store/modsStore";
-import { useModProfilesStore } from "../store/modProfilesStore";
-import { useNotificationStore } from "../store/notificationStore";
-import { gameById } from "../data/games";
-import type { GameId } from "../types/game";
-import { OverlayMods } from "./panels/OverlayMods";
-import { OverlayGallery } from "./panels/OverlayGallery";
-import { OverlayCaptures } from "./panels/OverlayCaptures";
-import { OverlaySettings } from "./panels/OverlaySettings";
+import { useModsStore, useModProfilesStore } from "../store/mods";
+import { useNotificationStore } from "../store/notifications";
+import { gameById, type GameId } from "../data/games";
+import { OverlayMods } from "./OverlayMods";
+import { OverlayCaptures } from "./OverlayCaptures";
+import { OverlaySettings } from "./OverlaySettings";
 import { ToastLayer } from "../components/layout/ToastLayer";
+import { IconButton } from "../components/ui/Tooltip";
 import { spacedAccelerator } from "../lib/hotkeys";
 import { EASE_OUT_SOFT } from "../lib/motion";
-import { useOverlayModsSession } from "./modsSession";
+import { fmtHM } from "../lib/format";
+import type { TKey } from "../lib/i18n";
+import { useEscapeKey, useTauriEvents } from "../lib/hooks";
+import { useT } from "../lib/useT";
 
 const loadMotionFeatures = () => import("../lib/motionFeatures").then((mod) => mod.default);
 
+const loadGallery = () => import("../components/mods/BrowseMods");
+const BrowseMods = lazy(() => loadGallery().then((mod) => ({ default: mod.BrowseMods })));
+
 type PanelId = "mods" | "gallery" | "captures" | "settings";
+
+export interface PanelProps {
+  gameId: GameId;
+  modsUsable: boolean;
+  mods: ModsStatus | null;
+}
 
 const ICON = {
   mods: (
@@ -54,11 +70,11 @@ const ICON = {
   ),
 } as const;
 
-const PANELS: { id: PanelId; label: string; title: string }[] = [
-  { id: "mods", label: "Mods", title: "Mods" },
-  { id: "gallery", label: "Mods gallery", title: "Mods gallery" },
-  { id: "captures", label: "Captures", title: "Captures" },
-  { id: "settings", label: "Settings", title: "Settings" },
+const PANELS: { id: PanelId; label: TKey; title: TKey }[] = [
+  { id: "mods", label: "common.mods", title: "common.mods" },
+  { id: "gallery", label: "overlay.app.modsGallery", title: "overlay.app.modsGallery" },
+  { id: "captures", label: "common.captures", title: "common.captures" },
+  { id: "settings", label: "common.settings", title: "common.settings" },
 ];
 
 function NavIcon({ id }: { id: PanelId }) {
@@ -80,10 +96,21 @@ function NavIcon({ id }: { id: PanelId }) {
   );
 }
 
-function elapsed(ms: number): string {
-  const minutes = Math.floor(ms / 60000);
-  const hours = Math.floor(minutes / 60);
-  return hours > 0 ? `${hours}h ${minutes % 60}m` : `${minutes}m`;
+function OverlayGallery({ gameId, modsUsable, mods: status }: PanelProps) {
+  const t = useT();
+  if (!modsUsable) {
+    if (!status) return null;
+    return (
+      <p className="max-w-[70ch] text-[13px] leading-relaxed text-white/45">
+        {t("overlay.gallery.modsOff")}
+      </p>
+    );
+  }
+  return (
+    <Suspense fallback={null}>
+      <BrowseMods key={gameId} gameId={gameId} />
+    </Suspense>
+  );
 }
 
 function holdsText(target: EventTarget | null): boolean {
@@ -96,6 +123,7 @@ function holdsText(target: EventTarget | null): boolean {
 }
 
 export default function OverlayApp() {
+  const t = useT();
   const [gameId, setGameId] = useState<GameId | null>(null);
   const [startedMs, setStartedMs] = useState<number | null>(null);
   const [mods, setMods] = useState<ModsStatus | null>(null);
@@ -118,9 +146,7 @@ export default function OverlayApp() {
 
   const loadGame = useCallback(async (refreshStores: boolean) => {
     const token = ++loadToken.current;
-    const status = await rpc<{ gameId?: string | null; sessionStartedMs?: number | null }>(
-      "get-overlay-status",
-    );
+    const status = await getOverlayStatus();
     if (token !== loadToken.current) return;
     const id = (status?.gameId || null) as GameId | null;
     gameRef.current = id;
@@ -133,7 +159,7 @@ export default function OverlayApp() {
     const next = await getModsStatus(id);
     if (token !== loadToken.current) return;
     setMods(next);
-    if (next.supportsMods) void useOverlayModsSession.getState().loadReloadKey(id);
+    if (next.supportsMods) void useModsStore.getState().loadReloadKey(id);
     if (!refreshStores || !next.masterEnabled || !next.gameEnabled || !next.supportsMods) return;
     void useModsStore.getState().refresh(id);
     void useModProfilesStore.getState().refresh(id);
@@ -143,6 +169,7 @@ export default function OverlayApp() {
     void hydrate();
     void loadOpenKey();
     void loadGame(false);
+    void loadGallery();
   }, [hydrate, loadOpenKey, loadGame]);
 
   useEffect(() => {
@@ -150,16 +177,8 @@ export default function OverlayApp() {
     return () => window.clearInterval(timer);
   }, []);
 
-  useEffect(() => {
-    let disposed = false;
-    const offs: Array<() => void> = [];
-    const listen = (name: string, handler: (payload: unknown) => void) => {
-      void onEvent(name, handler).then((off) => {
-        if (disposed) off();
-        else offs.push(off);
-      });
-    };
-    listen("settings-changed", (payload) => {
+  useTauriEvents({
+    "settings-changed": (payload) => {
       if (changeTouchesSettings(payload)) void hydrate();
       const key = changedSettingKey(payload);
       if (key === null || key === "overlayHotkey" || key === "behavior.overlayHotkey") {
@@ -168,12 +187,12 @@ export default function OverlayApp() {
       if (key === null || key === "modsEnabled" || key === "behavior.modsEnabled") {
         void loadGame(false);
       }
-    });
-    listen("overlay-closed", () => {
+    },
+    "overlay-closed": () => {
       drawerOpen.current = false;
       setDrawerShown(false);
-    });
-    listen("overlay-opened", () => {
+    },
+    "overlay-opened": () => {
       drawerOpen.current = true;
       setDrawerShown(true);
       (document.activeElement as HTMLElement | null)?.blur();
@@ -182,23 +201,22 @@ export default function OverlayApp() {
         ?.focus({ preventScroll: true });
       void loadOpenKey();
       void loadGame(true);
-    });
-    listen("mods-status-changed", (payload) => {
+    },
+    "mods-status-changed": (payload) => {
       const changed = (payload as { gameId?: string } | null)?.gameId;
       if (changed && changed !== gameRef.current) return;
       if (!drawerOpen.current || document.visibilityState === "hidden") return;
       void loadGame(true);
-    });
+    },
+  });
+
+  useEffect(() => {
     const onVisible = () => {
       if (document.visibilityState === "visible") setDrawerShown(true);
     };
     document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      disposed = true;
-      offs.forEach((off) => off());
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [hydrate, loadOpenKey, loadGame]);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, []);
 
   const modsUsable = !!mods?.masterEnabled && !!mods?.gameEnabled && !!mods?.supportsMods;
 
@@ -217,19 +235,17 @@ export default function OverlayApp() {
     }
   }, [panels, active]);
 
-  const close = useCallback(() => {
-    void rpc("overlay-toggle", "close");
-  }, []);
+  const close = () => void closeOverlay();
+
+  const isTop = useEscapeKey((e) => {
+    if (e.defaultPrevented || holdsText(e.target)) return;
+    e.preventDefault();
+    close();
+  });
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented) return;
-      if (e.key === "Escape") {
-        if (holdsText(e.target)) return;
-        e.preventDefault();
-        close();
-        return;
-      }
+      if (e.defaultPrevented || !isTop()) return;
       const index = Number.parseInt(e.key, 10) - 1;
       if (Number.isNaN(index) || index < 0 || index >= panels.length) return;
       const target = e.target as HTMLElement | null;
@@ -239,14 +255,17 @@ export default function OverlayApp() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [close, panels]);
+  }, [isTop, panels]);
 
   const game = gameId ? gameById(gameId) : null;
   const subtitle = game
     ? startedMs !== null
-      ? `${game.name} · ${elapsed(Math.max(0, Date.now() - startedMs))}`
+      ? t("overlay.app.sessionSubtitle", {
+          game: game.name,
+          elapsed: fmtHM(Math.floor(Math.max(0, Date.now() - startedMs) / 60000)),
+        })
       : game.name
-    : "No game is running";
+    : t("overlay.app.noGame");
 
   const Panel = {
     mods: OverlayMods,
@@ -255,7 +274,8 @@ export default function OverlayApp() {
     settings: OverlaySettings,
   }[active];
 
-  const title = panels.find((p) => p.id === active)?.title ?? "";
+  const titleKey = panels.find((p) => p.id === active)?.title;
+  const title = titleKey ? t(titleKey) : "";
 
   return (
     <LazyMotion features={loadMotionFeatures} strict>
@@ -282,18 +302,18 @@ export default function OverlayApp() {
             className="ov-drawer flex h-full w-[min(92vw,clamp(880px,48vw,1240px))] border-r border-white/[0.09]"
           >
             <nav
-              aria-label="Overlay sections"
+              aria-label={t("overlay.app.sections")}
               className="ov-rail flex min-h-0 w-[268px] shrink-0 flex-col border-r border-white/[0.07] px-4 pb-[18px] pt-6"
             >
               <div className="flex items-center gap-[11px] px-2 pb-[18px]">
                 <img
                   src="/icons/app.png"
-                  alt="Peebify"
+                  alt="Peebify" // i18n-ignore
                   className="h-[30px] w-[30px] rounded-[8px] object-contain"
                 />
                 <div className="min-w-0">
                   <div className="text-[14px] font-semibold tracking-[-0.01em]">
-                    Peebify Overlay
+                    {t("overlay.app.title")}
                   </div>
                   <div className="truncate text-[12px] text-white/45">{subtitle}</div>
                 </div>
@@ -318,7 +338,7 @@ export default function OverlayApp() {
                       }`}
                     >
                       <NavIcon id={panel.id} />
-                      <span className="flex-1">{panel.label}</span>
+                      <span className="flex-1">{t(panel.label)}</span>
                       <span className="ov-mono text-[10.5px] text-white/30">{index + 1}</span>
                     </button>
                   );
@@ -327,15 +347,15 @@ export default function OverlayApp() {
 
               <div className="mt-auto flex flex-col gap-[9px] border-t border-white/[0.07] px-2 pt-4">
                 <div className="flex items-center justify-between text-[11.5px] text-white/[0.42]">
-                  <span>Open / close</span>
+                  <span>{t("overlay.app.openClose")}</span>
                   <span className="ov-mono rounded-[5px] bg-white/[0.08] px-[6px] py-[2px] text-white/70">
                     {openKey}
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-[11.5px] text-white/[0.42]">
-                  <span>Close</span>
+                  <span>{t("common.close")}</span>
                   <span className="ov-mono rounded-[5px] bg-white/[0.08] px-[6px] py-[2px] text-white/70">
-                    Esc
+                    {"Esc" /* i18n-ignore: key name */}
                   </span>
                 </div>
               </div>
@@ -345,15 +365,15 @@ export default function OverlayApp() {
               <ToastLayer onOpen={(id) => useNotificationStore.getState().dismissToast(id)} />
               <header className="flex shrink-0 items-center justify-between gap-4 border-b border-white/[0.07] px-[clamp(30px,1.6vw,44px)] pb-4 pt-[26px]">
                 <h3 className="font-display text-[21px] font-semibold">{title}</h3>
-                <button
+                <IconButton
                   type="button"
-                  aria-label="Close overlay"
-                  title="Close (Esc)"
+                  aria-label={t("overlay.app.closeOverlay")}
+                  tip={t("overlay.app.closeTitle")}
                   onClick={close}
                   className="-mr-2 grid h-[32px] w-[32px] shrink-0 place-items-center rounded-[8px] text-white/55 transition-colors duration-150 hover:bg-white/[0.08] hover:text-white"
                 >
                   <X size={18} />
-                </button>
+                </IconButton>
               </header>
               <div className="ov-scroll min-h-0 flex-1 overflow-y-auto px-[clamp(30px,1.6vw,44px)] pb-[26px] pt-5">
                 <AnimatePresence mode="wait" initial={false}>
@@ -367,7 +387,7 @@ export default function OverlayApp() {
                     {gameId ? (
                       <Panel gameId={gameId} modsUsable={modsUsable} mods={mods} />
                     ) : (
-                      <p className="text-[13px] text-white/45">No game is running.</p>
+                      <p className="text-[13px] text-white/45">{t("overlay.app.noGameBody")}</p>
                     )}
                   </m.div>
                 </AnimatePresence>

@@ -3,8 +3,8 @@
 // launcher is running, so coming back to a page puts things back how you left them.
 import { create } from "zustand";
 import type { SettingsCategory } from "../data/settings";
-import type { GameFilter, PlaytimeRange } from "../lib/playtimeStats";
-import type { GameId } from "../types/game";
+import type { GameFilter, PlaytimeRange } from "../lib/playtime";
+import type { GameId } from "../data/games";
 import { useUiStore } from "./uiStore";
 
 interface SessionUiState {

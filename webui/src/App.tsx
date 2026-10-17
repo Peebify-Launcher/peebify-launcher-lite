@@ -1,20 +1,26 @@
 // ------------ Launcher Window ------------
 // The main launcher window. Hooks up every backend event (games starting and stopping, the download queue,
 // updates, network, wallpapers), shows the sidebar, wallpaper and current page, and pops toasts and modals.
-import { Suspense, lazy, useEffect } from "react";
-import { useUiStore } from "./store/uiStore";
+import { Suspense, lazy, useEffect, useMemo, type ComponentType } from "react";
+import { useUiStore, type View } from "./store/uiStore";
 import { useGamesStore } from "./store/gamesStore";
-import { changedSettingKey, changeTouchesSettings, useSettingsStore } from "./store/settingsStore";
+import {
+  GLASS_EFFECTS,
+  changedSettingKey,
+  changeTouchesSettings,
+  useGlassEffects,
+  useSettingsStore,
+} from "./store/settingsStore";
 import { useQueueStore } from "./store/queueStore";
-import { useSpeedSampler } from "./store/speedHistoryStore";
-import { jobFailureKey, useNotificationStore } from "./store/notificationStore";
+import { useSpeedSampler, useDownloadHistoryStore } from "./store/downloads";
+import { jobFailureKey, useNotificationStore } from "./store/notifications";
 import { useCustomizationStore } from "./store/customizationStore";
 import { useGameLinksStore, useRemoteMediaStore } from "./store/remoteContentStore";
 import { usePlaytimeStore } from "./store/playtimeStore";
-import { useModsStore } from "./store/modsStore";
-import { useModProfilesStore } from "./store/modProfilesStore";
+import { useModsStore, useModProfilesStore } from "./store/mods";
 import { useLibraryStore } from "./store/libraryStore";
-import { GAMES } from "./data/games";
+import { GAMES, gameById, type GameId, type ResourceQuality } from "./data/games";
+import { qualityLabel } from "./lib/gameActions";
 import {
   appInfo,
   applyActiveGame,
@@ -42,30 +48,31 @@ import {
   getConfigNotice,
   downloadEnqueue,
 } from "./lib/ipc";
-import { onEvent } from "./lib/rpc";
-import { baseKindOf, KIND_NOUN, KIND_VERB, TERMINAL_PHASES } from "./lib/download";
-import { useDownloadHistoryStore } from "./store/downloadHistoryStore";
+import { onEvent, subscriptions } from "./lib/rpc";
+import { baseKindOf, TERMINAL_PHASES } from "./lib/download";
 import { AnimatePresence, LazyMotion, MotionConfig, m } from "framer-motion";
 import { useModalStore } from "./store/modalStore";
-import { revealWhenPainted } from "./lib/bootGate";
+import { revealWhenPainted, WallpaperLayer } from "./components/layout/WallpaperLayer";
 import { log } from "./lib/log";
-import { useRendererSuspended } from "./lib/useRendererSuspended";
-import { setNowTickerSuspended } from "./lib/useRelativeTime";
+import { hasKey, t, type TKey } from "./lib/i18n";
+import { useT } from "./lib/useT";
+import { useRendererSuspended } from "./lib/launcherHooks";
+import { useTauriEvents, setNowTickerSuspended } from "./lib/hooks";
 import { Sidebar } from "./components/layout/Sidebar";
-import { WallpaperLayer } from "./components/layout/WallpaperLayer";
 import { NotificationPanel } from "./components/layout/NotificationPanel";
 import { ToastLayer } from "./components/layout/ToastLayer";
-import { OfflineBanner } from "./components/layout/OfflineBanner";
+import { OfflineBanner } from "./components/layout/Banners";
 import { WindowControls } from "./components/layout/WindowControls";
-import { GameHome } from "./components/home/GameHome";
-import { ModalRoot } from "./components/ui/ModalRoot";
-import { ErrorBoundary, retryOrReload } from "./components/ErrorBoundary";
-import { ActionButton } from "./components/ui/ActionButton";
+import { GameHome } from "./components/home/Home";
+import { ModalRoot } from "./components/ui/Modal";
+import { ErrorBoundary, retryOrReload } from "./components/layout/ErrorBoundary";
+import { ActionButton } from "./components/ui/controls";
 
-const loadMotionFeatures = () => import("./lib/motionFeatures").then((mod) => mod.default);
+const motionFeatures = import("./lib/motionFeatures").then((mod) => mod.default);
+const loadMotionFeatures = () => motionFeatures;
 
 const FirstRunSetup = lazy(() =>
-  import("./components/library/FirstRunSetup").then((mod) => ({ default: mod.FirstRunSetup })),
+  import("./components/layout/FirstRunSetup").then((mod) => ({ default: mod.FirstRunSetup })),
 );
 
 const SETUP_BACKDROP = (
@@ -79,10 +86,18 @@ const SETUP_BACKDROP = (
   />
 );
 
-const DONE_TEXT: Record<string, string> = {
-  uninstall: "The removal finished.",
-  move: "The game files are in their new folder.",
-};
+function announceUnfinishedSwitches(switches: Record<string, ResourceQuality>) {
+  for (const [id, quality] of Object.entries(switches)) {
+    const game = gameById(id as GameId);
+    const label = qualityLabel(quality);
+    useNotificationStore.getState().push({
+      type: "info",
+      title: t("actions.game.switchUnfinished.title", { game: game.name, quality: label }),
+      text: t("actions.game.switchUnfinished.text", { quality: label }),
+      action: { label: t("common.resume"), run: () => void downloadEnqueue(id) },
+    });
+  }
+}
 
 let configNotice: Promise<boolean> | null = null;
 
@@ -95,7 +110,7 @@ function announceConfigNotice(): Promise<boolean> {
     useModalStore.getState().openConfirm({
       title: note.title,
       message: note.text,
-      confirmLabel: "OK",
+      confirmLabel: t("common.ok"),
       cancelLabel: null,
       onConfirm: () => {},
     });
@@ -104,31 +119,93 @@ function announceConfigNotice(): Promise<boolean> {
   return configNotice;
 }
 
+function kindText(key: string, fallback: TKey, game: string, kind: string): string {
+  return t(hasKey(key) ? key : fallback, { game, kind });
+}
+
 const dismissToast = (id: string) => useNotificationStore.getState().dismissToast(id);
 
-const openDownloadsAction = {
-  label: "Open Downloads",
+const openDownloadsAction = () => ({
+  label: t("app.openDownloads"),
   run: () => useUiStore.getState().setView("downloads"),
-};
+});
 
-const REPAIR_NEEDS_UPDATE = "An update is available. Update the game first, then repair.";
+const REPAIR_NEEDS_UPDATE = "An update is available. Update the game first, then repair."; // i18n-ignore
 
-const PAGES = {
-  home: GameHome,
-  playtime: lazy(() =>
-    import("./components/playtime/PlaytimePage").then((m) => ({ default: m.PlaytimePage })),
-  ),
-  downloads: lazy(() =>
-    import("./components/downloads/DownloadsPage").then((m) => ({ default: m.DownloadsPage })),
-  ),
-  gallery: lazy(() =>
-    import("./components/gallery/CapturesTab").then((m) => ({ default: m.GalleryPage })),
-  ),
-  mods: lazy(() => import("./components/mods/ModsPage").then((m) => ({ default: m.ModsPage }))),
-  settings: lazy(() =>
-    import("./components/settings/SettingsPage").then((m) => ({ default: m.SettingsPage })),
-  ),
-} as const;
+// ------------ Pages ------------
+// Home is in the main bundle; every other page is its own chunk. The chunks load in the background once the
+// launcher is idle after starting (preloadPages), and a page whose chunk is in renders straight away instead of
+// through Suspense, so opening it never shows an empty frame that then fills in.
+const PAGE_LOADERS = {
+  playtime: () => import("./components/PlaytimePage").then((m) => m.PlaytimePage),
+  downloads: () => import("./components/DownloadsPage").then((m) => m.DownloadsPage),
+  gallery: () => import("./components/gallery/CapturesTab").then((m) => m.GalleryPage),
+  mods: () => import("./components/mods/ModsPage").then((m) => m.ModsPage),
+  settings: () => import("./components/settings/SettingsPage").then((m) => m.SettingsPage),
+} satisfies Record<Exclude<View, "home">, () => Promise<ComponentType>>;
+type ChunkPage = keyof typeof PAGE_LOADERS;
+
+const loadedPages: Partial<Record<View, ComponentType>> = { home: GameHome };
+const pageLoads = new Map<ChunkPage, Promise<ComponentType>>();
+
+function loadPage(page: ChunkPage): Promise<ComponentType> {
+  let load = pageLoads.get(page);
+  if (!load) {
+    load = PAGE_LOADERS[page]().then(
+      (component) => (loadedPages[page] = component),
+      (e: unknown) => {
+        pageLoads.delete(page);
+        throw e;
+      },
+    );
+    pageLoads.set(page, load);
+  }
+  return load;
+}
+
+const lazyPages = new Map<ChunkPage, ComponentType>();
+
+function pageFor(view: View): ComponentType {
+  const loaded = loadedPages[view];
+  if (loaded) return loaded;
+  const page = view as ChunkPage;
+  let waiting = lazyPages.get(page);
+  if (!waiting) {
+    waiting = lazy(() => loadPage(page).then((component) => ({ default: component })));
+    lazyPages.set(page, waiting);
+  }
+  return waiting;
+}
+
+function preloadPages(): () => void {
+  const queue = (Object.keys(PAGE_LOADERS) as ChunkPage[]).filter((page) => !loadedPages[page]);
+  let handle = 0;
+  let stopped = false;
+  let stopData: (() => void) | null = null;
+  const next = () => {
+    if (stopped) return;
+    const page = queue.shift();
+    if (!page) {
+      void import("./lib/pagePreload")
+        .then((mod) => {
+          if (!stopped) stopData = mod.preloadPageData();
+        })
+        .catch((e: unknown) => log.debug("[pages] could not load the page preloader:", e));
+      return;
+    }
+    loadPage(page)
+      .catch((e: unknown) => log.debug(`[pages] could not preload ${page}:`, e))
+      .finally(() => {
+        if (!stopped) handle = requestIdleCallback(next, { timeout: 2000 });
+      });
+  };
+  handle = requestIdleCallback(next, { timeout: 2000 });
+  return () => {
+    stopped = true;
+    cancelIdleCallback(handle);
+    stopData?.();
+  };
+}
 
 function pageCrashContext(): Record<string, unknown> {
   const ui = useUiStore.getState();
@@ -136,19 +213,18 @@ function pageCrashContext(): Record<string, unknown> {
 }
 
 function PageError({ view, onRetry }: { view: string; onRetry: () => void }) {
+  const t = useT();
   const setView = useUiStore((s) => s.setView);
   return (
     <div className="flex h-full w-full flex-col items-center justify-center gap-4 px-6 text-white">
-      <div className="text-lg font-semibold">This page hit an error</div>
-      <div className="max-w-[420px] text-center text-sm text-white/60">
-        It has been written to the log. The rest of the launcher still works.
-      </div>
+      <div className="text-lg font-semibold">{t("crash.page.title")}</div>
+      <div className="max-w-[420px] text-center text-sm text-white/60">{t("crash.page.body")}</div>
       <div className="flex items-center gap-2">
-        <ActionButton onClick={() => retryOrReload(onRetry)}>Try again</ActionButton>
+        <ActionButton onClick={() => retryOrReload(onRetry)}>{t("common.tryAgain")}</ActionButton>
         {view !== "home" && (
-          <ActionButton onClick={() => setView("home")}>Back to home</ActionButton>
+          <ActionButton onClick={() => setView("home")}>{t("crash.page.backHome")}</ActionButton>
         )}
-        <ActionButton onClick={() => void openLogsFolder()}>Open logs folder</ActionButton>
+        <ActionButton onClick={() => void openLogsFolder()}>{t("common.openLogsFolder")}</ActionButton>
       </div>
     </div>
   );
@@ -167,6 +243,15 @@ export default function App() {
     setNowTickerSuspended(rendererSuspended);
   }, [rendererSuspended]);
 
+  const effects = useGlassEffects();
+  useEffect(() => {
+    for (const tier of GLASS_EFFECTS) {
+      document.documentElement.classList.toggle(`effects-${tier}`, tier === effects);
+    }
+  }, [effects]);
+
+  useEffect(() => preloadPages(), []);
+
   useEffect(() => {
     void applyActiveGame(useUiStore.getState().activeGameId);
     return useUiStore.subscribe((s, p) => {
@@ -174,10 +259,8 @@ export default function App() {
     });
   }, []);
 
-  useEffect(() => {
-    let disposed = false;
-    let un: (() => void) | undefined;
-    void onEvent("settings-changed", (payload) => {
+  useTauriEvents({
+    "settings-changed": (payload) => {
       const key = changedSettingKey(payload);
       if (changeTouchesSettings(payload)) void useSettingsStore.getState().hydrate();
       if (key === null || key === "modsEnabled" || key === "behavior.modsEnabled") {
@@ -189,15 +272,8 @@ export default function App() {
       } else if (key.startsWith("games.") && key.endsWith(".voicePackLanguage")) {
         void useCustomizationStore.getState().hydrate();
       }
-    }).then((f) => {
-      if (disposed) f();
-      else un = f;
-    });
-    return () => {
-      disposed = true;
-      un?.();
-    };
-  }, []);
+    },
+  });
 
   useEffect(() => {
     revealWhenPainted(
@@ -219,7 +295,7 @@ export default function App() {
       })
       .catch((e) => log.warn("appInfo failed (version badge will show defaults):", e));
 
-    const refreshInstalled = (onlyGameIds?: string[]) =>
+    const refreshInstalled = (onlyGameIds?: string[], atStartup = false) =>
       void listGames().then((games) => {
         const installedIds = games.filter((g) => g.installed).map((g) => g.id);
         useGamesStore.getState().setInstalled(installedIds);
@@ -228,24 +304,25 @@ export default function App() {
             games.flatMap((g) => (g.pendingInstall ? [[g.id, g.pendingInstall] as const] : [])),
           ),
         );
+        const switches = Object.fromEntries(
+          games.flatMap((g) => (g.installed && g.qualitySwitch ? [[g.id, g.qualitySwitch] as const] : [])),
+        );
+        useGamesStore.getState().setQualitySwitches(switches);
+        if (atStartup) announceUnfinishedSwitches(switches);
         const toCheck = onlyGameIds
           ? installedIds.filter((id) => onlyGameIds.includes(id))
           : installedIds;
         for (const id of toCheck) {
           void checkGameUpdate(id).then((u) => {
-            if (u.ok) useGamesStore.getState().setUpdate(id, u.available, u.steamManaged, u);
+            if (u.ok) useGamesStore.getState().setUpdate(id, u.available, u);
           });
         }
       });
-    refreshInstalled();
+    refreshInstalled(undefined, true);
     void downloadState().then((s) => useQueueStore.getState().setJobs(s.jobs));
 
-    const unsubs: Array<() => void> = [];
-    let disposed = false;
-    const keep = (f: () => void) => {
-      if (disposed) f();
-      else unsubs.push(f);
-    };
+    const subs = subscriptions();
+    const { keep } = subs;
     let runningEpoch = 0;
     const seedRunningGames = () => {
       const epoch = runningEpoch;
@@ -277,8 +354,10 @@ export default function App() {
       const game = GAMES.find((g) => g.id === id);
       useNotificationStore.getState().push({
         type: "warning",
-        title: `${game?.name ?? "The game"} didn't start`,
-        text: reason || "The game was never launched, so no playtime was recorded.",
+        title: game
+          ? t("app.launchFailed.title", { game: game.name })
+          : t("app.launchFailed.titleUnknown"),
+        text: reason || t("app.launchFailed.text"),
       });
     });
     void failedSub.then(keep);
@@ -287,43 +366,58 @@ export default function App() {
       const game = GAMES.find((g) => g.id === id);
       useNotificationStore.getState().push({
         type: "warning",
-        title: "Mods didn't load",
-        text: message || `${game?.name ?? "The game"} is starting without mods. ${error}`.trim(),
+        title: t("app.modsLoadFailed.title"),
+        text:
+          message ||
+          (game
+            ? t("app.modsLoadFailed.text", { game: game.name, error })
+            : t("app.modsLoadFailed.textUnknown", { error })
+          ).trim(),
       });
     }).then(keep);
-    void onEvent<{ gameId?: string; path?: string }>("custom-launcher-missing", (p) => {
+    void onEvent("custom-launcher-missing", (p) => {
       const game = GAMES.find((g) => g.id === p?.gameId);
       useNotificationStore.getState().push({
         type: "warning",
-        title: "The custom launcher is missing",
-        text: `${p?.path || "The program"} is no longer there, so ${game?.name ?? "the game"} is starting on its own.`,
+        title: t("app.customLauncherMissing.title"),
+        text: p?.path
+          ? t("app.customLauncherMissing.text", {
+              path: p.path,
+              game: game?.name ?? t("app.theGame"),
+            })
+          : t("app.customLauncherMissing.textNoPath", { game: game?.name ?? t("app.theGame") }),
       });
     }).then(keep);
-    void onEvent<{ gameId?: string; reason?: string }>("game-launch-waiting", (p) => {
+    void onEvent("game-launch-waiting", (p) => {
       const id = p?.gameId;
       if (id) useGamesStore.getState().setLaunching(id, false);
       const game = GAMES.find((g) => g.id === id);
       useNotificationStore.getState().push({
         type: "warning",
-        title: `${game?.name ?? "The game"} hasn't started yet`,
-        text: p?.reason || "Steam hasn't started the game yet.",
+        title: game
+          ? t("app.launchWaiting.title", { game: game.name })
+          : t("app.launchWaiting.titleUnknown"),
+        text: p?.reason || t("app.launchWaiting.text"),
       });
     }).then(keep);
-    void onEvent<{ gameId?: string }>("mods-tools-updating", (p) => {
+    void onEvent("mods-tools-updating", (p) => {
       const game = GAMES.find((g) => g.id === p?.gameId);
       useNotificationStore.getState().push({
-        title: "Updating the mod tools",
-        text: `${game?.name ?? "The game"} starts once the mod tools finish updating.`,
+        type: "progress",
+        title: t("app.modToolsUpdating.title"),
+        text: game
+          ? t("app.modToolsUpdating.text", { game: game.name })
+          : t("app.modToolsUpdating.textUnknown"),
       });
     }).then(keep);
     void onEvent("overlay-fullscreen-blocked", () => {
-      const title = "The overlay cannot draw over exclusive fullscreen";
+      const title = t("app.overlayBlocked.title");
       const notes = useNotificationStore.getState();
       if (notes.items.some((n) => n.title === title && !n.read)) return;
       notes.push({
         type: "warning",
         title,
-        text: "Switch the game to Borderless or Windowed in its display settings, then press the overlay shortcut again.",
+        text: t("app.overlayBlocked.text"),
       });
     }).then(keep);
     void onQueueState((s) => {
@@ -331,7 +425,7 @@ export default function App() {
     }).then(keep);
 
     let queuePhases: Record<string, string> = {};
-    unsubs.push(
+    keep(
       useQueueStore.subscribe((state) => {
         const next: Record<string, string> = {};
         const finishedGames: string[] = [];
@@ -344,16 +438,15 @@ export default function App() {
             if (j.phase !== "deferred") useDownloadHistoryStore.getState().add({ ...j, kind });
             finishedGames.push(j.gameId);
             const name = GAMES.find((g) => g.id === j.gameId)?.name ?? j.gameId;
-            const noun = KIND_NOUN[kind] ?? kind;
             if (j.phase === "done" && kind !== "verify") {
               const gameId = j.gameId;
               const leftovers = j.warning && (kind === "uninstall" || kind === "move");
               useNotificationStore.getState().push({
                 type: j.warning ? "warning" : "success",
-                title: `${name} ${KIND_VERB[kind] ?? "finished"}`,
-                text: j.message || (DONE_TEXT[kind] ?? `The ${noun} finished successfully.`),
+                title: kindText(`app.jobDone.title.${kind}`, "app.jobDone.titleOther", name, kind),
+                text: j.message || kindText(`app.jobDone.text.${kind}`, "app.jobDone.textOther", name, kind),
                 action: leftovers
-                  ? { label: "Open folder", run: () => void openLeftoverFolder(gameId) }
+                  ? { label: t("common.openFolder"), run: () => void openLeftoverFolder(gameId) }
                   : undefined,
               });
             } else if (j.phase === "error" && kind !== "verify") {
@@ -361,24 +454,22 @@ export default function App() {
               const needsUpdate = kind === "repair" && j.error === REPAIR_NEEDS_UPDATE;
               useNotificationStore.getState().push({
                 type: "error",
-                title: `${name} ${noun} failed`,
-                text: j.error || "Something went wrong. Check the logs for details.",
+                title: kindText(`app.jobFailed.title.${kind}`, "app.jobFailed.titleOther", name, kind),
+                text: j.error || t("common.genericError"),
                 action: needsUpdate
-                  ? { label: "Update", run: () => void downloadEnqueue(gameId) }
-                  : openDownloadsAction,
+                  ? { label: t("common.update"), run: () => void downloadEnqueue(gameId) }
+                  : openDownloadsAction(),
                 key: jobFailureKey(gameId),
               });
             }
           }
         }
         queuePhases = next;
-        if (finishedGames.length > 0) {
-          refreshInstalled(finishedGames);
-        }
+        if (finishedGames.length > 0) refreshInstalled(finishedGames);
       }),
     );
-    void onGameUpdateAvailable((id, steamManaged, versions) =>
-      useGamesStore.getState().setUpdate(id, true, steamManaged, versions),
+    void onGameUpdateAvailable((id, versions) =>
+      useGamesStore.getState().setUpdate(id, true, versions),
     ).then(keep);
     void onWallpaperMediaUpdated((m) => useRemoteMediaStore.getState().apply(m)).then(keep);
     let networkEventSeen = false;
@@ -418,11 +509,11 @@ export default function App() {
       const names = ids.map((id) => GAMES.find((g) => g.id === id)?.name ?? id);
       useNotificationStore.getState().push({
         type: "success",
-        title: names.length === 1 ? "Found an installed game" : `Found ${names.length} installed games`,
-        text: `${names.join(", ")} ${names.length === 1 ? "was" : "were"} already in your Peebify games folder and ${names.length === 1 ? "has" : "have"} been added to your library.`,
+        title: t("app.gamesDetected.title", { count: names.length }),
+        text: t("app.gamesDetected.text", { count: names.length, names: names.join(", ") }),
       });
     }).then(keep);
-    void onEvent<{ gameId?: string } | null>("mods-status-changed", (payload) => {
+    void onEvent("mods-status-changed", (payload) => {
       const changed = payload?.gameId;
       const mods = useModsStore.getState();
       const target = mods.requestedGameId ?? mods.loadedGameId ?? useUiStore.getState().activeGameId;
@@ -450,18 +541,16 @@ export default function App() {
       seedRunningGames();
     }).then(keep);
 
-    return () => {
-      disposed = true;
-      unsubs.forEach((f) => f());
-    };
+    return subs.stop;
   }, []);
 
-  const Page = PAGES[view];
+  const Page = useMemo(() => pageFor(view), [view]);
 
   return (
     <LazyMotion features={loadMotionFeatures} strict>
       <MotionConfig reducedMotion="user">
         <div
+          data-window-root
           className={`relative h-screen w-screen overflow-hidden ${maximized ? "" : "rounded-ui"}`}
         >
         <div
@@ -513,7 +602,9 @@ export default function App() {
             className="pointer-events-none absolute inset-0"
             style={setupOpen ? { zIndex: "calc(var(--z-setup) + 1)" } : undefined}
           >
-            <OfflineBanner />
+            <div className="pointer-events-none absolute left-[60px] right-[158px] top-[12px] z-(--z-banner) flex flex-col items-center gap-[8px] px-[16px]">
+              <OfflineBanner />
+            </div>
             <ToastLayer onOpen={setupOpen ? dismissToast : undefined} />
           </div>
           <NotificationPanel />

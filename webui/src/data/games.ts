@@ -1,8 +1,57 @@
+// ------------ Games ------------
+// Every game the launcher knows about, the types that describe one, and each game's chart color.
+import { t } from "../lib/i18n";
+
+// ------------ Game Types ------------
+// The list of supported game ids and the shape of a game entry, plus the graphics API and quality choices.
+export type GameId =
+  | "wuwa"
+  | "zzz"
+  | "hsr"
+  | "nte"
+  | "endfield"
+  | "genshin"
+  | "hi3"
+  | "pgr"
+  | "gf2"
+  | "gf1"
+  | "re1999"
+  | "bd2"
+  | "arknights"
+  | "bluearchive"
+  | "dna";
+
+export type GraphicsApi = "dx11" | "dx12";
+
+export const GRAPHICS_APIS: { value: GraphicsApi; label: string }[] = [
+  { value: "dx11", label: "DX11" }, // i18n-ignore
+  { value: "dx12", label: "DX12" }, // i18n-ignore
+];
+
+export type ResourceQuality = "sd" | "hd" | "uhd";
+
+export interface Game {
+  id: GameId;
+  short: string;
+  name: string;
+  icon: string;
+  wallpaperStatic: string;
+  wallpaperFallback: string;
+  installHelpUrl?: string;
+  managed?: boolean;
+  betaNote?: string;
+  graphicsApiChoice?: boolean;
+  graphicsApiDefault?: GraphicsApi;
+  resourceQualityChoice?: boolean;
+  voicePackChoice?: boolean;
+  contentPackChoice?: boolean;
+  supportsQuickRepair?: boolean;
+  fpsUnlock?: boolean;
+}
+
 // ------------ Game List ------------
 // Every game the launcher knows about: its name, icon, wallpaper fallback, and which extras it supports
 // (graphics API choice, voice packs, quality, FPS unlock and so on). Add a game here and the UI picks it up.
-import type { Game, GameId } from "../types/game";
-
 export const GAMES: Game[] = [
   {
     id: "wuwa",
@@ -107,8 +156,9 @@ export const GAMES: Game[] = [
       "radial-gradient(120% 95% at 80% 10%, rgba(198,64,78,.34), transparent 55%), linear-gradient(160deg,#1f171a 0%,#0b0a0b 70%)",
     installHelpUrl: "https://store.steampowered.com/app/3887700/Girls_Frontline/",
     managed: false,
-    betaNote:
-      "Girls' Frontline is only distributed on PC through Steam. Install it there first, then point Peebify at the folder. Peebify launches it through Steam, so the overlay and playtime tracking keep working.",
+    get betaNote() {
+      return t("games.notes.steamOnly", { game: "Girls' Frontline" });
+    },
   },
   {
     id: "re1999",
@@ -119,8 +169,9 @@ export const GAMES: Game[] = [
     wallpaperFallback:
       "radial-gradient(120% 95% at 80% 10%, rgba(201,162,39,.38), transparent 55%), linear-gradient(160deg,#241f14 0%,#0c0a09 70%)",
     supportsQuickRepair: false,
-    betaNote:
-      "Bluepoch ships Reverse: 1999 as whole archives with no per-file checksums, so Peebify can install and update the game but cannot check individual files. Repair clears leftover update folders; a damaged install has to be reinstalled.",
+    get betaNote() {
+      return t("games.notes.re1999");
+    },
   },
   {
     id: "bd2",
@@ -131,8 +182,9 @@ export const GAMES: Game[] = [
     wallpaperFallback:
       "radial-gradient(120% 95% at 80% 10%, rgba(133,121,201,.42), transparent 55%), linear-gradient(160deg,#1d1930 0%,#0b0a12 70%)",
     supportsQuickRepair: false,
-    betaNote:
-      "Neowiz ships Brown Dust II as one client package, so Peebify installs and updates it in a single download. Peebify checksums every file it unpacks, but repairing even one of them means fetching that whole package again.",
+    get betaNote() {
+      return t("games.notes.bd2");
+    },
   },
   {
     id: "arknights",
@@ -154,8 +206,9 @@ export const GAMES: Game[] = [
       "radial-gradient(120% 95% at 80% 10%, rgba(56,189,248,.36), transparent 55%), linear-gradient(160deg,#10243a 0%,#080d14 70%)",
     installHelpUrl: "https://store.steampowered.com/app/3557620/Blue_Archive/",
     managed: false,
-    betaNote:
-      "Blue Archive is only distributed on PC through Steam. Install it there first, then point Peebify at the folder. Peebify launches it through Steam, so the overlay and playtime tracking keep working.",
+    get betaNote() {
+      return t("games.notes.steamOnly", { game: "Blue Archive" });
+    },
   },
   {
     id: "dna",
@@ -168,8 +221,9 @@ export const GAMES: Game[] = [
     graphicsApiChoice: true,
     graphicsApiDefault: "dx12",
     supportsQuickRepair: false,
-    betaNote:
-      "Pan Studio ships Duet Night Abyss as one archive, so Peebify installs and updates it in a single download and unpacks it with HDiffPatch. Peebify checks every file against Pan Studio's checksums, but repairing even one of them means fetching that whole archive again.",
+    get betaNote() {
+      return t("games.notes.dna");
+    },
   },
 ];
 
@@ -177,7 +231,7 @@ export const gameById = (id: GameId): Game =>
   GAMES.find((g) => g.id === id) ?? GAMES[0];
 
 export function gameMeta(id: string | null): { name: string; icon: string | null } {
-  if (!id) return { name: "Other", icon: null };
+  if (!id) return { name: t("games.other"), icon: null };
   const game = GAMES.find((g) => g.id === id);
   return game ? { name: game.name, icon: game.icon } : { name: id, icon: null };
 }
@@ -185,3 +239,38 @@ export function gameMeta(id: string | null): { name: string; icon: string | null
 export const isManaged = (id: GameId): boolean => gameById(id).managed !== false;
 export const supportsQuickRepair = (id: GameId): boolean =>
   gameById(id).supportsQuickRepair !== false;
+
+// ------------ Game Colors ------------
+// The default chart color for each game, plus helpers to read a custom color someone picked in settings.
+const GAME_COLORS: Record<GameId, string> = {
+  wuwa: "#2dd4bf",
+  zzz: "#fcd34d",
+  hsr: "#9a8cff",
+  nte: "#ff5d9e",
+  endfield: "#ffa726",
+  genshin: "#5bc0eb",
+  hi3: "#c084fc",
+  pgr: "#ff6b57",
+  gf2: "#a3e635",
+  gf1: "#e11d48",
+  re1999: "#c9a227",
+  bd2: "#94a3b8",
+  arknights: "#3b82f6",
+  bluearchive: "#38bdf8",
+  dna: "#c9a96e",
+};
+
+const HEX = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+
+export function isGameColor(value: string | undefined | null): value is string {
+  return !!value && HEX.test(value.trim());
+}
+
+export function gameColor(
+  id: GameId | string,
+  overrides?: Record<string, string>,
+): string {
+  const custom = overrides?.[id];
+  if (isGameColor(custom)) return custom.trim().toLowerCase();
+  return GAME_COLORS[id as GameId] ?? "#888888";
+}

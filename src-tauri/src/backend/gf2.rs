@@ -1,16 +1,29 @@
-// ------------ Girls' Frontline 2 Downloads ------------
-// Girls' Frontline 2: Exilium ships its own launcher config and file list, so this reads those, turns them into resources the download engine can use, and keeps a local record of what Peebify installed.
-// That record lets an update remove old asset bundles without touching files the game downloaded by itself.
+// ------------ Girls' Frontline 2 ------------
+// Girls' Frontline 2: Exilium ships its own launcher config and file list, so this reads those and turns them into the
+// manifest the engine installs. Its install record lets an update remove old asset bundles without touching files the
+// game downloaded by itself. It also holds the game's Version.txt, client unpacking, client repair and install preview.
+// ------------ Girls' Frontline 2 ------------
+// Girls' Frontline 2: Exilium ships its own launcher config and file list, so this reads those and turns them into the
+// manifest the engine installs. Its install record lets an update remove old asset bundles without touching files the
+// game downloaded by itself. It also holds the game's Version.txt, the client archive and the install preview.
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use futures::future::BoxFuture;
 use parking_lot::Mutex;
+use peebify_transfer::net::url_host;
+use peebify_transfer::part::discard_part;
+use peebify_transfer::Sealed;
 use serde_json::{json, Value};
 
-use super::download_engine::combine_url;
-use super::http;
+use super::engine::{combine_url, merge_parts, JobCore, JobKind, Preview};
+use super::extract::resolve_7z_binary;
+use super::fs_util::manifest_key;
+use super::manifest::{self, Container, Cx, Hash, Manifest, Pack, Policy, Publisher};
+use super::validator::{recorded, Record, Triage};
+use super::{game_profiles, http, members};
 
 pub const AB_DIR_PARTS: [&str; 4] = [
     "GF2_Exilium_Data",
@@ -74,16 +87,9 @@ impl Entry {
         )
     }
 
-    fn resource(&self, ab_base: &str) -> super::validator::Resource {
-        super::validator::Resource::new(
-            format!("{AB_DEST_PREFIX}{}", self.name),
-            self.size,
-            self.md5.clone(),
-        )
-        .with_url(Some(combine_url(
-            ab_base,
-            &format!("{AB_REMOTE_DIR}/{}/{}", self.bucket, self.name),
-        )))
+    fn entry(&self, ab_base: &str) -> manifest::Entry {
+        let url = combine_url(ab_base, &format!("{AB_REMOTE_DIR}/{}/{}", self.bucket, self.name));
+        manifest::Entry::new(format!("{AB_DEST_PREFIX}{}", self.name), self.size, Hash::parse(&self.md5), url).live()
     }
 }
 
@@ -226,10 +232,8 @@ impl Config {
         self.entries.iter().filter(|e| e.voice.is_none())
     }
 
-    pub fn resources(&self) -> Vec<super::validator::Resource> {
-        self.base_entries()
-            .map(|e| e.resource(&self.ab_base))
-            .collect()
+    pub fn entries(&self) -> Vec<manifest::Entry> {
+        self.base_entries().map(|e| e.entry(&self.ab_base)).collect()
     }
 
     pub fn download_bytes(&self) -> u64 {
@@ -247,86 +251,55 @@ pub fn ab_dir(install_path: &Path) -> PathBuf {
         .fold(install_path.to_path_buf(), |p, part| p.join(part))
 }
 
-pub fn is_bundle_resource(resource: &super::validator::Resource) -> bool {
-    resource.dest().starts_with(AB_DEST_PREFIX)
-}
-
-fn bundle_name(resource: &super::validator::Resource) -> Option<String> {
-    if !is_bundle_resource(resource) {
-        return None;
-    }
-    let name = resource.dest().rsplit('/').next()?;
-    (!name.is_empty()).then(|| name.to_string())
+pub fn is_bundle(path: &str) -> bool {
+    path.starts_with(AB_DEST_PREFIX)
 }
 
 pub fn client_version_from_url(url: &str) -> Option<&str> {
     url.rsplit('/').nth(1).filter(|v| !v.is_empty())
 }
 
-pub fn unchanged_resources(
-    install_path: &Path,
-    resources: &[super::validator::Resource],
-) -> HashSet<String> {
+pub fn unchanged_bundles(install_path: &Path, files: &[manifest::Entry]) -> HashSet<String> {
     let dir = ab_dir(install_path);
-    let recorded: HashMap<String, Entry> = std::fs::read_to_string(dir.join(LOCAL_VERSION_FILE))
-        .map(|text| {
-            parse_manifest(&text)
-                .into_iter()
-                .map(|e| (e.name.clone(), e))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    resources
+    let recorded: HashMap<String, Entry> =
+        recorded_entries(&dir).into_iter().map(|e| (e.name.clone(), e)).collect();
+    files
         .iter()
-        .filter_map(|r| {
-            let dest = r.dest();
-            let size = r.size;
-
-            if !is_bundle_resource(r) {
-                let on_disk = size > 0
-                    && std::fs::metadata(install_path.join(dest)).is_ok_and(|m| m.len() == size);
-                return on_disk.then(|| dest.to_string());
-            }
-
-            let name = dest.rsplit('/').next()?;
+        .filter(|f| is_bundle(&f.path))
+        .filter_map(|f| {
+            let name = f.path.rsplit('/').next()?;
             let entry = recorded.get(name)?;
-            let md5 = r.md5();
-            let matches = entry.size == size
-                && entry.md5.eq_ignore_ascii_case(md5)
-                && std::fs::metadata(dir.join(name)).is_ok_and(|m| m.len() == size);
-            matches.then(|| dest.to_string())
+            let matches = entry.size == f.size
+                && entry.md5.eq_ignore_ascii_case(&f.hash.expected())
+                && std::fs::metadata(dir.join(name)).is_ok_and(|m| m.len() == f.size);
+            matches.then(|| manifest_key(&f.path))
         })
         .collect()
 }
 
-fn entry_from_resource(resource: &super::validator::Resource) -> Option<Entry> {
-    let dest = resource.dest();
-    let name = dest.rsplit('/').next()?.to_string();
-    let url = resource.url()?;
-    let bucket = url
+fn version_line(file: &manifest::Entry) -> Option<Entry> {
+    let name = file.path.rsplit('/').next()?.to_string();
+    let bucket = file
+        .url()
         .rsplit('/')
         .nth(1)
         .filter(|b| !b.is_empty() && *b != AB_REMOTE_DIR)?;
     Some(Entry {
         voice: voice_language(&name),
         name,
-        md5: resource.md5().to_lowercase(),
-        size: resource.size,
+        md5: file.hash.expected(),
+        size: file.size,
         bucket: bucket.to_string(),
     })
 }
 
-pub fn write_local_manifest(
-    install_path: &Path,
-    resources: &[super::validator::Resource],
-) -> Result<usize, String> {
+pub fn write_local_manifest(install_path: &Path, files: &[manifest::Entry]) -> Result<usize, String> {
     let dir = ab_dir(install_path);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     let mut body = String::new();
     let mut written: HashSet<String> = HashSet::new();
-    for entry in resources.iter().filter_map(entry_from_resource) {
+    for entry in files.iter().filter_map(version_line) {
         body.push_str(&entry.manifest_line());
         body.push('\n');
         written.insert(entry.name);
@@ -356,56 +329,6 @@ fn recorded_entries(ab_dir: &Path) -> Vec<Entry> {
         .unwrap_or_default()
 }
 
-pub fn prune_stale_bundles(
-    install_path: &Path,
-    resources: &[super::validator::Resource],
-) -> (u64, u64) {
-    if resources.is_empty() {
-        return (0, 0);
-    }
-    let keep: HashSet<String> = resources.iter().filter_map(bundle_name).collect();
-
-    let installed = super::download_engine::read_local_index(install_path);
-    if installed.is_empty() {
-        log::info!(
-            "GF2: no resource index from a previous run — leaving the bundle folder untouched."
-        );
-        return (0, 0);
-    }
-
-    let mut removed = 0u64;
-    let mut bytes = 0u64;
-    for resource in &installed {
-        let Some(name) = bundle_name(resource) else {
-            continue;
-        };
-        if keep.contains(&name) {
-            continue;
-        }
-        let Ok(path) = super::fs_util::safe_join(install_path, resource.dest()) else {
-            continue;
-        };
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if !meta.is_file() {
-            continue;
-        }
-        if meta.len() != resource.size {
-            log::info!("GF2: keeping {name} — its size no longer matches what we installed.");
-            continue;
-        }
-        match std::fs::remove_file(&path) {
-            Ok(()) => {
-                removed += 1;
-                bytes += meta.len();
-            }
-            Err(e) => log::warn!("GF2: could not remove stale bundle {name}: {e}"),
-        }
-    }
-    (removed, bytes)
-}
-
 pub fn installed_client_version(install_path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(install_path.join(CLIENT_MARKER_FILE)).ok()?;
     let marker: Value = serde_json::from_str(&text).ok()?;
@@ -416,7 +339,7 @@ pub fn installed_client_version(install_path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-pub fn record_client_version(install_path: &Path, version: &str) -> Result<(), String> {
+pub fn record_client_version(_sealed: &peebify_transfer::Sealed, install_path: &Path, version: &str) -> Result<(), String> {
     let text = serde_json::to_string_pretty(&json!({ "clientVersion": version }))
         .map_err(|e| e.to_string())?;
     super::fs_util::write_atomic(&install_path.join(CLIENT_MARKER_FILE), text.as_bytes())
@@ -431,52 +354,202 @@ pub fn client_is_current(install_path: &Path, exe_name: &str, client_version: &s
         && installed_client_version(install_path).as_deref() == Some(client_version)
 }
 
+// ------------ Install Preview ------------
+// The client package and the resources to download.
+pub(super) async fn preview(profile: &Value) -> Result<Preview, String> {
+    let config = fetch_config(profile).await?;
+    let client_bytes = http::content_length(&config.client_url).await.unwrap_or(0);
+    let resource_bytes = config.download_bytes();
+
+    let entries = vec![
+        (
+            "client".to_string(),
+            format!("game client {}", config.client_version),
+            client_bytes,
+            1,
+        ),
+        (
+            "resources".to_string(),
+            "game resources".to_string(),
+            resource_bytes,
+            config.file_count(),
+        ),
+    ];
+
+    Ok(Preview {
+        version: config.ab_version.clone(),
+        download_bytes: client_bytes + resource_bytes,
+        install_bytes: 0,
+        file_count: config.file_count() + 1,
+        approximate: true,
+        parts: merge_parts(&entries),
+    })
+}
+
+// ------------ Install ------------
+// The resource bundles are the manifest. The game adds bundles of its own and records them in the same Version.txt,
+// so the bundles it vouches for skip their checksum, and its lines are kept when Peebify rewrites the file. The client
+// is an archive that comes with the resources when it is out of date; its files are read from the archive's index so the
+// install record covers them, and a repair checks them against that record and takes the broken ones from the archive.
+pub(super) struct Gf2;
+
+impl Publisher for Gf2 {
+    fn manifest<'a>(&'a self, cx: &'a Cx<'a>) -> BoxFuture<'a, Result<Manifest, String>> {
+        Box::pin(async move {
+            let config = fetch_config(cx.profile).await?;
+            let mut manifest = Manifest { entries: config.entries(), mirrors: vec![config.ab_base], ..Default::default() };
+            log::info!(
+                "{} resources {} resolved with {} files.",
+                game_profiles::display_name(cx.profile),
+                config.ab_version,
+                manifest.entries.len()
+            );
+            manifest.version = config.ab_version;
+            let kept = match cx.purpose {
+                JobKind::Verify => Vec::new(),
+                _ => recorded_client(cx.dir).await,
+            };
+            match cx.purpose {
+                JobKind::Install => match client_archive(cx).await? {
+                    Some((container, files)) => {
+                        manifest.containers.push(container);
+                        manifest.listed = if files.is_empty() { kept } else { files };
+                    }
+                    None => manifest.listed = kept,
+                },
+                _ => manifest.entries.extend(kept),
+            }
+            Ok(manifest)
+        })
+    }
+
+    fn latest<'a>(&'a self, profile: &'a Value, fresh: bool) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            let versions = fetch_versions_with(profile, fresh).await?;
+            Ok(json!({ "version": versions.ab_version, "clientVersion": versions.client_version }))
+        })
+    }
+
+    fn preview<'a>(&'a self, profile: &'a Value, _quality: Option<&'a str>) -> BoxFuture<'a, Result<Preview, String>> {
+        Box::pin(preview(profile))
+    }
+
+    fn update_pending(&self, latest: &Value, dir: &Path) -> bool {
+        latest["clientVersion"].as_str().filter(|v| !v.is_empty()).is_some_and(|client| client_update_pending(dir, client))
+    }
+
+    fn policy(&self, dir: &Path) -> Policy {
+        let unrecorded = super::game_manager::local_game_version_at(dir).is_none();
+        Policy { checksums: unrecorded, records: unrecorded, partial_verify: true, ..Policy::default() }
+    }
+
+    fn triage(&self, dir: &Path, files: &[manifest::Entry]) -> Triage {
+        let mut triage = Record::load(dir).triage(dir, files);
+        triage.trusted.extend(unchanged_bundles(dir, files));
+        triage
+    }
+
+    fn after_seal<'a>(
+        &'a self,
+        job: &'a Arc<JobCore>,
+        dir: &'a Path,
+        manifest: &'a Manifest,
+        sealed: &'a Sealed,
+    ) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            if let Some(client) = manifest.containers.first().and_then(|c| c.parts.first()) {
+                note_client(job.profile(), dir, client, sealed)?;
+            }
+            let bundles = manifest.entries.clone();
+            let recorded = bundles.len();
+            let path = dir.to_path_buf();
+            let carried = tauri::async_runtime::spawn_blocking(move || write_local_manifest(&path, &bundles))
+                .await
+                .map_err(|e| format!("GF2 bundle finish task panicked: {e}"))??;
+            log::info!(
+                "GF2: recorded {recorded} resources in the install's Version.txt for the game to read ({carried} line(s) the game added kept)."
+            );
+            super::validator::update_game_config_file(sealed, dir, &manifest.version)?;
+            Ok(true)
+        })
+    }
+}
+
+async fn recorded_client(dir: &Path) -> Vec<manifest::Entry> {
+    let record = recorded(dir).await;
+    let packs: Arc<[Pack]> = record.packs.clone().into();
+    let is_member = |file: &manifest::Entry| matches!(file.hash, Hash::Crc32(_));
+    record.entries().into_iter().filter(is_member).map(|file| file.member_of(&packs)).collect()
+}
+
+async fn client_archive(cx: &Cx<'_>) -> Result<Option<(Container, Vec<manifest::Entry>)>, String> {
+    let client = fetch_client_info(cx.profile).await?;
+
+    if client_is_current(cx.dir, game_profiles::executable_name(cx.profile), &client.version) {
+        log::info!(
+            "GF2 client {} already installed — only resources need checking.",
+            client.version
+        );
+        return Ok(None);
+    }
+
+    resolve_7z_binary(cx.app).await?;
+    let size = http::content_length(&client.url)
+        .await
+        .filter(|n| *n > 0)
+        .ok_or_else(|| {
+            log::warn!(
+                "GF2 client {}: {} gave no size for the package.",
+                client.version,
+                url_host(&client.url)
+            );
+            "Could not read the size of the GF2 client package. Try again in a moment.".to_string()
+        })?;
+    log::info!("GF2 client {} queued with the resources ({size} bytes).", client.version);
+    let packs: Arc<[Pack]> = vec![Pack { url: client.url.as_str().into(), size }].into();
+    let files = members::listing(&packs, &cx.job).await.unwrap_or_else(|e| {
+        log::warn!("GF2: could not read the client archive's index, so a repair will not cover the client: {e}");
+        Vec::new()
+    });
+    let archive = manifest::Entry::new(client.file, size, Hash::None, client.url);
+    Ok(Some((Container { parts: vec![archive], ..Default::default() }, files)))
+}
+
+fn note_client(profile: &Value, install_path: &Path, client: &manifest::Entry, sealed: &Sealed) -> Result<(), String> {
+    let url = client.url();
+    let version = client_version_from_url(url)
+        .ok_or_else(|| format!("Could not read the GF2 client version from {url}"))?;
+    let exe = game_profiles::executable_name(profile);
+    if !install_path.join(exe).is_file() {
+        let archive = super::fs_util::safe_join(install_path, &client.path)?;
+        let _ = std::fs::remove_file(&archive);
+        discard_part(&archive);
+        return Err(format!(
+            "The GF2 client package unpacked without {exe}. The download may be incomplete. Try installing again."
+        ));
+    }
+    log::info!("GF2 client {version} unpacked.");
+    record_client_version(sealed, install_path, version)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::validator::Resource;
+    use crate::backend::fs_util::TempDir;
 
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let base = std::env::temp_dir().join(format!(
-                "peebify-gf2-test-{tag}-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            let _ = std::fs::remove_dir_all(&base);
-            std::fs::create_dir_all(&base).unwrap();
-            Self(base)
-        }
-        fn path(&self) -> &Path {
-            &self.0
-        }
-        fn bundle(&self, name: &str, bytes: &[u8]) -> PathBuf {
-            let dir = ab_dir(&self.0);
-            std::fs::create_dir_all(&dir).unwrap();
-            let path = dir.join(name);
-            std::fs::write(&path, bytes).unwrap();
-            path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+    fn bundle(dir: &TempDir, name: &str, bytes: &[u8]) -> PathBuf {
+        let folder = ab_dir(dir.path());
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
     }
 
     const MD5: &str = "0123456789abcdef0123456789abcdef";
 
-    fn res(name: &str, size: u64) -> Resource {
-        Resource::new(format!("{AB_DEST_PREFIX}{name}"), size, MD5).with_url(Some(format!(
-            "https://cdn.example/prod/{AB_REMOTE_DIR}/27767/{name}"
-        )))
-    }
-
-    fn record_installed(dir: &TempDir, resources: &[Resource]) {
-        super::super::download_engine::write_local_index(dir.path(), resources).unwrap();
+    fn res(name: &str, size: u64) -> manifest::Entry {
+        let url = format!("https://cdn.example/prod/{AB_REMOTE_DIR}/27767/{name}");
+        manifest::Entry::new(format!("{AB_DEST_PREFIX}{name}"), size, Hash::parse(MD5), url).live()
     }
 
     #[test]
@@ -495,97 +568,72 @@ mod tests {
         let dir = TempDir::new("client-pending");
         assert!(!client_update_pending(dir.path(), "1.2.0"));
 
-        record_client_version(dir.path(), "1.1.0").unwrap();
+        record_client_version(&peebify_transfer::Sealed::nothing_written(), dir.path(), "1.1.0").unwrap();
         assert!(client_update_pending(dir.path(), "1.2.0"));
         assert!(!client_update_pending(dir.path(), "1.1.0"));
     }
 
     #[test]
-    fn a_bundle_the_game_downloaded_itself_survives_an_update() {
-        let dir = TempDir::new("game-owned");
-        let ours = dir.bundle("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle", b"data");
-        let theirs = dir.bundle("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bundle", b"data");
-        record_installed(&dir, &[res("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle", 4)]);
-
-        let (removed, _) = prune_stale_bundles(
-            dir.path(),
-            &[res("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle", 4)],
-        );
-
-        assert_eq!(removed, 0);
-        assert!(ours.is_file());
-        assert!(theirs.is_file(), "a bundle the game fetched was deleted");
+    fn an_install_with_no_version_file_is_checked_by_checksum_and_recorded() {
+        let dir = TempDir::new("gf2-policy");
+        let policy = Gf2.policy(dir.path());
+        assert!(policy.checksums && policy.records && policy.partial_verify, "a Steam copy learns its version from its first repair");
+        let config = dir.path().join(crate::backend::validator::GAME_CONFIG_FILE);
+        std::fs::write(config, r#"{"version":"1.0.0"}"#).unwrap();
+        let policy = Gf2.policy(dir.path());
+        assert!(!policy.checksums && !policy.records && policy.partial_verify);
     }
 
     #[test]
-    fn a_bundle_we_installed_and_the_manifest_dropped_is_removed() {
-        let dir = TempDir::new("superseded");
-        let kept = dir.bundle("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle", b"data");
-        let stale = dir.bundle("cccccccccccccccccccccccccccccccc.bundle", b"data");
-        record_installed(
-            &dir,
-            &[
-                res("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle", 4),
-                res("cccccccccccccccccccccccccccccccc.bundle", 4),
-            ],
-        );
-
-        let (removed, bytes) = prune_stale_bundles(
-            dir.path(),
-            &[res("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle", 4)],
-        );
-
-        assert_eq!((removed, bytes), (1, 4));
-        assert!(kept.is_file());
-        assert!(!stale.exists());
+    fn the_games_own_version_file_vouches_only_for_bundles_it_records_unchanged() {
+        let dir = TempDir::new("game-vouches");
+        bundle(&dir, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle", b"data");
+        bundle(&dir, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bundle", b"data");
+        bundle(&dir, "cccccccccccccccccccccccccccccccc.bundle", b"data");
+        std::fs::write(
+            ab_dir(dir.path()).join(LOCAL_VERSION_FILE),
+            "{0}/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle#0123456789ABCDEF0123456789ABCDEF#4#27767\n\
+             {0}/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bundle#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#4#27767\n",
+        )
+        .unwrap();
+        let files = [
+            res("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle", 4),
+            res("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bundle", 4),
+            res("cccccccccccccccccccccccccccccccc.bundle", 4),
+        ];
+        let trusted = unchanged_bundles(dir.path(), &files);
+        assert_eq!(trusted, HashSet::from([manifest_key(&files[0].path)]));
+        assert!(files.iter().all(|f| f.live), "a bundle replaces one the game reads");
     }
 
-    #[test]
-    fn a_bundle_rewritten_since_we_installed_it_is_kept() {
-        let dir = TempDir::new("resized");
-        let touched = dir.bundle("cccccccccccccccccccccccccccccccc.bundle", b"grown-in-place");
-        record_installed(&dir, &[res("cccccccccccccccccccccccccccccccc.bundle", 4)]);
+    #[tokio::test]
+    async fn the_clients_files_are_the_recorded_ones_with_a_crc32() {
+        let dir = TempDir::new("client-files");
+        dir.write("GF2.exe", b"exe");
+        dir.write("GF2_Exilium_Data/data.bin", b"data");
+        bundle(&dir, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle", b"data");
+        let packs: Arc<[Pack]> = vec![Pack { url: "https://cdn.example/1.2.0/GF2_Exilium_Origin.zip".into(), size: 7 }].into();
+        let client = |path: &str, data: &[u8]| {
+            manifest::Entry::new(path, data.len() as u64, Hash::Crc32(crc32fast::hash(data)), "").member_of(&packs)
+        };
+        let files = [client("GF2.exe", b"exe"), client("GF2_Exilium_Data/data.bin", b"data"), res("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle", 4)];
+        Record::of(dir.path(), "27767", &files).save(dir.path()).unwrap();
 
-        let (removed, _) = prune_stale_bundles(
-            dir.path(),
-            &[res("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle", 4)],
-        );
+        let kept = recorded_client(dir.path()).await;
 
-        assert_eq!(removed, 0);
-        assert!(touched.is_file());
-    }
-
-    #[test]
-    fn without_a_recorded_index_nothing_is_pruned() {
-        let dir = TempDir::new("no-index");
-        let stranger = dir.bundle("cccccccccccccccccccccccccccccccc.bundle", b"data");
-
-        let (removed, _) = prune_stale_bundles(
-            dir.path(),
-            &[res("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle", 4)],
-        );
-
-        assert_eq!(removed, 0);
-        assert!(stranger.is_file());
-    }
-
-    #[test]
-    fn an_empty_manifest_prunes_nothing() {
-        let dir = TempDir::new("empty-manifest");
-        let p = dir.bundle("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle", b"data");
-        record_installed(&dir, &[res("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle", 4)]);
-
-        assert_eq!(prune_stale_bundles(dir.path(), &[]), (0, 0));
-        assert!(p.is_file(), "an empty manifest must not wipe the install");
+        let paths: Vec<&str> = kept.iter().map(|f| &*f.path).collect();
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&"GF2.exe") && paths.contains(&"GF2_Exilium_Data/data.bin"), "{paths:?}");
+        assert!(kept.iter().all(|f| matches!(&f.source, manifest::Source::Member { packs: p, at: None } if p[0].size == 7)));
     }
 
     #[test]
     fn the_rewritten_manifest_keeps_lines_the_game_added() {
         let dir = TempDir::new("carry-over");
-        dir.bundle("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle", b"data");
-        dir.bundle("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bundle", b"data");
-        dir.bundle("CN000000000000000000000000000000ff.gf", b"data");
-        dir.bundle("dddddddddddddddddddddddddddddddd.bundle", b"data");
+        bundle(&dir, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle", b"data");
+        bundle(&dir, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bundle", b"data");
+        bundle(&dir, "CN000000000000000000000000000000ff.gf", b"data");
+        bundle(&dir, "dddddddddddddddddddddddddddddddd.bundle", b"data");
         std::fs::write(
             ab_dir(dir.path()).join(LOCAL_VERSION_FILE),
             "{0}/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bundle#0123456789ABCDEF0123456789ABCDEF#4#27767\n\

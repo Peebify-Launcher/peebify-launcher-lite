@@ -11,7 +11,6 @@ mod helper {
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
-    use windows_sys::core::BOOL;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
     use windows_sys::Win32::System::Threading::{
@@ -19,11 +18,13 @@ mod helper {
         STARTUPINFOW,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible, PostThreadMessageW,
-        SetWindowsHookExW, UnhookWindowsHookEx, WH_GETMESSAGE,
+        GetClassNameW, GetWindowThreadProcessId, PostThreadMessageW, SetWindowsHookExW,
+        UnhookWindowsHookEx, WH_GETMESSAGE,
     };
 
-    use peebify_helpers::common::process::{find_processes, is_running, PinnedLibrary};
+    use peebify_helpers::common::process::{
+        find_processes, is_running, visible_windows_of, PinnedLibrary,
+    };
     use peebify_helpers::common::wide;
     use peebify_helpers::fps::cmdline;
     use peebify_helpers::fps::section::SectionView;
@@ -72,9 +73,6 @@ mod helper {
             match argument.as_str() {
                 "--game" => game = Some(PathBuf::from(value()?)),
                 "--attach" => attach = Some(value()?),
-                "--stub" => {
-                    value()?;
-                }
                 "--" => {
                     game_arguments.extend(arguments);
                     break;
@@ -160,53 +158,14 @@ mod helper {
         })
     }
 
-    struct WindowSearch {
-        pid: u32,
-        preferred: HWND,
-        any: HWND,
-    }
-
-    unsafe extern "system" fn collect_window(window: HWND, lparam: LPARAM) -> BOOL {
-        let search = &mut *(lparam as *mut WindowSearch);
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(window, &mut pid);
-        if pid != search.pid || IsWindowVisible(window) == 0 {
-            return 1;
-        }
-
-        let mut class = [0u16; 64];
-        let length = GetClassNameW(window, class.as_mut_ptr(), class.len() as i32);
-        let class = String::from_utf16_lossy(&class[..length.max(0) as usize]);
-        if class == "UnityWndClass" {
-            search.preferred = window;
-            return 0;
-        }
-        if search.any.is_null() {
-            search.any = window;
-        }
-        1
-    }
-
     fn game_window_thread(pid: u32) -> Option<u32> {
-        let mut search = WindowSearch {
-            pid,
-            preferred: std::ptr::null_mut(),
-            any: std::ptr::null_mut(),
+        let windows = visible_windows_of(pid);
+        let is_unity = |window: &HWND| {
+            let mut class = [0u16; 64];
+            let length = unsafe { GetClassNameW(*window, class.as_mut_ptr(), class.len() as i32) };
+            String::from_utf16_lossy(&class[..length.max(0) as usize]) == "UnityWndClass"
         };
-        unsafe {
-            EnumWindows(
-                Some(collect_window),
-                &mut search as *mut WindowSearch as LPARAM,
-            )
-        };
-        let window = if search.preferred.is_null() {
-            search.any
-        } else {
-            search.preferred
-        };
-        if window.is_null() {
-            return None;
-        }
+        let window = *windows.iter().find(|w| is_unity(w)).or(windows.first())?;
         let mut owner = 0u32;
         let thread = unsafe { GetWindowThreadProcessId(window, &mut owner) };
         (thread != 0 && owner == pid).then_some(thread)

@@ -60,11 +60,6 @@ fn measure_games(dirs: Vec<PathBuf>, sizes: Arc<Mutex<Vec<Option<u64>>>>, ctx: e
 }
 
 pub fn run(launch: Launch) -> eframe::Result<i32> {
-    let options = eframe::NativeOptions {
-        viewport: ui::viewport(ui::WINDOW),
-        centered: true,
-        ..Default::default()
-    };
     let identity = identity_line(&launch.install_dir);
     let games: Vec<GameDir> = match launch.start {
         Start::Choose => installed_game_dirs(&launch.install_dir)
@@ -76,46 +71,38 @@ pub fn run(launch: Launch) -> eframe::Result<i32> {
             .collect(),
         Start::Remove(_) => Vec::new(),
     };
-    let outcome = std::rc::Rc::new(std::cell::Cell::new(crate::exit::OK));
-    let result_slot = outcome.clone();
-    eframe::run_native(
-        "Uninstall Peebify Launcher",
-        options,
-        Box::new(move |cc| {
-            ui::apply_theme(&cc.egui_ctx);
-            let sizes = Arc::new(Mutex::new(vec![None; games.len()]));
-            measure_games(
-                games.iter().map(|g| g.path.clone()).collect(),
-                sizes.clone(),
-                cc.egui_ctx.clone(),
-            );
-            let mut app = UninstallApp {
-                logo: ui::load_logo(&cc.egui_ctx),
-                identity,
-                install_dir: launch.install_dir,
-                staged: launch.staged,
-                games,
-                sizes,
-                remove_data: false,
-                remove_games: false,
-                screen: Screen::Choose,
-                rx: None,
-                pacer: ui::Pacer::new(""),
-                warnings: Vec::new(),
-                error: None,
-                respawn_error: None,
-                last_run: None,
-                copied: ui::Copied::default(),
-                chrome: ui::Chrome::default(),
-                outcome: result_slot,
-            };
-            if let Start::Remove(opts) = launch.start {
-                app.start_removal(opts);
-            }
-            Ok(Box::new(app))
-        }),
-    )?;
-    Ok(outcome.get())
+    ui::run_window("Uninstall Peebify Launcher", ui::WINDOW, move |ctx, outcome| {
+        let sizes = Arc::new(Mutex::new(vec![None; games.len()]));
+        measure_games(
+            games.iter().map(|g| g.path.clone()).collect(),
+            sizes.clone(),
+            ctx.clone(),
+        );
+        let mut app = UninstallApp {
+            logo: ui::load_logo(ctx),
+            identity,
+            install_dir: launch.install_dir,
+            staged: launch.staged,
+            games,
+            sizes,
+            remove_data: false,
+            remove_games: false,
+            screen: Screen::Choose,
+            rx: None,
+            pacer: ui::Pacer::new(""),
+            warnings: Vec::new(),
+            error: None,
+            respawn_error: None,
+            last_run: None,
+            copied: ui::Copied::default(),
+            chrome: ui::Chrome::default(),
+            outcome,
+        };
+        if let Start::Remove(opts) = launch.start {
+            app.start_removal(opts);
+        }
+        Box::new(app)
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Hash, Debug)]
@@ -173,30 +160,20 @@ impl UninstallApp {
     }
 
     fn drain_events(&mut self) {
-        let Some(rx) = &self.rx else { return };
-        while let Ok(event) = rx.try_recv() {
+        while let Some(event) = ui::next_event(&mut self.rx, &mut self.pacer) {
             match event {
-                EngineEvent::Status { phase, percent } => self.pacer.report(&phase, percent),
                 EngineEvent::Warning(w) => self.warnings.push(w),
-                EngineEvent::Committed => {}
-                EngineEvent::Finished => {
-                    self.pacer.finish_as("Cleaning up…");
-                    self.rx = None;
-                    return;
-                }
+                EngineEvent::Finished => self.pacer.finish_as("Cleaning up…"),
                 EngineEvent::Cancelled => {
                     self.outcome.set(crate::exit::CANCELLED);
-                    self.rx = None;
                     self.screen = Screen::Choose;
-                    return;
                 }
                 EngineEvent::Failed(e) => {
                     self.outcome.set(crate::exit::FAILED);
                     self.error = Some(e);
                     self.screen = Screen::Failed;
-                    self.rx = None;
-                    return;
                 }
+                _ => {}
             }
         }
     }
@@ -239,11 +216,15 @@ impl eframe::App for UninstallApp {
 
         let screen = self.screen;
         let logo = self.logo.clone();
-        let rail = ui::Rail::new(logo.as_ref(), self.identity.clone());
+        let rail = ui::Rail {
+            logo: logo.as_ref(),
+            identity: self.identity.clone(),
+            ..Default::default()
+        };
         let rail = if screen == Screen::Failed {
-            rail.failed()
+            ui::Rail { error: true, muted: true, badge: ui::Badge::Failed, ..rail }
         } else {
-            rail.muted()
+            ui::Rail { muted: true, ..rail }
         };
         let mood = match screen {
             Screen::Choose => ui::Mood::UNINSTALL,
@@ -251,11 +232,7 @@ impl eframe::App for UninstallApp {
             Screen::Removed => ui::Mood::REMOVED,
             Screen::Failed => ui::Mood::FAILED,
         };
-        let closable = if screen == Screen::Removing {
-            ui::Close::Disabled
-        } else {
-            ui::Close::Enabled
-        };
+        let closable = screen != Screen::Removing;
 
         ui::split(root, mood, closable, rail, |body| match screen {
             Screen::Choose => self.page_choose(body, ctx),
@@ -268,13 +245,10 @@ impl eframe::App for UninstallApp {
 
 impl UninstallApp {
     fn page_choose(&mut self, ui_: &mut egui::Ui, ctx: &egui::Context) {
-        ui::group(ui_, |g| {
-            g.add_space(12.0);
-            ui::heading(g, "Uninstall", 26.0);
-        });
+        ui::page_title(ui_, 12.0, "Uninstall", 26.0);
 
         let removable = self.any_removable();
-        ui::group(ui_, |g| {
+        ui_.scope(|g| {
             g.add_space(20.0);
             ui::card(g, ui::Tone::Plain, 15, |card| {
                 ui::checkbox(card, &mut self.remove_data, "Delete settings & mods");
@@ -293,7 +267,7 @@ impl UninstallApp {
         let mut remove = false;
         let mut keep = false;
         ui::footer(ui_, |foot| {
-            ui::group(foot, |foot| {
+            foot.scope(|foot| {
                 ui::action_row(foot, true, |row| {
                     remove = ui::danger_button(row, "Uninstall").clicked();
                     row.add_space(10.0);
@@ -404,33 +378,17 @@ impl UninstallApp {
     }
 
     fn page_removing(&mut self, ui_: &mut egui::Ui) {
-        ui::group(ui_, |g| {
-            g.add_space(14.0);
-            ui::heading(g, "Uninstalling", 25.0);
-        });
+        ui::page_title(ui_, 14.0, "Uninstalling", 25.0);
         let percent = self.pacer.percent();
         let label = self.pacer.phase().to_string();
-        ui::group(ui_, |g| {
-            g.add_space(26.0);
-            ui::progress_readout(g, &label, percent, ui::text::BASE, 12.0);
-            g.add_space(10.0);
-            ui::progress_bar(
-                g,
-                egui::Id::new("uninstall-progress"),
-                ui::bar_fraction(percent),
-                ui::BAR_STEADY,
-            );
-        });
+        ui::progress_block(ui_, "uninstall-progress", &label, percent);
     }
 
     fn page_removed(&mut self, ui_: &mut egui::Ui, ctx: &egui::Context) {
         let partial = !self.warnings.is_empty();
-        ui::group(ui_, |g| {
-            g.add_space(16.0);
-            ui::heading(g, if partial { "Mostly done" } else { "All done" }, 32.0);
-        });
+        ui::page_title(ui_, 16.0, if partial { "Mostly done" } else { "All done" }, 32.0);
         let warnings = self.warnings.clone();
-        ui::group(ui_, |g| {
+        ui_.scope(|g| {
             g.add_space(12.0);
             ui::paragraph(
                 g,
@@ -445,26 +403,14 @@ impl UninstallApp {
             );
             if partial {
                 g.add_space(16.0);
-                ui::card(g, ui::Tone::Notice, 13, |card| {
-                    egui::ScrollArea::vertical()
-                        .max_height(180.0)
-                        .auto_shrink([false, true])
-                        .show(card, |list| {
-                            for (i, warning) in warnings.iter().enumerate() {
-                                if i > 0 {
-                                    list.add_space(10.0);
-                                }
-                                ui::bullet_row(list, ui::NOTICE, warning);
-                            }
-                        });
-                });
+                ui::warnings_card(g, &warnings, 180.0);
             }
         });
 
         let mut close = false;
         let mut open_log = false;
         ui::footer(ui_, |foot| {
-            ui::group(foot, |foot| {
+            foot.scope(|foot| {
                 ui::action_row_split(
                     foot,
                     |left| {
@@ -485,41 +431,22 @@ impl UninstallApp {
 
     fn page_failed(&mut self, ui_: &mut egui::Ui, ctx: &egui::Context) {
         let err = self.error.clone().unwrap_or_default();
-        ui::group(ui_, |g| {
-            g.add_space(12.0);
-            ui::heading(g, "Uninstall failed", 26.0);
-        });
-        let friendly = ui::friendly_error(&err);
-        ui::group(ui_, |g| {
-            g.add_space(18.0);
-            ui::detail_box(g, ui::Tone::Danger, "Details", &err, 170.0);
-            if !friendly.is_empty() {
-                g.add_space(10.0);
-                ui::paragraph(g, friendly, ui::text::XS, ui::tx(0.62), 400.0);
-            }
-        });
-
-        let copy_label = self.copied.label(ctx);
         let can_retry = self.last_run.is_some();
-        let mut actions = None;
-        ui::footer(ui_, |foot| {
-            ui::group(foot, |foot| {
-                actions = Some(ui::failure_footer(foot, copy_label, can_retry));
-            });
-        });
-        let Some(actions) = actions else { return };
-
-        if actions.copy {
-            ctx.copy_text(err);
-            self.copied.mark();
-        } else if actions.open_log {
-            ui::open_log_folder();
-        } else if actions.retry {
-            if let Some(opts) = self.last_run.clone() {
-                self.start_removal(opts);
+        match ui::failure_page(
+            ui_,
+            &mut self.copied,
+            &err,
+            "Uninstall failed",
+            None,
+            can_retry,
+        ) {
+            Some(ui::Failure::Retry) => {
+                if let Some(opts) = self.last_run.clone() {
+                    self.start_removal(opts);
+                }
             }
-        } else if actions.close {
-            ui::close(ctx);
+            Some(ui::Failure::Close) => ui::close(ctx),
+            None => {}
         }
     }
 }

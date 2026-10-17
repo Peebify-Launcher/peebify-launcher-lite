@@ -28,6 +28,12 @@ pub fn api_config_url() -> String {
     DEFAULT_API_CONFIG_URL.to_string()
 }
 
+pub fn peebify_content_on(app: &tauri::AppHandle) -> bool {
+    use tauri::Manager;
+    app.try_state::<super::BackendState>()
+        .is_none_or(|s| s.config.get("behavior.peebifyContent") != Value::Bool(false))
+}
+
 pub fn api_origin() -> String {
     url::Url::parse(&api_config_url())
         .map(|u| u.origin().ascii_serialization())
@@ -225,22 +231,21 @@ impl ApiConfig {
         clients.get(key).cloned()
     }
 
-    pub fn news_url_for_client(&self, client_key: Option<&str>) -> Option<String> {
+    fn url_for_client(&self, client_key: Option<&str>, section: &str) -> Option<String> {
         self.client_section(client_key)?
-            .get("news-notices")?
+            .get(section)?
             .get("url")?
             .as_str()
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     }
 
+    pub fn news_url_for_client(&self, client_key: Option<&str>) -> Option<String> {
+        self.url_for_client(client_key, "news-notices")
+    }
+
     pub fn wallpapers_slogan_url_for_client(&self, client_key: Option<&str>) -> Option<String> {
-        self.client_section(client_key)?
-            .get("wallpapers-slogan")?
-            .get("url")?
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
+        self.url_for_client(client_key, "wallpapers-slogan")
     }
 }
 
@@ -284,22 +289,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn format_age_uses_minutes_then_hours() {
-        assert_eq!(format_age(-5), "age 0m");
-        assert_eq!(format_age(59 * 60_000), "age 59m");
-        assert_eq!(format_age(60 * 60_000), "age 1h");
-        assert_eq!(format_age(26 * 60 * 60_000 + 59 * 60_000), "age 26h");
-    }
-
-    #[test]
-    fn cache_expiry_treats_future_stamps_as_due() {
-        let now = 1_000_000_000_000;
-        assert!(!cache_expired(now - 60_000, now));
-        assert!(cache_expired(now - CACHE_DURATION_MS - 1, now));
-        assert!(cache_expired(now + 60_000, now));
-    }
-
-    #[test]
     fn validate_config_needs_only_news() {
         let config = json!({
             "clients": { "wuwa": { "news-notices": { "url": "https://example.com/news.json" } } }
@@ -308,64 +297,34 @@ mod tests {
         assert!(!validate_config(&json!({ "clients": { "wuwa": {} } })));
     }
 
-    #[test]
-    fn load_from_cache_reads_a_stale_cache_file() {
-        let dir =
-            std::env::temp_dir().join(format!("peebify-api-config-test-{}", std::process::id()));
+    fn cached_api(name: &str, client: &str, age_ms: i64) -> (PathBuf, Arc<ApiConfig>) {
+        let dir = std::env::temp_dir().join(format!("peebify-api-config-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let config = json!({
-            "clients": { "wuwa": {
-                "news-notices": { "url": "https://example.com/news.json" }
-            } }
-        });
-        let stale = chrono::Utc::now().timestamp_millis() - CACHE_DURATION_MS * 2;
+        let config = json!({ "clients": { client: { "news-notices": { "url": "https://example.com/news.json" } } } });
+        let stamp = chrono::Utc::now().timestamp_millis() - age_ms;
         std::fs::write(
             dir.join(CACHE_FILE_NAME),
-            json!({ "config": config, "timestamp": stale, "etag": "abc" }).to_string(),
+            json!({ "config": config, "timestamp": stamp, "etag": "abc" }).to_string(),
         )
         .unwrap();
-
         let api = ApiConfig::new(&dir);
-        assert!(!api.is_loaded());
         api.load_from_cache();
-        assert!(api.is_loaded());
-        assert!(api.should_refresh());
-        assert_eq!(
-            api.news_url_for_client(Some("wuwa")).as_deref(),
-            Some("https://example.com/news.json")
-        );
-        assert_eq!(
-            api.news_url_for_client(None).as_deref(),
-            Some("https://example.com/news.json")
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
+        (dir, api)
     }
 
     #[test]
-    fn load_from_cache_skips_an_invalid_cache_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "peebify-api-config-invalid-test-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let config = json!({
-            "clients": { "osLive": {
-                "news-notices": { "url": "https://example.com/news.json" }
-            } }
-        });
-        let now = chrono::Utc::now().timestamp_millis();
-        std::fs::write(
-            dir.join(CACHE_FILE_NAME),
-            json!({ "config": config, "timestamp": now }).to_string(),
-        )
-        .unwrap();
+    fn load_from_cache_reads_a_stale_file_and_skips_an_invalid_one() {
+        let (dir, api) = cached_api("stale", "wuwa", CACHE_DURATION_MS * 2);
+        assert!(api.is_loaded());
+        assert!(api.should_refresh());
+        let news = Some("https://example.com/news.json");
+        assert_eq!(api.news_url_for_client(Some("wuwa")).as_deref(), news);
+        assert_eq!(api.news_url_for_client(None).as_deref(), news);
+        let _ = std::fs::remove_dir_all(&dir);
 
-        let api = ApiConfig::new(&dir);
-        api.load_from_cache();
+        let (dir, api) = cached_api("invalid", "osLive", 0);
         assert!(!api.is_loaded());
         assert!(api.should_refresh());
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

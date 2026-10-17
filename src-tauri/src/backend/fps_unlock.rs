@@ -11,7 +11,7 @@ use peebify_helpers::fps::shared::{
     STATUS_READY,
 };
 
-use super::state::BackendState;
+use super::BackendState;
 use super::{err_response, game_profiles, ok_with};
 
 const HELPER_NAME: &str = "peebify-fps-helper.exe";
@@ -105,17 +105,13 @@ fn status_label(status: u32) -> &'static str {
     }
 }
 
-fn resource(app: &AppHandle, name: &str) -> Option<PathBuf> {
-    super::fs_util::resource(app, name)
-}
-
 pub fn report_failure(app: &AppHandle, game_id: &str, display_name: &str, error: &str) {
     log::error!("[fps] could not start the unlocker for {game_id}: {error}");
     let _ = app.emit(
         "fps-unlock-status",
         json!({ "gameId": game_id, "state": "failed", "error": error }),
     );
-    super::notify::notify_if_backgrounded(
+    super::platform::notify_if_backgrounded(
         app,
         "FPS unlocker didn't start",
         &format!("{display_name} is starting at its normal frame rate. {error}"),
@@ -144,10 +140,8 @@ mod live {
         STOP_PAUSED, STUB_NAME,
     };
 
-    use super::super::state::BackendState;
-    use super::{
-        cached_hint, remember_offset, resource, settings, status_label, Launch, HELPER_NAME,
-    };
+    use super::super::BackendState;
+    use super::{cached_hint, remember_offset, settings, status_label, Launch, HELPER_NAME};
 
     const STATUS_POLL: Duration = Duration::from_millis(400);
     const STATUS_WATCH_LIMIT: Duration = Duration::from_secs(6 * 60);
@@ -180,7 +174,7 @@ mod live {
             return Ok(None);
         }
 
-        let helper = resource(app, HELPER_NAME)
+        let helper = super::super::fs_util::resource(app, HELPER_NAME)
             .ok_or("The FPS unlocker's helper is missing from this install.")?;
         let helper = super::super::process_utils::resolve_subst(&helper);
         if !helper.with_file_name(STUB_NAME).is_file() {
@@ -387,7 +381,7 @@ mod live {
                         STATUS_FAILED => {
                             let error = reading.error.unwrap_or_default();
                             log::warn!("[fps] {game_id} unlock failed: {error}");
-                            super::super::notify::notify_if_backgrounded(
+                            super::super::platform::notify_if_backgrounded(
                                 &app,
                                 "FPS unlocker didn't start",
                                 &error,
@@ -536,7 +530,7 @@ pub(super) async fn get_fps_unlock(app: &AppHandle, args: &[Value]) -> Result<Va
     })))
 }
 
-pub(super) async fn set_fps_unlock(app: &AppHandle, args: &[Value]) -> Result<Value, String> {
+pub(crate) async fn set_fps_unlock(app: &AppHandle, args: &[Value]) -> Result<Value, String> {
     let Some(game_id) = args.first().and_then(|v| v.as_str()) else {
         return Ok(err_response("no game id"));
     };

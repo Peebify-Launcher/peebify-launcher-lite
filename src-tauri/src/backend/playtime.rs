@@ -10,10 +10,10 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
-use super::state::BackendState;
+use super::BackendState;
 use super::game_profiles;
 
-pub(super) const MAX_SESSIONS: usize = 1000;
+pub(crate) const MAX_SESSIONS: usize = 1000;
 const MIN_SESSION_MS: i64 = 30_000;
 const RECENT_SESSIONS: usize = 400;
 const TICK_CAP_MS: i64 = 30_000;
@@ -37,7 +37,7 @@ fn days_ago_key(days: i64) -> String {
         .to_string()
 }
 
-fn local_day_key(ms: i64) -> Option<String> {
+pub(super) fn local_day_key(ms: i64) -> Option<String> {
     use chrono::TimeZone;
     match chrono::Local.timestamp_millis_opt(ms) {
         chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => {
@@ -253,7 +253,7 @@ impl PlaytimeTracker {
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
-            store: super::state::user_data_dir_before_setup()
+            store: super::user_data_dir_before_setup()
                 .map(|dir| dir.join(OPEN_SESSIONS_FILE)),
             store_lock: Mutex::new(()),
             last_checkpoint_ms: AtomicI64::new(0),
@@ -812,23 +812,9 @@ pub(super) async fn get_playtime_data(app: &AppHandle) -> Result<Value, String> 
     }
     for id in &ids {
         let g = games.get(*id);
-        let sum_last = |days: i64| -> f64 {
-            (0..days)
-                .map(|i| {
-                    daily
-                        .get(&days_ago_key(i))
-                        .and_then(|d| d.get(*id))
-                        .copied()
-                        .unwrap_or(0.0)
-                })
-                .sum()
-        };
         pill.insert(
             id.to_string(),
             json!({
-                "todayMinutes": sum_last(1),
-                "weekMinutes": sum_last(7),
-                "monthMinutes": sum_last(30),
                 "allTimeMinutes": g.map_or(0.0, |g| g.total_minutes),
                 "sessions": g.map_or(0.0, |g| g.sessions),
                 "lastPlayed": last_iso(id),
@@ -1054,6 +1040,18 @@ mod tests {
         let last = last_played(&rows, &totals);
         assert_eq!(last["wuwa"], 50_000_000, "the end, not the start");
         assert_eq!(last["zzz"], 2_060_000, "no rows left, so the saved marker");
+        assert_eq!(session_json(&rows[0])["end"], json!(50_000_000));
+    }
+
+    #[test]
+    fn an_open_session_already_recorded_is_not_listed_twice() {
+        let games = json!({ "wuwa": { "playtime": {
+            "sessions": [{ "startTime": 1_700_000_000_000i64, "duration": 60_000 }],
+        } } });
+        let open = [live("wuwa", 1_700_000_000_000, 120_000, &[])];
+        let (_, rows) = session_rows(&games, &open);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].local);
     }
 
     fn open_session(start: i64) -> ActiveSession {

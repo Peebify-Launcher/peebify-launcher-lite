@@ -10,7 +10,7 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuild
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
-use super::state::BackendState;
+use super::BackendState;
 use super::{game_profiles, ok_response, ok_with};
 
 static BACKGROUNDED: AtomicBool = AtomicBool::new(false);
@@ -31,7 +31,6 @@ pub(crate) const WEBVIEW_BROWSER_ARGS: &str =
 const FIRST_PAINT_NUDGE_HOLD: std::time::Duration = std::time::Duration::from_millis(32);
 const FIRST_PAINT_SETTLE: std::time::Duration = std::time::Duration::from_millis(48);
 const RECORDING_FINALIZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-// Changing the Interface size eases the window and its contents to the new size instead of snapping.
 const SCALE_ANIMATION: std::time::Duration = std::time::Duration::from_millis(240);
 const SCALE_PIN: std::time::Duration = std::time::Duration::from_millis(40);
 const SCALE_SETTLE: std::time::Duration = std::time::Duration::from_millis(60);
@@ -256,7 +255,7 @@ impl WindowManager {
                 "game-launch-failed",
                 json!({ "gameId": game_profiles::profile_id(profile), "reason": error }),
             );
-        super::notify::notify_if_backgrounded(
+        super::platform::notify_if_backgrounded(
             &self.app,
             &format!("{} did not start", game_profiles::display_name(profile)),
             error,
@@ -678,7 +677,7 @@ impl WindowManager {
             "y": pick("y", f64::from(position.y) / scale),
             "maximized": is_maximized,
         });
-        super::config_channels::set_config_value(&self.app, "window", new_config);
+        super::config::set_config_value(&self.app, "window", new_config);
     }
 
     pub fn restore_window_state(&self) {
@@ -747,32 +746,26 @@ impl WindowManager {
     pub fn apply_ui_scale(self: &Arc<Self>) {
         let me = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
-            // One animation at a time. A change made mid-animation waits its turn and then animates from where
-            // the last one ended to whatever the setting is by then.
             let _turn = me.zoom_gate.lock().await;
             me.animate_rezoom().await;
         });
     }
 
-    // Animates an Interface size change without ever re-laying out the page mid-way and without moving the window
-    // while it plays (both made text re-wrap, blur and clip). The steps:
-    //   pin   - the page freezes its layout at its current size, anchored to the top-left corner
-    //   grow  - the transparent window jumps to the larger of the old and new size (spare room is invisible)
-    //   start - the page scales the card to the new size on its own clock (crisp text, no IPC lag)
-    //   swap  - window size and real zoom are applied together in one call; the page lets go of the card in the
-    //           frame the new zoom actually shows up, when the natural layout is exactly where the card ended
-    async fn animate_rezoom(&self) {
-        let Some(win) = main_window(&self.app) else {
-            return;
-        };
+    fn window_and_zoom(&self) -> Option<(WebviewWindow, f64)> {
+        let win = main_window(&self.app)?;
         if win.is_minimized().unwrap_or(false) || win.is_fullscreen().unwrap_or(false) {
-            return;
+            return None;
         }
-        let Ok(Some(monitor)) = win.current_monitor() else {
+        let monitor = win.current_monitor().ok()??;
+        let (area, scale) = work_area_of(&monitor);
+        let zoom = interface_zoom(area, scale, self.user_ui_scale());
+        Some((win, zoom))
+    }
+
+    async fn animate_rezoom(&self) {
+        let Some((win, to)) = self.window_and_zoom() else {
             return;
         };
-        let (area, scale) = work_area_of(&monitor);
-        let to = interface_zoom(area, scale, self.user_ui_scale());
         let from = self.ui_zoom();
         if to == from {
             return;
@@ -787,7 +780,6 @@ impl WindowManager {
         self.zoom_animations.fetch_add(1, Ordering::SeqCst);
         let _running = Running(&self.zoom_animations);
 
-        // A maximized window can't grow, so the layout has to change; dip to dark around the swap instead.
         if win.is_maximized().unwrap_or(false) {
             self.emit_scale_phase("fade-out", 1.0);
             tokio::time::sleep(SCALE_FADE).await;
@@ -808,10 +800,7 @@ impl WindowManager {
             h: f64::from(size.height),
         };
         let ratio = to / from;
-        // Grow and shrink from the right and bottom edges, keeping the top-left corner put. Moving the corner would
-        // make Windows show the previous frame at the new position for a moment, which reads as a jump.
         let end = Bounds { w: start.w * ratio, h: start.h * ratio, ..start };
-        // Both rectangles share a corner, so the bigger one contains the other.
         let stage = if ratio > 1.0 { end } else { start };
 
         let (min_w, min_h) = MIN_WINDOW_LOGICAL;
@@ -858,8 +847,6 @@ impl WindowManager {
     }
 
     pub fn schedule_zoom_check(self: &Arc<Self>) {
-        // The scale animation moves the window every frame; those moves aren't the user dragging it to another
-        // monitor, and treating them as such would cancel the animation and snap to the end.
         if self.zoom_animations.load(Ordering::SeqCst) > 0 {
             return;
         }
@@ -874,17 +861,9 @@ impl WindowManager {
     }
 
     fn rezoom_for_current_monitor(&self) {
-        let Some(win) = main_window(&self.app) else {
+        let Some((win, zoom)) = self.window_and_zoom() else {
             return;
         };
-        if win.is_minimized().unwrap_or(false) || win.is_fullscreen().unwrap_or(false) {
-            return;
-        }
-        let Ok(Some(monitor)) = win.current_monitor() else {
-            return;
-        };
-        let (area, scale) = work_area_of(&monitor);
-        let zoom = interface_zoom(area, scale, self.user_ui_scale());
         let previous = self.ui_zoom();
         if zoom == previous {
             return;
@@ -946,10 +925,6 @@ impl WindowManager {
         }
     }
 
-    pub fn second_instance(self: &Arc<Self>) {
-        self.show_window();
-    }
-
     async fn prime_first_paint(app: &AppHandle) {
         let Some(win) = main_window(app) else {
             return;
@@ -990,7 +965,11 @@ impl WindowManager {
                     me.notify_power_save(false);
                 }
             }
-            log::info!("ready-to-show: window.show() issued.");
+            log::info!(
+                "ready-to-show: window.show() issued at {} ms.",
+                super::logger::since_boot_ms()
+            );
+            let _ = me.app.emit("main-window-revealed", ());
         });
     }
 
@@ -999,10 +978,9 @@ impl WindowManager {
     }
 
     pub fn ready_to_show(self: &Arc<Self>, source: ReadySource) {
-
         if !self.ready_shown.swap(true, Ordering::SeqCst) {
             log::info!("ready-to-show from {}.", source.label());
-            let is_boot_launch = super::win_startup::is_boot_launch();
+            let is_boot_launch = super::platform::is_boot_launch();
             let start_on_boot = self.behavior("startOnBoot") == Value::Bool(true);
             if is_boot_launch && start_on_boot {
                 let action = self.behavior("startOnBootAction");
@@ -1107,11 +1085,7 @@ async fn unfinished_risky_work(app: &AppHandle) -> Option<RiskyWork> {
             op: RiskyOp::Uninstall,
         });
     }
-    let meta = app
-        .state::<BackendState>()
-        .engine
-        .queue
-        .current_meta()?;
+    let meta = app.state::<BackendState>().engine.queue.current_meta()?;
     let board = super::queue::get_state().await.unwrap_or(Value::Null);
     let job = board["jobs"]
         .as_array()
@@ -1195,6 +1169,8 @@ pub(super) async fn window_ready_to_show(app: &AppHandle) -> Result<Value, Strin
     let manager = manager(app);
     if manager.mark_renderer_signaled() {
         log::info!("ready-to-show: the renderer signalled again after a page reload.");
+    } else {
+        log::info!("startup: renderer ready at {} ms", super::logger::since_boot_ms());
     }
     manager.ready_to_show(ReadySource::Renderer);
     Ok(ok_response())
@@ -1363,9 +1339,6 @@ fn bring_on_screen(win: &WebviewWindow) {
 const MIN_WINDOW_LOGICAL: (f64, f64) = (940.0, 560.0);
 const WORK_AREA_FILL: f64 = 0.92;
 
-// The interface is laid out for a 1280x720 window, which is half the width of a
-// 2560x1440 (4K at 150%) desktop. Other monitors zoom the whole interface so the
-// window keeps that share of the screen, within limits that keep text readable.
 const DESIGN_SIZE_LOGICAL: (f64, f64) = (1280.0, 720.0);
 const SCREEN_SHARE: f64 = 0.5;
 const UI_ZOOM_RANGE: (f64, f64) = (0.75, 1.5);
@@ -1379,7 +1352,6 @@ fn ui_zoom(area: Bounds, scale: f64) -> f64 {
     zoom.clamp(UI_ZOOM_RANGE.0, UI_ZOOM_RANGE.1)
 }
 
-// The Interface size setting multiplies the automatic zoom, stored as a percentage.
 const UI_SCALE_RANGE: (f64, f64) = (0.5, 2.0);
 
 fn parse_ui_scale(value: &Value) -> f64 {
@@ -1397,8 +1369,6 @@ fn scaled_zoom(auto: f64, user: f64) -> f64 {
     (auto * user * 100.0).round() / 100.0
 }
 
-// A bigger interface size stops where the minimum window would no longer fit the work area,
-// so small screens never squeeze the layout below the size it was built for.
 fn interface_zoom(area: Bounds, scale: f64, user: f64) -> f64 {
     let auto = ui_zoom(area, scale);
     let zoom = scaled_zoom(auto, user);
@@ -1450,8 +1420,6 @@ fn fitted_into(window: Bounds, area: Bounds, scale: f64, zoom: f64) -> Option<Bo
     Some(Bounds { w, h, ..window }.centered_in(area))
 }
 
-// Moves and resizes the window in one SetWindowPos, so growing around the centre never shows a frame where the
-// size changed but the position hasn't caught up.
 fn set_window_bounds(win: &WebviewWindow, b: Bounds) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
 
@@ -1471,8 +1439,6 @@ fn set_window_bounds(win: &WebviewWindow, b: Bounds) {
     }
 }
 
-// The last step of the scale animation: the final window rectangle and the real zoom, applied in the same call on
-// the UI thread so the page sees both change together.
 fn apply_scale_swap(win: &WebviewWindow, zoom: f64, b: Bounds) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
 

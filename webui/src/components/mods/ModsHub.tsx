@@ -5,27 +5,28 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUpCircle, FolderOpen, RefreshCw, Upload } from "lucide-react";
 import { updateGameBananaMod } from "../../lib/gamebanana";
-import { activeInstallFor, useModsStore } from "../../store/modsStore";
-import { useModProfilesStore } from "../../store/modProfilesStore";
+import { activeInstallFor, useModsStore, useModProfilesStore } from "../../store/mods";
 import { useModalStore } from "../../store/modalStore";
-import { useNotificationStore } from "../../store/notificationStore";
+import { useNotificationStore } from "../../store/notifications";
 import {
   deleteMod,
   importModArchive,
-  onModProgress,
   openModsFolder,
   setModEnabled,
   type ModEntry,
-  type ModProfile,
 } from "../../lib/ipc";
 import { onFileDrop } from "../../lib/tauri";
-import { gameById } from "../../data/games";
-import type { GameId } from "../../types/game";
-import { ActionButton } from "../ui/ActionButton";
+import { useTauriEvent } from "../../lib/hooks";
+import { gameById, type GameId } from "../../data/games";
+import { ActionButton } from "../ui/controls";
 import { ModsHubProfiles } from "./ModsHubProfiles";
 import { ModsHubList } from "./ModsHubList";
+import { useModProgress, useSelectedProfile } from "./ModsHubRow";
+import { useT } from "../../lib/useT";
 
-function rescanSummary(before: ModEntry[], after: ModEntry[]) {
+type Translate = ReturnType<typeof useT>;
+
+function rescanSummary(before: ModEntry[], after: ModEntry[], t: Translate) {
   const previous = new Map(before.map((m) => [m.modId, m]));
   const current = new Set(after.map((m) => m.modId));
   const previousByFolder = new Map(before.map((m) => [m.folderName, m]));
@@ -41,21 +42,25 @@ function rescanSummary(before: ModEntry[], after: ModEntry[]) {
   }).length;
 
   const bits: string[] = [];
-  if (added) bits.push(`${added} new mod${added === 1 ? "" : "s"}`);
-  if (removed) bits.push(`${removed} mod${removed === 1 ? "" : "s"} gone`);
-  if (switched) bits.push(`${switched} switched on or off`);
-  if (renamed) bits.push(`${renamed} renamed`);
+  if (added) bits.push(t("mods.hub.rescan.newMods", { count: added }));
+  if (removed) bits.push(t("mods.hub.rescan.goneMods", { count: removed }));
+  if (switched) bits.push(t("mods.hub.rescan.switched", { count: switched }));
+  if (renamed) bits.push(t("mods.hub.rescan.renamed", { count: renamed }));
   if (!bits.length) return null;
   return bits.length === 1
     ? bits[0]
-    : `${bits.slice(0, -1).join(", ")} and ${bits[bits.length - 1]}`;
+    : t("mods.hub.rescan.listLast", {
+        rest: bits.slice(0, -1).join(t("mods.hub.rescan.listSeparator")),
+        last: bits[bits.length - 1],
+      });
 }
 
-const STILL_INSTALLING = {
-  type: "warning",
-  title: "A mod is still installing",
-  text: "Wait for it to finish, then try again.",
-} as const;
+const stillInstalling = (t: Translate) =>
+  ({
+    type: "warning",
+    title: t("mods.hub.stillInstallingTitle"),
+    text: t("mods.hub.stillInstallingText"),
+  }) as const;
 
 export interface BrowseSeed {
   modId: number;
@@ -72,6 +77,7 @@ export function ModsHub({
   onBrowse?: () => void;
   onOpenGameBanana?: (seed: BrowseSeed) => void;
 }) {
+  const t = useT();
   const openConfirm = useModalStore((s) => s.openConfirm);
   const push = useNotificationStore((s) => s.push);
 
@@ -94,7 +100,6 @@ export function ModsHub({
   const [updatingModId, setUpdatingModId] = useState<string | null>(null);
   const [updatingAll, setUpdatingAll] = useState(false);
 
-  const profiles = useModProfilesStore((s) => s.profiles);
   const activeId = useModProfilesStore((s) => s.activeId);
   const applying = useModProfilesStore((s) => s.applying);
   const refreshProfiles = useModProfilesStore((s) => s.refresh);
@@ -113,31 +118,16 @@ export function ModsHub({
   const toolsInstalled = loaded && status.toolchainInstalled;
   const canApply = toolsInstalled && status.gameEnabled;
 
+  const refreshAll = useCallback(async () => {
+    await Promise.all([refreshModsIfCurrent(gameId), refreshProfilesIfCurrent(gameId)]);
+  }, [gameId, refreshModsIfCurrent, refreshProfilesIfCurrent]);
+
   useEffect(() => {
     setSelectedProfileId(null);
     void refreshProfiles(gameId);
   }, [gameId, refreshProfiles]);
 
-  useEffect(() => {
-    let un: (() => void) | undefined;
-    let cancelled = false;
-    void onModProgress((p) => {
-      if (p.done && !p.failed && p.gameId === gameId) {
-        void refreshProfilesIfCurrent(gameId);
-      }
-    }).then((f) => {
-      if (cancelled) f();
-      else un = f;
-    });
-    return () => {
-      cancelled = true;
-      un?.();
-    };
-  }, [gameId, refreshProfilesIfCurrent]);
-
-  const refreshAll = useCallback(async () => {
-    await Promise.all([refreshModsIfCurrent(gameId), refreshProfilesIfCurrent(gameId)]);
-  }, [gameId, refreshModsIfCurrent, refreshProfilesIfCurrent]);
+  useModProgress(gameId, () => void refreshProfilesIfCurrent(gameId));
 
   const rescan = useCallback(async () => {
     setRescanning(true);
@@ -147,14 +137,19 @@ export function ModsHub({
     } finally {
       setRescanning(false);
     }
-    const changes = rescanSummary(before, useModsStore.getState().mods);
-    if (changes) push({ type: "success", title: "Mod list updated", text: `Found ${changes}.` });
+    const changes = rescanSummary(before, useModsStore.getState().mods, t);
+    if (changes)
+      push({
+        type: "success",
+        title: t("mods.hub.rescan.updatedTitle"),
+        text: t("mods.hub.rescan.updatedText", { changes }),
+      });
     else
       useNotificationStore.getState().toast({
-        title: "Nothing changed",
-        text: `The ${game.name} mods folder still matches what's listed here.`,
+        title: t("mods.hub.rescan.nothingTitle"),
+        text: t("mods.hub.rescan.nothingText", { game: game.name }),
       });
-  }, [gameId, refreshMods, refreshProfiles, push, game.name]);
+  }, [gameId, refreshMods, refreshProfiles, push, game.name, t]);
 
   const runImport = useCallback(
     async (paths?: string[]) => {
@@ -164,7 +159,7 @@ export function ModsHub({
         activeInstallFor(useModsStore.getState().installing, gameId) !== null ||
         !beginInstall(key)
       ) {
-        push(STILL_INSTALLING);
+        push(stillInstalling(t));
         return;
       }
       setBusy(true);
@@ -180,49 +175,30 @@ export function ModsHub({
         const n = result.installed.length;
         push({
           type: result.failed.length ? "warning" : "success",
-          title: n ? `Installed ${n} mod${n === 1 ? "" : "s"}` : "Nothing was installed",
+          title: n ? t("mods.hub.importedTitle", { count: n }) : t("mods.hub.nothingInstalled"),
           text: result.failed.length ? result.failed.join("; ") : result.installed.join(", "),
         });
         return;
       }
       await refreshAll();
     },
-    [gameId, updatingModId, beginInstall, endInstall, push, refreshAll],
+    [gameId, updatingModId, beginInstall, endInstall, push, refreshAll, t],
   );
 
-  useEffect(() => {
-    let un: (() => void) | undefined;
-    let cancelled = false;
-    void onFileDrop(
-      (paths) => {
-        const archives = paths.filter((p) => /\.(zip|7z|rar)$/i.test(p));
-        if (archives.length) void runImport(archives);
-        else
-          push({
-            type: "warning",
-            title: "That isn't a mod file",
-            text: "Try a .zip, .7z or .rar file instead.",
-          });
-      },
-      (hovering) => setDragging(hovering),
-    ).then((f) => {
-      if (cancelled) f();
-      else un = f;
-    });
-    return () => {
-      cancelled = true;
-      un?.();
-      setDragging(false);
-    };
-  }, [runImport, push]);
+  useTauriEvent(onFileDrop, (hovering, paths) => {
+    setDragging(hovering);
+    if (!paths.length) return;
+    const archives = paths.filter((p) => /\.(zip|7z|rar)$/i.test(p));
+    if (archives.length) void runImport(archives);
+    else
+      push({
+        type: "warning",
+        title: t("mods.hub.notModFileTitle"),
+        text: t("mods.hub.notModFileText"),
+      });
+  });
 
-  const profile = useMemo<ModProfile | null>(
-    () =>
-      profiles.find((p) => p.id === selectedProfileId) ??
-      profiles.find((p) => p.id === activeId) ??
-      null,
-    [profiles, selectedProfileId, activeId],
-  );
+  const profile = useSelectedProfile(selectedProfileId);
 
   const updates = useMemo(
     () =>
@@ -240,24 +216,32 @@ export function ModsHub({
     if (found === undefined) {
       push({
         type: "warning",
-        title: "Could not check for updates",
-        text: "GameBanana did not answer. Try again in a moment.",
+        title: t("mods.hub.checkFailedTitle"),
+        text: t("mods.hub.checkFailedText"),
       });
       return;
     }
     const n = found.length;
     if (n)
-      push({ type: "success", title: `${n} update${n === 1 ? "" : "s"} available`, text: found.map((u) => u.name).join(", ") });
+      push({
+        type: "success",
+        title: t("mods.hub.updatesAvailable", { count: n }),
+        text: found.map((u) => u.name).join(", "),
+      });
     else
       useNotificationStore
         .getState()
-        .toast({ title: "Everything is current", text: `Your ${game.name} mods match the newest files on GameBanana.` });
+        .toast({
+          type: "success",
+          title: t("mods.hub.allCurrentTitle"),
+          text: t("mods.hub.allCurrentText", { game: game.name }),
+        });
   };
 
   const takeUpdateLock = () => {
     const key = `${gameId}:update`;
     if (activeInstallFor(useModsStore.getState().installing, gameId) !== null || !beginInstall(key)) {
-      push(STILL_INSTALLING);
+      push(stillInstalling(t));
       return null;
     }
     return key;
@@ -278,7 +262,11 @@ export function ModsHub({
     setProgress(null);
     if (folder) {
       dropUpdate(mod.modId);
-      push({ type: "success", title: "Mod updated", text: `${mod.name} now has the newest file from GameBanana.` });
+      push({
+        type: "success",
+        title: t("mods.toast.updatedTitle"),
+        text: t("mods.hub.updatedNewest", { name: mod.name }),
+      });
       return;
     }
     await refreshAll();
@@ -311,8 +299,10 @@ export function ModsHub({
     setProgress(null);
     push({
       type: done ? "success" : "warning",
-      title: done ? `Updated ${done} mod${done === 1 ? "" : "s"}` : "Nothing was updated",
-      text: done ? `${game.name} has the newest files from GameBanana.` : "Check the notifications above for what went wrong.",
+      title: done ? t("mods.hub.updatedAllTitle", { count: done }) : t("mods.hub.nothingUpdated"),
+      text: done
+        ? t("mods.hub.updatedAllText", { game: game.name })
+        : t("mods.hub.updatedAllFailed"),
     });
     if (done < tried) await refreshAll();
   };
@@ -353,9 +343,9 @@ export function ModsHub({
 
   const uninstall = (mod: ModEntry) =>
     openConfirm({
-      title: `Uninstall "${mod.name}"?`,
-      message: "This deletes the mod files from this PC. There is no undo.",
-      confirmLabel: "Uninstall",
+      title: t("mods.hub.uninstallTitle", { name: mod.name }),
+      message: t("mods.hub.uninstallMessage"),
+      confirmLabel: t("common.uninstall"),
       danger: true,
       onConfirm: () => {
         void (async () => {
@@ -383,21 +373,21 @@ export function ModsHub({
           disabled={busy || downloadingKey !== null || updatingModId !== null}
           onClick={() => void runImport()}
         >
-          Import mod…
+          {t("mods.hub.importMod")}
         </ActionButton>
         <ActionButton
           icon={<FolderOpen size={15} />}
           disabled={!toolsInstalled}
           onClick={() => void openModsFolder(gameId)}
         >
-          Open folder
+          {t("common.openFolder")}
         </ActionButton>
         <ActionButton
           icon={<RefreshCw size={15} className={rescanning ? "animate-spin" : ""} />}
           disabled={rescanning || !loaded}
           onClick={() => void rescan()}
         >
-          Refresh
+          {t("common.refresh")}
         </ActionButton>
         {hasGameBananaMods && (
           <ActionButton
@@ -405,7 +395,7 @@ export function ModsHub({
             disabled={checkingUpdates || !loaded || busy}
             onClick={() => void runCheckUpdates()}
           >
-            {checkingUpdates ? "Checking…" : "Check for updates"}
+            {checkingUpdates ? t("common.checking") : t("common.checkForUpdates")}
           </ActionButton>
         )}
         {updates.size > 1 && (
@@ -414,7 +404,7 @@ export function ModsHub({
             disabled={updatingAll || !!updatingModId || downloadingKey !== null || busy}
             onClick={() => void updateAll()}
           >
-            {updatingAll ? "Updating…" : `Update all (${updates.size})`}
+            {updatingAll ? t("common.updating") : t("mods.hub.updateAll", { count: updates.size })}
           </ActionButton>
         )}
       </div>
@@ -465,7 +455,7 @@ export function ModsHub({
       {dragging && (
         <div className="pointer-events-none fixed inset-0 z-(--z-banner) grid place-items-center">
           <div className="glass rounded-ui px-8 py-5 text-[15px] font-medium">
-            Drop the file to import it
+            {t("mods.hub.dropToImport")}
           </div>
         </div>
       )}

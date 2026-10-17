@@ -137,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn a_section_the_launcher_never_filled_in_is_not_configured() {
+    fn only_a_section_with_a_published_target_is_configured() {
         let shared = blank();
         assert!(!shared.is_configured());
         shared.initialize();
@@ -145,12 +145,6 @@ mod tests {
         assert!(!shared.is_configured());
         shared.target_fps.store(MIN_FPS - 1, Ordering::Relaxed);
         assert!(!shared.is_configured());
-    }
-
-    #[test]
-    fn a_published_target_is_configured() {
-        let shared = blank();
-        shared.initialize();
         shared.target_fps.store(120, Ordering::Relaxed);
         assert!(shared.is_configured());
         assert_eq!(shared.effective_fps(true), 120);

@@ -20,10 +20,13 @@ export const jobEquals = (a: QueueJob, b: QueueJob): boolean =>
   a.downloaded === b.downloaded &&
   a.percent === b.percent &&
   a.speed === b.speed &&
+  a.networkSpeed === b.networkSpeed &&
+  a.diskSpeed === b.diskSpeed &&
   a.etaSecs === b.etaSecs &&
   a.paused === b.paused &&
   !!a.parked === !!b.parked &&
   !!a.waitingNetwork === !!b.waitingNetwork &&
+  !!a.heldForGame === !!b.heldForGame &&
   (a.message ?? null) === (b.message ?? null) &&
   !!a.warning === !!b.warning &&
   a.error === b.error;

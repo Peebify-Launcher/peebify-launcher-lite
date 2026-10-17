@@ -1,0 +1,38 @@
+[package]
+name = "peebify-transfer"
+version = "0.1.0"
+description = "Peebify download core: connections, retries, disk writes, verification and durability"
+authors = ["Peebify"]
+license = "GPL-3.0-only"
+edition = "2021"
+publish = false
+
+[lib]
+name = "peebify_transfer"
+path = "lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "fs", "io-util", "net"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "system-proxy", "stream", "http2"] }
+futures-util = "0.3"
+bytes = "1"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+md-5 = "0.11"
+crc = "3"
+crc32fast = "1"
+hex = "0.4"
+log = "0.4"
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "fs"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

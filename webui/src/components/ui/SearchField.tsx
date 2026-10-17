@@ -1,6 +1,7 @@
 // ------------ Search Field ------------
 // A search box with a magnifier and a clear button. Escape clears what you typed.
 import { Search, X } from "lucide-react";
+import { useT } from "../../lib/useT";
 
 export function SearchField({
   value,
@@ -15,6 +16,7 @@ export function SearchField({
   ariaLabel: string;
   className?: string;
 }) {
+  const t = useT();
   return (
     <div className={`relative ${className}`}>
       <Search
@@ -41,7 +43,7 @@ export function SearchField({
         <button
           type="button"
           onClick={() => onChange("")}
-          aria-label="Clear search"
+          aria-label={t("ui.searchField.clear")}
           className="absolute right-2 top-1/2 -translate-y-1/2 rounded-[6px] p-1 text-white/40 transition hover:bg-white/[0.08] hover:text-white"
         >
           <X size={14} />

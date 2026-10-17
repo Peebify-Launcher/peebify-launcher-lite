@@ -12,7 +12,7 @@ name = "peebify-installer"
 path = "src/main.rs"
 
 [dependencies]
-eframe = "0.36"
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 rfd = "0.17"
 

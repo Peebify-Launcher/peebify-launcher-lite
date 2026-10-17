@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import { create } from "zustand";
 import { getPlaytime, EMPTY_PLAYTIME, type PlaytimeData } from "../lib/ipc";
-import { useRendererSuspended } from "../lib/useRendererSuspended";
+import { useRendererSuspended } from "../lib/launcherHooks";
 import { useGamesStore } from "./gamesStore";
 
 const LIVE_REFRESH_MS = 60_000;

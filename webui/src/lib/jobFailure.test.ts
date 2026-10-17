@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { reportJobFailure, watchQueuedJob, type QueueJob } from "./ipc";
-import { jobFailureKey, useNotificationStore } from "../store/notificationStore";
+import { jobFailureKey, useNotificationStore } from "../store/notifications";
 import { useQueueStore } from "../store/queueStore";
 
 const job = (gameId: string, kind: string, phase: string, error: string | null = null) =>
@@ -14,6 +14,8 @@ const job = (gameId: string, kind: string, phase: string, error: string | null =
     downloaded: 0,
     percent: 0,
     speed: 0,
+    networkSpeed: 0,
+    diskSpeed: 0,
     etaSecs: 0,
     paused: false,
     error,
@@ -42,7 +44,7 @@ describe("a failed queued job", () => {
     useQueueStore.setState({ jobs: [job("genshin", "update", "downloading")] });
     useQueueStore.setState({ jobs: [job("genshin", "update", "error", "Disk full.")] });
     queueNotice("genshin", "Disk full.");
-    reportJobFailure("Download", "genshin", "Download failed: Disk full.", watch.taken());
+    reportJobFailure("actions.failed.download", "genshin", "Download failed: Disk full.", watch.taken());
     watch.stop();
 
     expect(queued).toBe(1);
@@ -51,7 +53,7 @@ describe("a failed queued job", () => {
   });
 
   it("is told once when the reply arrives before the queue's last event", () => {
-    reportJobFailure("Move game", "genshin", "Move failed: Access denied.", false);
+    reportJobFailure("actions.failed.moveGame", "genshin", "Move failed: Access denied.", false);
     queueNotice("genshin", "Access denied.");
 
     expect(errors()).toHaveLength(1);
@@ -60,7 +62,7 @@ describe("a failed queued job", () => {
   it("is told by the reply when the backend refused it before queueing", () => {
     let queued = 0;
     const watch = watchQueuedJob("genshin", ["move"], () => (queued += 1));
-    reportJobFailure("Move game", "genshin", "Close Genshin Impact first.", watch.taken());
+    reportJobFailure("actions.failed.moveGame", "genshin", "Close Genshin Impact first.", watch.taken());
     watch.stop();
 
     expect(queued).toBe(0);
@@ -77,8 +79,8 @@ describe("a failed queued job", () => {
   });
 
   it("keeps failures of different games apart", () => {
-    reportJobFailure("Download", "genshin", "Offline.", false);
-    reportJobFailure("Download", "hsr", "Server error.", false);
+    reportJobFailure("actions.failed.download", "genshin", "Offline.", false);
+    reportJobFailure("actions.failed.download", "hsr", "Server error.", false);
     expect(errors()).toHaveLength(2);
   });
 });

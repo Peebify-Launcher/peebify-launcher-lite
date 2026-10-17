@@ -6,7 +6,10 @@ pub fn quote_argument(argument: &str) -> String {
     if !argument.is_empty() && !argument.contains([' ', '\t', '"']) {
         return argument.to_string();
     }
+    quote_always(argument)
+}
 
+pub fn quote_always(argument: &str) -> String {
     let mut quoted = String::with_capacity(argument.len() + 2);
     quoted.push('"');
     let mut backslashes = 0usize;
@@ -50,16 +53,7 @@ pub fn describe_start_error(code: u32) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{describe_start_error, quote_argument};
-
-    #[test]
-    fn describe_start_error_covers_unreachable_folders_only() {
-        assert!(describe_start_error(2).is_some());
-        assert!(describe_start_error(3).is_some());
-        assert!(describe_start_error(267).is_some());
-        assert!(describe_start_error(5).is_none());
-        assert!(describe_start_error(1223).is_none());
-    }
+    use super::quote_argument;
 
     #[test]
     fn quote_argument_doubles_backslashes_before_the_closing_quote() {

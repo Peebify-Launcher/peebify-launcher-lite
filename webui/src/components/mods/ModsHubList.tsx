@@ -1,62 +1,54 @@
 // ------------ Mods Library Lists ------------
 // The mod lists inside the Library: the mods in the chosen profile and every mod installed. Has search and
 // sorting, and mods can be dragged between the two.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Layers, Puzzle } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  AlertTriangle,
+  ArrowUpCircle,
+  Layers,
+  ListMinus,
+  ListPlus,
+  Loader2,
+  MoreHorizontal,
+  Puzzle,
+  Search,
+  Trash2,
+} from "lucide-react";
 import type { ModEntry, ModProfile } from "../../lib/ipc";
 import type { ModUpdate } from "../../lib/gamebanana";
-import type { Game } from "../../types/game";
-import { ActionButton } from "../ui/ActionButton";
-import { GroupBox } from "../ui/SettingsGroup";
+import type { TKey } from "../../lib/i18n";
+import { useT } from "../../lib/useT";
+import type { Game } from "../../data/games";
+import { ActionButton, Toggle } from "../ui/controls";
+import { PopoverMenu, menuIcon, menuRow } from "../ui/PopoverMenu";
+import { GroupBox } from "../ui/panels";
 import { SearchField } from "../ui/SearchField";
 import { Select } from "../ui/Select";
+import { Hint } from "../ui/Tooltip";
 import { ModProgressRow } from "./ModProgressRow";
 import {
-  DragGhost,
-  LocalModRow,
-  ProfileModRow,
+  Empty,
+  ModSection,
+  RowBody,
+  useModDrag,
+  useProfileMembers,
   type RowDragHandlers,
+  type RowMenuItem,
   type RowToggle,
 } from "./ModsHubRow";
 
 type SortKey = "name" | "newest" | "largest";
 
-const SORTS: { value: SortKey; label: string }[] = [
-  { value: "name", label: "Sort by name" },
-  { value: "newest", label: "Newest first" },
-  { value: "largest", label: "Largest first" },
+const SORTS: { value: SortKey; label: TKey }[] = [
+  { value: "name", label: "mods.list.sort.name" },
+  { value: "newest", label: "mods.list.sort.newest" },
+  { value: "largest", label: "mods.list.sort.largest" },
 ];
 
-const DRAG_THRESHOLD = 6;
-
-type DragSource = "profile" | "installed";
-
-interface DragState {
-  modId: string;
-  from: DragSource;
-  over: boolean;
-}
-
-function Heading({ title, count }: { title: string; count: number | null }) {
-  return (
-    <h2 className="mb-2 flex items-baseline gap-2 text-[12.5px] font-medium text-white/55">
-      {title}
-      {count !== null && <span className="tabular-nums text-white/30">{count}</span>}
-    </h2>
-  );
-}
-
-function Empty({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex flex-col items-center gap-3 rounded-ui border border-dashed border-white/[0.12] bg-white/[0.02] px-6 py-8 text-center text-[13px] text-white/50">
-      {children}
-    </div>
-  );
-}
-
 function Skeleton({ rows }: { rows: number }) {
+  const t = useT();
   return (
-    <div className="grid animate-pulse gap-2" aria-label="Loading mods">
+    <div className="grid animate-pulse gap-2" aria-label={t("mods.list.loading")}>
       {Array.from({ length: rows }, (_, i) => (
         <div key={i} className="h-[58px] rounded-ui border border-white/[0.08] bg-white/[0.04]" />
       ))}
@@ -77,6 +69,130 @@ function sortMods(list: ModEntry[], sort: SortKey): ModEntry[] {
   else sorted.sort((a, b) => (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0));
   return sorted;
 }
+
+// ------------ Mod Rows ------------
+// Each row shows the mod and an on/off switch, plus an Update badge and button and a menu with things like Remove
+// from profile and Uninstall.
+
+function UpdateBadge({ update }: { update: ModUpdate }) {
+  const t = useT();
+  return (
+    <Hint
+      tip={update.version ? t("mods.row.updateVersionTitle", { version: update.version }) : t("mods.row.updateTitle")}
+      className="inline-flex shrink-0"
+    >
+      <span className="rounded-full border border-(--accent-b)/50 bg-(--accent-b)/15 px-2 py-[1px] text-[10.5px] font-medium text-white/85">
+        {update.version ? t("mods.row.updateBadgeVersion", { version: update.version }) : t("common.update")}
+      </span>
+    </Hint>
+  );
+}
+
+function UpdateButton({
+  updating,
+  disabled,
+  onClick,
+}: {
+  updating: boolean;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  const t = useT();
+  return (
+    <ActionButton
+      variant="accent"
+      icon={updating ? <Loader2 size={14} className="animate-spin" /> : <ArrowUpCircle size={14} />}
+      disabled={updating || disabled}
+      onClick={onClick}
+    >
+      {updating ? t("common.updating") : t("common.update")}
+    </ActionButton>
+  );
+}
+
+function RowMenu({ label, items }: { label: string; items: RowMenuItem[] }) {
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-ui border border-white/[0.08] bg-white/[0.04] text-white/55 transition hover:bg-white/[0.1] hover:text-white/85"
+      >
+        <MoreHorizontal size={15} />
+      </button>
+      <PopoverMenu
+        open={open}
+        onClose={() => setOpen(false)}
+        anchorRef={btnRef}
+        width={220}
+        estimatedHeight={items.length * 42 + 12}
+      >
+        {items.map((item) => (
+          <button
+            key={item.label}
+            type="button"
+            role="menuitem"
+            onClick={item.onClick}
+            className={menuRow(item.danger)}
+          >
+            <span className={menuIcon(item.danger)}>{item.icon}</span>
+            <span className="flex-1 truncate">{item.label}</span>
+          </button>
+        ))}
+      </PopoverMenu>
+    </>
+  );
+}
+
+function ModRow({
+  mod,
+  update,
+  updating,
+  anyUpdating,
+  draggable,
+  dragging,
+  dragHandlers,
+  busy,
+  toggle,
+  menu,
+  onUpdate,
+}: {
+  mod: ModEntry;
+  update: ModUpdate | null;
+  updating: boolean;
+  anyUpdating: boolean;
+  draggable: boolean;
+  dragging: boolean;
+  dragHandlers: RowDragHandlers;
+  busy: boolean;
+  toggle: RowToggle;
+  menu: RowMenuItem[];
+  onUpdate: () => void;
+}) {
+  const t = useT();
+  return (
+    <div
+      {...dragHandlers}
+      className={`flex touch-none select-none items-center gap-3 px-3 py-[9px] transition-opacity ${
+        draggable ? "cursor-grab active:cursor-grabbing" : ""
+      } ${dragging ? "opacity-40" : ""}`}
+    >
+      <RowBody mod={mod} badge={update && <UpdateBadge update={update} />} />
+      {update && <UpdateButton updating={updating} disabled={busy || anyUpdating} onClick={onUpdate} />}
+      <Toggle {...toggle} />
+      <RowMenu label={t("mods.row.more", { name: mod.name })} items={menu} />
+    </div>
+  );
+}
+
+// ------------ Lists ------------
 
 export function ModsHubList({
   game,
@@ -119,165 +235,86 @@ export function ModsHubList({
   onOpenGameBanana?: (mod: ModEntry) => void;
   onUpdate: (mod: ModEntry) => void;
 }) {
+  const t = useT();
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<SortKey>("name");
-  const [drag, setDrag] = useState<DragState | null>(null);
-  const dropRef = useRef<HTMLElement>(null);
-  const installedRef = useRef<HTMLElement>(null);
-  const pressRef = useRef<{
-    modId: string;
-    from: DragSource;
-    pointerId: number;
-    x: number;
-    y: number;
-  } | null>(null);
-  const startedRef = useRef(false);
-  const ghostRef = useRef<HTMLDivElement>(null);
-  const posRef = useRef({ x: 0, y: 0 });
-  const frameRef = useRef(0);
 
-  const placeGhost = () => {
-    frameRef.current = 0;
-    const el = ghostRef.current;
-    if (el) el.style.transform = `translate(${posRef.current.x + 14}px, ${posRef.current.y + 14}px)`;
-  };
+  useEffect(() => setSearch(""), [game.id, profile?.id]);
 
-  const endDrag = () => {
-    pressRef.current = null;
-    startedRef.current = false;
-    if (frameRef.current) cancelAnimationFrame(frameRef.current);
-    frameRef.current = 0;
-    setDrag(null);
-  };
-
-  useEffect(() => {
-    setSearch("");
-    setDrag(null);
-    pressRef.current = null;
-    startedRef.current = false;
-  }, [game.id, profile?.id]);
-
-  useEffect(
-    () => () => {
-      if (frameRef.current) cancelAnimationFrame(frameRef.current);
-    },
-    [],
-  );
-
-  const dragging = drag !== null;
-
-  useLayoutEffect(() => {
-    if (!dragging) return;
-    const el = ghostRef.current;
-    if (el) el.style.transform = `translate(${posRef.current.x + 14}px, ${posRef.current.y + 14}px)`;
-  });
-
-  useEffect(() => {
-    if (!dragging) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.preventDefault();
-      e.stopPropagation();
-      pressRef.current = null;
-      startedRef.current = false;
-      if (frameRef.current) cancelAnimationFrame(frameRef.current);
-      frameRef.current = 0;
-      setDrag(null);
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [dragging]);
-
-  const inProfile = useMemo(() => new Set(profile?.modIds ?? []), [profile]);
-  const members = useMemo(
-    () => sortMods(mods.filter((m) => inProfile.has(m.modId)), "name"),
-    [mods, inProfile],
-  );
   const query = search.trim().toLowerCase();
-  const shownMembers = useMemo(
-    () => (query ? members.filter((m) => m.name.toLowerCase().includes(query)) : members),
-    [members, query],
-  );
+  const { inProfile, members, shownMembers } = useProfileMembers(mods, profile, query);
   const visible = useMemo(
     () => sortMods(query ? mods.filter((m) => m.name.toLowerCase().includes(query)) : mods, sort),
     [mods, query, sort],
   );
-  const draggedMod = drag ? (mods.find((m) => m.modId === drag.modId) ?? null) : null;
 
-  const inside = (el: HTMLElement | null, x: number, y: number) => {
-    const r = el?.getBoundingClientRect();
-    return !!r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
-  };
-  const isOverTarget = (from: DragSource, x: number, y: number) =>
-    inside(from === "installed" ? dropRef.current : installedRef.current, x, y);
+  const drag = useModDrag({
+    mods,
+    resetKey: `${game.id}:${profile?.id}`,
+    canDrag: (mod, from) => !busy && !!profile && !(from === "installed" && inProfile.has(mod.modId)),
+    onDrop: (mod, from) => (from === "installed" ? onAddToProfile(mod) : onRemoveFromProfile(mod)),
+  });
 
   const anyUpdating = updatingModId !== null || downloadingKey !== null;
   const toggleFor = (mod: ModEntry): RowToggle =>
     !profile || profileIsActive
       ? {
           checked: mod.enabled,
-          label: `Enable ${mod.name}`,
+          ariaLabel: t("mods.list.toggleEnable", { name: mod.name }),
           disabled: busy || togglingModIds.has(mod.modId),
           onChange: (on) => onToggleEnabled(mod, on),
         }
       : {
           checked: inProfile.has(mod.modId),
-          label: `Include ${mod.name} in ${profile.name}`,
+          ariaLabel: t("mods.list.toggleInclude", { name: mod.name, profile: profile.name }),
           disabled: busy,
           onChange: (on) => (on ? onAddToProfile(mod) : onRemoveFromProfile(mod)),
         };
 
-  const dragHandlersFor = (mod: ModEntry, from: DragSource): RowDragHandlers => ({
-    onPointerDown: (e) => {
-      if (e.button !== 0 || busy || !profile) return;
-      if (from === "installed" && inProfile.has(mod.modId)) return;
-      if ((e.target as HTMLElement).closest("button, input, a")) return;
-      pressRef.current = {
-        modId: mod.modId,
-        from,
-        pointerId: e.pointerId,
-        x: e.clientX,
-        y: e.clientY,
-      };
-      startedRef.current = false;
-      e.currentTarget.setPointerCapture(e.pointerId);
-    },
-    onPointerMove: (e) => {
-      const press = pressRef.current;
-      if (!press || press.pointerId !== e.pointerId) return;
-      if (!startedRef.current) {
-        if (Math.hypot(e.clientX - press.x, e.clientY - press.y) < DRAG_THRESHOLD) return;
-        startedRef.current = true;
+  const menuFor = (mod: ModEntry, inProfileList: boolean): RowMenuItem[] => {
+    const menu: RowMenuItem[] = [];
+    if (profile && !busy) {
+      if (inProfileList || inProfile.has(mod.modId)) {
+        menu.push({
+          label: t("mods.row.removeFromProfile"),
+          icon: <ListMinus size={14} />,
+          onClick: () => onRemoveFromProfile(mod),
+        });
+      } else {
+        menu.push({
+          label: t("mods.row.addTo", { profile: profile.name }),
+          icon: <ListPlus size={14} />,
+          onClick: () => onAddToProfile(mod),
+        });
       }
-      posRef.current = { x: e.clientX, y: e.clientY };
-      if (!frameRef.current) frameRef.current = requestAnimationFrame(placeGhost);
-      const over = isOverTarget(press.from, e.clientX, e.clientY);
-      setDrag((prev) =>
-        prev && prev.modId === press.modId && prev.from === press.from && prev.over === over
-          ? prev
-          : { modId: press.modId, from: press.from, over },
-      );
-    },
-    onPointerUp: (e) => {
-      const press = pressRef.current;
-      if (!press || press.pointerId !== e.pointerId) return;
-      const dropped = startedRef.current && isOverTarget(press.from, e.clientX, e.clientY);
-      endDrag();
-      if (!dropped) return;
-      if (press.from === "installed") onAddToProfile(mod);
-      else onRemoveFromProfile(mod);
-    },
-    onPointerCancel: endDrag,
-  });
+    }
+    if (onOpenGameBanana && mod.source.gbModId != null) {
+      menu.push({ label: t("mods.row.showInBrowse"), icon: <Search size={14} />, onClick: () => onOpenGameBanana(mod) });
+    }
+    menu.push({ label: t("common.uninstall"), icon: <Trash2 size={14} />, danger: true, onClick: () => onUninstall(mod) });
+    return menu;
+  };
 
-  const tone = (active: boolean) =>
-    !active
-      ? "border-transparent"
-      : drag?.over
-        ? "border-(--accent-b) bg-(--accent-b)/10"
-        : "border-(--accent-b)/50";
-  const dropTone = tone(drag?.from === "installed");
-  const installedTone = tone(drag?.from === "profile");
+  const rowsFor = (list: ModEntry[], from: "profile" | "installed") => (
+    <GroupBox divided>
+      {list.map((mod) => (
+        <ModRow
+          key={mod.modId}
+          mod={mod}
+          update={updates.get(mod.modId) ?? null}
+          updating={updatingModId === mod.modId}
+          anyUpdating={anyUpdating}
+          draggable={from === "profile" || (!!profile && !inProfile.has(mod.modId))}
+          dragging={drag.drag?.modId === mod.modId}
+          dragHandlers={drag.handlersFor(mod, from)}
+          busy={busy}
+          toggle={toggleFor(mod)}
+          menu={menuFor(mod, from === "profile")}
+          onUpdate={() => onUpdate(mod)}
+        />
+      ))}
+    </GroupBox>
+  );
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
@@ -288,130 +325,86 @@ export function ModsHubList({
           <SearchField
             value={search}
             onChange={setSearch}
-            placeholder="Search your mods…"
-            ariaLabel="Search mods"
+            placeholder={t("mods.list.searchPlaceholder")}
+            ariaLabel={t("mods.list.searchLabel")}
             className="min-w-[200px] flex-1"
           />
-          <Select ariaLabel="Sort" options={SORTS} value={sort} onChange={(v) => setSort(v as SortKey)} />
+          <Select
+            ariaLabel={t("common.sort")}
+            options={SORTS.map((o) => ({ value: o.value, label: t(o.label) }))}
+            value={sort}
+            onChange={(v) => setSort(v as SortKey)}
+          />
         </div>
       )}
 
-      <section
-        ref={dropRef}
-        className={`-m-2 rounded-ui border border-dashed p-2 transition-colors ${dropTone}`}
+      <ModSection
+        title={t("mods.list.inProfile.title")}
+        count={loaded && !modsError && profile ? members.length : null}
+        tone={drag.profileTone}
+        sectionRef={drag.dropRef}
       >
-        <Heading
-          title="Mods in Profile"
-          count={loaded && !modsError && profile ? members.length : null}
-        />
         {!loaded ? (
           <Skeleton rows={1} />
         ) : !profile ? (
           <Empty>
             <Layers size={20} className="opacity-60" />
-            <p>Pick a profile to see the mods in it.</p>
+            <p>{t("mods.list.inProfile.pickProfile")}</p>
           </Empty>
         ) : modsError ? (
           <Empty>
-            <p>Couldn't read the mods folder.</p>
+            <p>{t("mods.list.inProfile.readError")}</p>
           </Empty>
         ) : members.length === 0 ? (
           <Empty>
             <Layers size={20} className="opacity-60" />
-            <p>Add installed mods from the menu on each row, or drag them here.</p>
+            <p>{t("mods.list.inProfile.empty")}</p>
           </Empty>
         ) : shownMembers.length === 0 ? (
           <Empty>
-            <p>Nothing matches. Try a different search to see every mod again.</p>
+            <p>{t("mods.list.noMatches")}</p>
           </Empty>
         ) : (
-          <GroupBox>
-            {shownMembers.map((mod) => (
-              <ProfileModRow
-                key={mod.modId}
-                mod={mod}
-                update={updates.get(mod.modId) ?? null}
-                updating={updatingModId === mod.modId}
-                anyUpdating={anyUpdating}
-                dragging={drag?.modId === mod.modId}
-                dragHandlers={dragHandlersFor(mod, "profile")}
-                busy={busy}
-                toggle={toggleFor(mod)}
-                onUpdate={() => onUpdate(mod)}
-                onRemoveFromProfile={() => onRemoveFromProfile(mod)}
-                onUninstall={() => onUninstall(mod)}
-                onOpenGameBanana={
-                  onOpenGameBanana && mod.source.gbModId != null
-                    ? () => onOpenGameBanana(mod)
-                    : undefined
-                }
-              />
-            ))}
-          </GroupBox>
+          rowsFor(shownMembers, "profile")
         )}
-      </section>
+      </ModSection>
 
-      <section
-        ref={installedRef}
-        className={`-m-2 rounded-ui border border-dashed p-2 transition-colors ${installedTone}`}
+      <ModSection
+        title={t("mods.list.installed.title")}
+        count={loaded && !modsError ? mods.length : null}
+        tone={drag.installedTone}
+        sectionRef={drag.installedRef}
       >
-        <Heading title="Mods Installed" count={loaded && !modsError ? mods.length : null} />
         {!loaded ? (
           <Skeleton rows={3} />
         ) : modsError ? (
           <Empty>
             <AlertTriangle size={20} className="opacity-60" />
             <p className="max-w-[46ch]">
-              Peebify couldn't read the {game.name} mods folder. If it's on another drive, check
-              that the drive is connected.
+              {t("mods.list.installed.readError", { game: game.name })}
             </p>
-            <ActionButton onClick={onRetryMods}>Retry</ActionButton>
+            <ActionButton onClick={onRetryMods}>{t("common.retry")}</ActionButton>
           </Empty>
         ) : mods.length === 0 ? (
           <Empty>
             <Puzzle size={20} className="opacity-60" />
             <p className="max-w-[46ch]">
-              No mods for {game.name} on this PC. Import a .zip, .7z or .rar file, drop one onto this
-              window{onBrowse ? ", or find something new in Browse" : ""}.
+              {onBrowse
+                ? t("mods.list.installed.emptyBrowse", { game: game.name })
+                : t("mods.list.installed.empty", { game: game.name })}
             </p>
-            {onBrowse && <ActionButton onClick={onBrowse}>Browse mods</ActionButton>}
+            {onBrowse && <ActionButton onClick={onBrowse}>{t("mods.list.installed.browseMods")}</ActionButton>}
           </Empty>
         ) : visible.length === 0 ? (
           <Empty>
-            <p>Nothing matches. Try a different search to see every mod again.</p>
+            <p>{t("mods.list.noMatches")}</p>
           </Empty>
         ) : (
-          <GroupBox>
-            {visible.map((mod) => (
-              <LocalModRow
-                key={mod.modId}
-                mod={mod}
-                update={updates.get(mod.modId) ?? null}
-                updating={updatingModId === mod.modId}
-                anyUpdating={anyUpdating}
-                onUpdate={() => onUpdate(mod)}
-                profileName={profile?.name ?? null}
-                inProfile={inProfile.has(mod.modId)}
-                draggable={!!profile && !inProfile.has(mod.modId)}
-                dragging={drag?.modId === mod.modId}
-                dragHandlers={dragHandlersFor(mod, "installed")}
-                busy={busy}
-                toggle={toggleFor(mod)}
-                onAddToProfile={profile ? () => onAddToProfile(mod) : undefined}
-                onRemoveFromProfile={profile ? () => onRemoveFromProfile(mod) : undefined}
-                onUninstall={() => onUninstall(mod)}
-                onOpenGameBanana={
-                  onOpenGameBanana && mod.source.gbModId != null
-                    ? () => onOpenGameBanana(mod)
-                    : undefined
-                }
-              />
-            ))}
-          </GroupBox>
+          rowsFor(visible, "installed")
         )}
-      </section>
+      </ModSection>
 
-      {drag && draggedMod && <DragGhost mod={draggedMod} ghostRef={ghostRef} />}
+      {drag.ghost}
     </div>
   );
 }

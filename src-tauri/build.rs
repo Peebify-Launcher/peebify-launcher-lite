@@ -60,7 +60,7 @@ fn assert_versions_agree() {
     let tauri_conf = json_version("tauri.conf.json");
     if package != cargo || tauri_conf != cargo {
         panic!(
-            "version mismatch: src-tauri/Cargo.toml is {cargo}, package.json is {package}, src-tauri/tauri.conf.json is {tauri_conf}. Set all three to the same version so the installed launcher reports the version its installer was signed with."
+            "version mismatch: src-tauri/Cargo.toml is {cargo}, package.json is {package}, src-tauri/tauri.conf.json is {tauri_conf}. Set all three to the same version so the installed launcher reports the version its installer shipped."
         );
     }
 }

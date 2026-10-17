@@ -1,12 +1,19 @@
 // ------------ In-Game HUD ------------
 // The tiny see-through window that sits over the game and shows the screenshot saved toast and the REC timer
 // while recording. It only listens for overlay events, nothing here is clickable.
-
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import type { OverlayStatus } from "../lib/ipc";
+import type { TKey } from "../lib/i18n";
+import { createTranslator, type Dict, type TVars } from "../lib/translator";
 import { blockContextMenu } from "../lib/tauri";
 import { installGlobalErrorCapture, log } from "../lib/log";
 import "./hud.css";
+
+const strings = createTranslator(
+  import.meta.glob<Dict>("../languages/*.json", { eager: true, query: "?hud", import: "default" }),
+);
+const t: (key: TKey, vars?: TVars) => string = strings.t;
 
 installGlobalErrorCapture("overlay-hud");
 blockContextMenu();
@@ -35,6 +42,7 @@ async function loadSettings(): Promise<void> {
   const values = await rpc<{ settings?: Record<string, string> }>("get-settings");
   const s = values?.settings ?? {};
   toastsEnabled = bool(s.overlayShotToast, true);
+  strings.setLanguagePreference(s.language);
 }
 
 type Tone = "info" | "warning" | "error";
@@ -59,6 +67,11 @@ function toast(message: string, tone: Tone): void {
   toastTimer = window.setTimeout(() => toastHost?.classList.remove("show"), TOAST_MS[tone]);
 }
 
+function clock(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000)) || 0;
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
 let recHost: HTMLDivElement | null = null;
 let recTimer: number | undefined;
 let recStarted = 0;
@@ -76,9 +89,7 @@ function setRecording(on: boolean, since = Date.now()): void {
   }
   recStarted = since;
   const paint = () => {
-    const seconds = Math.max(0, Math.round((Date.now() - recStarted) / 1000));
-    const label = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-    if (recHost) recHost.textContent = `REC ${label}`;
+    if (recHost) recHost.textContent = t("hud.rec", { time: clock(Date.now() - recStarted) });
   };
   paint();
   recHost.classList.add("show");
@@ -105,29 +116,31 @@ const fileName = (path: unknown) =>
 const FEEDBACK: Record<string, (payload: Payload) => void> = {
   "overlay-capture": (p) => {
     const name = fileName(p?.path);
-    toast(name ? `Saved ${name}` : "Screenshot saved", "info");
+    toast(name ? t("hud.savedFile", { name }) : t("hud.screenshotSaved"), "info");
   },
   "overlay-capture-failed": (p) => {
-    toast(String(p?.error ?? "The screenshot failed."), "error");
+    toast(String(p?.error ?? t("hud.screenshotFailed")), "error");
   },
   "overlay-record-started": (p) => {
     setRecording(true);
     const warnings = Array.isArray(p?.audioWarnings) ? p.audioWarnings.map(String) : [];
-    if (warnings.length) toast(`Recording started. ${warnings.join(" ")}`, "warning");
-    else toast("Recording started", "info");
+    if (warnings.length) {
+      toast(t("hud.recordingStartedWarnings", { warnings: warnings.join(" ") }), "warning");
+    } else {
+      toast(t("hud.recordingStarted"), "info");
+    }
   },
   "overlay-record-stopped": (p) => {
     setRecording(false);
     const name = fileName(p?.path);
-    const seconds = Math.round(Number(p?.durationMs ?? 0) / 1000) || 0;
-    const length = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-    const saved = name ? `Saved ${name} · ${length}` : `Recording saved · ${length}`;
+    const length = clock(Number(p?.durationMs ?? 0));
+    const saved = name ? t("hud.clipSaved", { name, length }) : t("hud.recordingSaved", { length });
     const reason = typeof p?.reason === "string" && p.reason ? p.reason : null;
-    toast(reason ? `${reason} ${saved}` : saved, "info");
+    toast(reason ? t("hud.withReason", { reason, saved }) : saved, "info");
   },
   "overlay-record-failed": (p) => {
     setRecording(false);
-    toast(String(p?.error ?? "Recording failed."), "error");
+    toast(String(p?.error ?? t("hud.recordingFailed")), "error");
   },
 };
 
@@ -142,21 +155,16 @@ for (const [name, handler] of Object.entries(FEEDBACK)) {
 
 void listen<{ key?: unknown } | null>("settings-changed", (event) => {
   const key = event.payload?.key;
-  if (typeof key === "string" && key && !key.replace(/^behavior\./, "").startsWith("overlay")) {
+  const id = typeof key === "string" ? key.replace(/^behavior\./, "") : "";
+  if (id && !id.startsWith("overlay") && id !== "language") {
     return;
   }
   void loadSettings();
 });
 
-type HudStatus = {
-  recording?: boolean;
-  recordingSinceMs?: number;
-  hudFeedback?: { event?: string; payload?: Payload } | null;
-};
-
 async function restoreState(): Promise<void> {
   await loadSettings();
-  const status = await rpc<HudStatus>("get-overlay-status");
+  const status = await rpc<OverlayStatus>("get-overlay-status");
   if (!status) return;
   if (liveFeedback) return;
   const pending = status.hudFeedback;

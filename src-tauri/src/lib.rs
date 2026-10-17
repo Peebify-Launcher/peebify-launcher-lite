@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 mod backend;
 
-use backend::state::BackendState;
+use backend::BackendState;
 
 #[tauri::command]
 async fn rpc(app: AppHandle, channel: String, args: Option<Vec<Value>>) -> Result<Value, String> {
@@ -59,15 +59,15 @@ impl log::Log for ShellLogger {
 
 static SHELL_LOGGER: ShellLogger = ShellLogger;
 
-const QUIT_REQUEST_FLAG: &str = "--quit-for-setup";
+const QUIT_FOR_UPDATE_FLAG: &str = "--quit-for-update";
 const BUILD_FAILED_MSG: &str = "error while building tauri application";
 const SETUP_FAILED_MSG: &str = "Failed to setup app";
 const MAX_DIALOG_DETAIL_CHARS: usize = 600;
 
 static STARTUP_FAILURE_DIALOG: AtomicBool = AtomicBool::new(false);
 
-fn quit_requested() -> bool {
-    std::env::args().any(|a| a == QUIT_REQUEST_FLAG)
+fn quit_for_update_requested() -> bool {
+    std::env::args().any(|a| a == QUIT_FOR_UPDATE_FLAG)
 }
 
 fn startup_failure_text(message: &str) -> String {
@@ -87,7 +87,7 @@ fn show_startup_failure(text: String) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST,
         };
-        let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        use peebify_helpers::common::wide;
         let body = wide(text);
         let title = wide("Peebify Launcher");
         unsafe {
@@ -147,45 +147,41 @@ fn install_panic_hook() {
 }
 
 pub fn run() {
+    backend::logger::mark_boot();
     if log::set_logger(&SHELL_LOGGER).is_ok() {
         log::set_max_level(log::LevelFilter::Debug);
     }
     install_panic_hook();
 
-    let quit_request = quit_requested();
-
-    if !quit_request {
+    if !quit_for_update_requested() {
         STARTUP_FAILURE_DIALOG.store(true, Ordering::SeqCst);
-        backend::notify::init();
+        backend::platform::register_app_id();
     }
 
     tauri::Builder::default()
-        // tao listens to raw mouse input by default, and with a high polling-rate mouse every
-        // report runs a pass of the event loop on the thread that moves the window, so dragging
-        // it stutters. Nothing here uses device events.
         .device_event_filter(tauri::DeviceEventFilter::Always)
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             let Some(state) = app.try_state::<BackendState>() else {
                 return;
             };
-            if argv.iter().any(|a| a == QUIT_REQUEST_FLAG) {
+            if argv.iter().any(|a| a == QUIT_FOR_UPDATE_FLAG) {
                 log::info!("quit requested by setup");
                 state.window.quit_app();
             } else {
-                state.window.second_instance();
+                state.window.show_window();
             }
         }))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            if quit_requested() {
+            if quit_for_update_requested() {
                 app.handle().cleanup_before_exit();
                 std::process::exit(0);
             }
 
             let app_handle = app.handle().clone();
 
-            backend::perf::allow_full_speed();
-            backend::perf::watch_suspend_resume();
+            backend::platform::allow_full_speed();
+            backend::platform::watch_suspend_resume();
 
             let backend_state = BackendState::init(&app_handle)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
@@ -200,7 +196,7 @@ pub fn run() {
 
             {
                 let wallpaper = state.wallpaper.clone();
-                tauri::async_runtime::spawn(async move {
+                tauri::async_runtime::spawn_blocking(move || {
                     wallpaper.load_from_disk();
                     wallpaper.start();
                 });
@@ -292,10 +288,11 @@ pub fn run() {
             });
 
             STARTUP_FAILURE_DIALOG.store(false, Ordering::SeqCst);
+            log::info!("startup: setup done at {} ms", backend::logger::since_boot_ms());
             Ok(())
         })
         .on_window_event(|window, event| {
-            use backend::overlay_window::{DRAWER_LABEL, HUD_LABEL};
+            use backend::overlay::{DRAWER_LABEL, HUD_LABEL};
             use tauri::WindowEvent;
             let label = window.label();
             if label == DRAWER_LABEL || label == HUD_LABEL {

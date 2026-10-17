@@ -1,17 +1,18 @@
 // ------------ Backend Bridge ------------
 // Every call from the UI into the Rust side lives here, wrapped in typed functions and event listeners so
-// components never deal with raw channel names. It is split into sections: games, settings, mods, overlay,
-// customization, playtime, the download queue, maintenance, installing, and captures.
+// components never deal with raw channel names (the calls themselves are in rpc.ts). It is split into sections:
+// games, settings, mods, overlay, customization, playtime, the download queue, maintenance, installing, and captures.
 import { log } from "./log";
-import { jobFailureKey, useNotificationStore } from "../store/notificationStore";
+import { t, type TKey } from "./i18n";
+import { act, attempt, call, ok, onEvent, rpc, rpcAction, rpcRead, surfaceFailure, type Reply } from "./rpc";
+import { jobFailureKey, useNotificationStore } from "../store/notifications";
 import { useQueueStore } from "../store/queueStore";
-import { GAMES } from "../data/games";
-import { isGameColor } from "../data/playtime";
-import type { GameId, GraphicsApi, ResourceQuality } from "../types/game";
-import { onEvent, rpc, rpcAction, rpcRead, unwrap } from "./rpc";
+import { GAMES, isGameColor, type GameId, type GraphicsApi, type ResourceQuality } from "../data/games";
 
-export type { GraphicsApi, ResourceQuality };
+const idOf = (p: { gameId?: unknown } | null | undefined): string => String(p?.gameId ?? "");
 
+// ------------ App ------------
+// The launcher's version and build channel.
 export interface PendingInstall {
   path: string;
   versionType: string;
@@ -21,30 +22,28 @@ interface GameInfo {
   id: string;
   installed: boolean;
   pendingInstall: PendingInstall | null;
+  qualitySwitch: ResourceQuality | null;
 }
 
 export type BuildType = "stable" | "beta";
 
 export const CHANNEL_LABEL: Record<BuildType, string> = {
-  stable: "Stable",
-  beta: "Beta",
+  get stable() {
+    return t("ipc.channel.stable");
+  },
+  get beta() {
+    return t("ipc.channel.beta");
+  },
 };
 
-interface AppInfo {
-  version: string;
-  buildType: BuildType;
-}
-
-const asBuildType = (v: unknown): BuildType => (v === "beta" ? v : "stable");
-
-export async function appInfo(): Promise<AppInfo> {
+export async function appInfo(): Promise<{ version: string; buildType: BuildType }> {
   const [versionData, buildData] = await Promise.all([
     rpcRead<{ version?: string }>("get-app-version"),
-    rpc("get-build-info").catch(() => null),
+    rpc<{ buildType?: unknown } | null>("get-build-info").catch(() => null),
   ]);
   return {
     version: String(versionData?.version || "0.0.0"),
-    buildType: asBuildType((buildData as { buildType?: unknown } | null)?.buildType),
+    buildType: buildData?.buildType === "beta" ? "beta" : "stable",
   };
 }
 
@@ -52,24 +51,29 @@ export async function appInfo(): Promise<AppInfo> {
 // Listing games, launching them, and the events for a game starting, stopping, failing to launch,
 // or having an update available.
 export async function listGames(): Promise<GameInfo[]> {
-  const supported = await rpcRead<{ games?: unknown[] }>("get-supported-games");
-  const games = Array.isArray(supported?.games) ? supported.games : [];
-  const ids = games.map((raw) => String((raw as Record<string, unknown>).id));
+  const ids = GAMES.map((g) => g.id);
   const cfg =
-    (ids.length
-      ? await getConfigValues(
-          ids.flatMap((id) => [`games.${id}.gamePath`, `games.${id}.pendingInstall`]),
-        )
-      : undefined) || {};
+    (await getConfigValues(
+      ids.flatMap((id) => [
+        `games.${id}.gamePath`,
+        `games.${id}.pendingInstall`,
+        `games.${id}.qualitySwitch`,
+        `games.${id}.resourceQuality`,
+      ]),
+    )) || {};
   return ids.map((id) => {
     const installPath = (cfg[`games.${id}.gamePath`] as string | null | undefined) || null;
     const pending = cfg[`games.${id}.pendingInstall`] as
       | { path?: string; versionType?: string }
       | null
       | undefined;
+    const switchTo = cfg[`games.${id}.qualitySwitch`];
+    const chosen = cfg[`games.${id}.resourceQuality`];
     return {
       id,
       installed: !!installPath,
+      qualitySwitch:
+        isQuality(switchTo) && (!isQuality(chosen) || chosen === switchTo) ? switchTo : null,
       pendingInstall: pending?.path
         ? { path: String(pending.path), versionType: String(pending.versionType || "default") }
         : null,
@@ -77,22 +81,9 @@ export async function listGames(): Promise<GameInfo[]> {
   });
 }
 
-interface LaunchOutcome {
-  accepted: boolean;
-  viaSteam: boolean;
-}
-
-export async function launchGame(id: string): Promise<LaunchOutcome> {
-  const res = await rpcAction<{ success?: boolean; viaSteam?: boolean }>(
-    "Launch",
-    "launch-game",
-    id,
-  );
-  return { accepted: res?.success === true, viaSteam: res?.viaSteam === true };
-}
-
-export async function onGameStarted(cb: (id: string) => void): Promise<() => void> {
-  return onEvent<unknown>("game-started", (p) => cb(idOf(p)));
+export async function launchGame(id: string): Promise<{ accepted: boolean; viaSteam: boolean }> {
+  const r = await act<{ viaSteam?: boolean }>("actions.failed.launch", "launch-game", id);
+  return { accepted: !!r, viaSteam: r?.viaSteam === true };
 }
 
 export async function getRunningGameIds(ids: readonly string[]): Promise<string[] | null> {
@@ -102,55 +93,45 @@ export async function getRunningGameIds(ids: readonly string[]): Promise<string[
   return ids.filter((id) => running.includes(id));
 }
 
-export async function onGameLaunchFailed(
-  cb: (id: string, reason: string) => void,
-): Promise<() => void> {
-  return onEvent<{ gameId?: string; reason?: string }>("game-launch-failed", (p) =>
-    cb(idOf(p), String(p?.reason || "")),
-  );
-}
+export const onGameStarted = (cb: (id: string) => void) => onEvent("game-started", (p) => cb(idOf(p)));
 
-export async function onModsLoadFailed(
-  cb: (gameId: string, error: string, message: string) => void,
-): Promise<() => void> {
-  return onEvent<{ gameId?: string; error?: string; message?: string }>("mods-load-failed", (p) =>
+export const onGameStopped = (cb: (id: string) => void) => onEvent("game-stopped", (p) => cb(idOf(p)));
+
+export const onGameLaunchFailed = (cb: (id: string, reason: string) => void) =>
+  onEvent("game-launch-failed", (p) => cb(idOf(p), String(p?.reason || "")));
+
+export const onModsLoadFailed = (cb: (gameId: string, error: string, message: string) => void) =>
+  onEvent("mods-load-failed", (p) =>
     cb(String(p?.gameId || ""), String(p?.error || ""), String(p?.message || "")),
   );
-}
 
 export interface GameUpdateVersions {
   currentVersion: string | null;
   latestVersion: string | null;
 }
 
+export type RawVersions = { currentVersion?: unknown; latestVersion?: unknown };
+
 type GameUpdateStatus =
-  | ({ ok: true; available: boolean; steamManaged: boolean } & GameUpdateVersions)
+  | ({ ok: true; available: boolean } & GameUpdateVersions)
   | { ok: false; error: string };
 
-function updateVersions(r: { currentVersion?: unknown; latestVersion?: unknown }): GameUpdateVersions {
-  return {
-    currentVersion: typeof r.currentVersion === "string" ? r.currentVersion : null,
-    latestVersion: typeof r.latestVersion === "string" ? r.latestVersion : null,
-  };
-}
+const updateVersions = (r: RawVersions): GameUpdateVersions => ({
+  currentVersion: typeof r.currentVersion === "string" ? r.currentVersion : null,
+  latestVersion: typeof r.latestVersion === "string" ? r.latestVersion : null,
+});
 
 export async function checkGameUpdate(gameId: string, force = false): Promise<GameUpdateStatus> {
   try {
-    const r = await rpc<{
-      success?: boolean;
-      error?: string;
-      updateAvailable?: boolean;
-      steamManaged?: boolean;
-      currentVersion?: unknown;
-      latestVersion?: unknown;
-    }>("check-for-updates", gameId, force);
+    const r = await rpc<
+      (Reply & { updateAvailable?: boolean } & RawVersions) | undefined
+    >("check-for-updates", gameId, force);
     if (!r || r.success === false) {
-      return { ok: false, error: r?.error || "The update server did not answer." };
+      return { ok: false, error: r?.error || t("ipc.updateServerNoAnswer") };
     }
     return {
       ok: true,
       available: !!r.updateAvailable,
-      steamManaged: !!r.steamManaged,
       ...updateVersions(r),
     };
   } catch (e) {
@@ -158,41 +139,32 @@ export async function checkGameUpdate(gameId: string, force = false): Promise<Ga
   }
 }
 
-export async function updateViaSteam(gameId: string): Promise<boolean> {
-  const r = await rpcAction<{ success?: boolean }>("Steam update", "steam-update", gameId);
-  return r?.success === true;
-}
-
-export async function onGameUpdateAvailable(
-  cb: (gameId: string, steamManaged: boolean, versions: GameUpdateVersions) => void,
-): Promise<() => void> {
-  return onEvent<{
-    gameId?: string;
-    steamManaged?: boolean;
-    currentVersion?: unknown;
-    latestVersion?: unknown;
-  }>("update-available", (p) => {
-    if (p?.gameId) cb(String(p.gameId), !!p.steamManaged, updateVersions(p));
+export const onGameUpdateAvailable = (cb: (gameId: string, versions: GameUpdateVersions) => void) =>
+  onEvent("update-available", (p) => {
+    if (p?.gameId) cb(String(p.gameId), updateVersions(p));
   });
-}
-
-export async function onGameStopped(cb: (id: string) => void): Promise<() => void> {
-  return onEvent<unknown>("game-stopped", (p) => cb(idOf(p)));
-}
-
-function idOf(p: unknown): string {
-  return String((p as { gameId?: unknown } | null)?.gameId ?? "");
-}
 
 // ------------ Settings and Config ------------
 // Reading and saving launcher settings and per-game config: update preferences, launch arguments,
 // a custom launcher, the FPS unlock, and Steam installs.
-export async function getSettings(): Promise<Record<string, string>> {
-  const r = await rpcRead<{ settings?: Record<string, string> }>("get-settings");
-  return r?.settings || {};
+interface SettingsReply {
+  settings?: Record<string, string>;
+  configNotice?: Partial<ConfigNotice> | null;
 }
 
-export interface ConfigNotice {
+let settingsRead: Promise<SettingsReply | undefined> | null = null;
+
+function readSettings(): Promise<SettingsReply | undefined> {
+  return (settingsRead ??= rpcRead<SettingsReply>("get-settings").finally(() => {
+    settingsRead = null;
+  }));
+}
+
+export async function getSettings(): Promise<Record<string, string>> {
+  return (await readSettings())?.settings || {};
+}
+
+interface ConfigNotice {
   type: "info" | "warning";
   title: string;
   text: string;
@@ -200,8 +172,7 @@ export interface ConfigNotice {
 }
 
 export async function getConfigNotice(): Promise<ConfigNotice | null> {
-  const r = await rpcRead<{ configNotice?: Partial<ConfigNotice> | null }>("get-settings");
-  const n = r?.configNotice;
+  const n = (await readSettings())?.configNotice;
   if (!n || typeof n.title !== "string" || typeof n.text !== "string") return null;
   return {
     type: n.type === "warning" ? "warning" : "info",
@@ -212,8 +183,8 @@ export async function getConfigNotice(): Promise<ConfigNotice | null> {
 }
 
 export async function setSetting(key: string, value: string): Promise<boolean> {
-  const res = await rpcAction<{ success?: boolean; warning?: string; warningTitle?: string }>(
-    "Save settings",
+  const res = await rpcAction<Reply & { warning?: string; warningTitle?: string }>(
+    "actions.failed.saveSettings",
     "set-setting",
     key,
     value,
@@ -221,7 +192,7 @@ export async function setSetting(key: string, value: string): Promise<boolean> {
   if (res?.warning) {
     useNotificationStore.getState().push({
       type: "warning",
-      title: res.warningTitle ?? "Setting saved",
+      title: res.warningTitle ?? t("ipc.settingSaved"),
       text: res.warning,
     });
   }
@@ -229,17 +200,15 @@ export async function setSetting(key: string, value: string): Promise<boolean> {
 }
 
 export async function setConfigValue(key: string, value: unknown): Promise<void> {
-  await rpcAction("Save setting", "set-config", key, value);
+  await rpcAction("actions.failed.saveSetting", "set-config", key, value);
 }
 
 async function getConfigValue(key: string): Promise<unknown> {
-  const r = await rpcRead<{ value?: unknown }>("get-config", key);
-  return r?.value;
+  return (await rpcRead<{ value?: unknown }>("get-config", key))?.value;
 }
 
 async function getConfigValues(keys: string[]): Promise<Record<string, unknown> | undefined> {
-  const r = await rpcRead<{ values?: Record<string, unknown> }>("get-config", keys);
-  return r?.values;
+  return (await rpcRead<{ values?: Record<string, unknown> }>("get-config", keys))?.values;
 }
 
 export interface GameUpdatePrefs {
@@ -248,86 +217,47 @@ export interface GameUpdatePrefs {
   autoUpdateSchedule: "off" | "daily" | "weekly";
 }
 
-const UPDATE_PREF_KEYS = ["autoUpdate", "autoUpdateOnStartup", "autoUpdateSchedule"] as const;
-
-function updatePrefsFrom(g: Record<string, unknown>): GameUpdatePrefs {
-  return {
-    autoUpdate: g.autoUpdate !== false,
-    autoUpdateOnStartup: g.autoUpdateOnStartup !== false,
-    autoUpdateSchedule:
-      g.autoUpdateSchedule === "off" || g.autoUpdateSchedule === "weekly" ? g.autoUpdateSchedule : "daily",
-  };
-}
-
-async function getGameFields(gameId: string, fields: readonly string[]): Promise<Record<string, unknown>> {
-  const values = (await getConfigValues(fields.map((f) => `games.${gameId}.${f}`))) || {};
-  return Object.fromEntries(fields.map((f) => [f, values[`games.${gameId}.${f}`]]));
-}
-
-export async function getGameUpdatePrefs(gameId: string): Promise<GameUpdatePrefs> {
-  return updatePrefsFrom(await getGameFields(gameId, UPDATE_PREF_KEYS));
-}
-
-export interface GameConfig {
+interface GameConfig {
   prefs: GameUpdatePrefs;
   launchArgs: string;
   customLauncher: string;
   launchViaSteam: boolean;
 }
 
+const GAME_CONFIG_KEYS = [
+  "autoUpdate",
+  "autoUpdateOnStartup",
+  "autoUpdateSchedule",
+  "launchArgs",
+  "customLauncher",
+  "launchViaSteam",
+];
+
 export async function getGameConfig(gameId: string): Promise<GameConfig> {
-  const g = await getGameFields(gameId, [
-    ...UPDATE_PREF_KEYS,
-    "launchArgs",
-    "customLauncher",
-    "launchViaSteam",
-  ]);
+  const values = (await getConfigValues(GAME_CONFIG_KEYS.map((f) => `games.${gameId}.${f}`))) || {};
+  const g = (f: string) => values[`games.${gameId}.${f}`];
+  const schedule = g("autoUpdateSchedule");
   return {
-    prefs: updatePrefsFrom(g),
-    launchArgs: typeof g.launchArgs === "string" ? g.launchArgs : "",
-    customLauncher: typeof g.customLauncher === "string" ? g.customLauncher : "",
-    launchViaSteam: g.launchViaSteam !== false,
+    prefs: {
+      autoUpdate: g("autoUpdate") !== false,
+      autoUpdateOnStartup: g("autoUpdateOnStartup") !== false,
+      autoUpdateSchedule: schedule === "off" || schedule === "weekly" ? schedule : "daily",
+    },
+    launchArgs: str(g("launchArgs")),
+    customLauncher: str(g("customLauncher")),
+    launchViaSteam: g("launchViaSteam") !== false,
   };
 }
 
-export async function getGameLaunchArgs(gameId: string): Promise<string> {
-  const raw = await getConfigValue(`games.${gameId}.launchArgs`);
-  return typeof raw === "string" ? raw : "";
+export const getCustomLauncher = async (gameId: string) =>
+  str(await getConfigValue(`games.${gameId}.customLauncher`));
+
+export async function setCustomLauncher(gameId: string, pick: boolean): Promise<string | undefined> {
+  const label = "actions.failed.changeCustomLauncher";
+  return (await act<PathReply>(label, "set-custom-launcher", gameId, pick ? "pick" : null))?.path;
 }
 
-export async function getCustomLauncher(gameId: string): Promise<string> {
-  const raw = await getConfigValue(`games.${gameId}.customLauncher`);
-  return typeof raw === "string" ? raw : "";
-}
-
-export async function setCustomLauncher(
-  gameId: string,
-  pick: boolean,
-): Promise<string | undefined> {
-  const r = await rpcAction<{ success?: boolean; path?: string }>(
-    "Change the custom launcher",
-    "set-custom-launcher",
-    gameId,
-    pick ? "pick" : null,
-  );
-  return r?.success ? r.path : undefined;
-}
-
-export async function setGameUpdatePref(
-  gameId: string,
-  key: keyof GameUpdatePrefs,
-  value: boolean | string,
-): Promise<void> {
-  await setConfigValue(`games.${gameId}.${key}`, value);
-}
-
-export type FpsUnlockState =
-  | "idle"
-  | "launching"
-  | "attaching"
-  | "locating"
-  | "ready"
-  | "failed";
+export type FpsUnlockState = "idle" | "launching" | "attaching" | "locating" | "ready" | "failed";
 
 export interface FpsUnlock {
   supported: boolean;
@@ -350,77 +280,50 @@ const NO_FPS_UNLOCK: FpsUnlock = {
 };
 
 export async function getFpsUnlock(gameId: string): Promise<FpsUnlock> {
-  const r = await rpcRead<Partial<FpsUnlock>>("get-fps-unlock", gameId);
-  if (!r) return NO_FPS_UNLOCK;
-  return {
-    supported: !!r.supported,
-    enabled: !!r.enabled,
-    targetFps: Number(r.targetFps) || NO_FPS_UNLOCK.targetFps,
-    powerSave: !!r.powerSave,
-    backgroundFps: Number(r.backgroundFps) || NO_FPS_UNLOCK.backgroundFps,
-    session: {
-      state: r.session?.state ?? "idle",
-      error: r.session?.error ?? null,
-    },
-    appliesNextLaunch: !!r.appliesNextLaunch,
-  };
+  return { ...NO_FPS_UNLOCK, ...(await rpcRead<Partial<FpsUnlock>>("get-fps-unlock", gameId)) };
 }
 
 export type FpsUnlockPatch = Partial<
   Pick<FpsUnlock, "enabled" | "targetFps" | "powerSave" | "backgroundFps">
 >;
 
-export async function setFpsUnlock(
-  gameId: string,
-  patch: FpsUnlockPatch,
-): Promise<boolean | undefined> {
-  const r = await rpcAction<{ success?: boolean; appliesNextLaunch?: boolean }>(
-    "Save FPS unlocker setting",
+export async function setFpsUnlock(gameId: string, patch: FpsUnlockPatch): Promise<boolean | undefined> {
+  const r = await act<{ appliesNextLaunch?: boolean }>(
+    "actions.failed.saveFpsUnlock",
     "set-fps-unlock",
     gameId,
     patch,
   );
-  return r?.success ? !!r.appliesNextLaunch : undefined;
+  return r ? !!r.appliesNextLaunch : undefined;
 }
 
-export async function onFpsUnlockStatus(
+export const onFpsUnlockStatus = (
   cb: (status: { gameId: string; state: FpsUnlockState; error: string | null }) => void,
-): Promise<() => void> {
-  return onEvent<{ gameId?: string; state?: FpsUnlockState; error?: string | null }>(
-    "fps-unlock-status",
-    (p) => cb({ gameId: String(p?.gameId ?? ""), state: p?.state ?? "idle", error: p?.error ?? null }),
+) =>
+  onEvent("fps-unlock-status", (p) =>
+    cb({ gameId: idOf(p), state: p?.state ?? "idle", error: p?.error ?? null }),
   );
-}
 
 export interface SteamInstall {
   isSteamInstall: boolean;
-  appId: string | null;
   steamFound: boolean;
   launchViaSteam: boolean;
 }
 
 const NO_STEAM: SteamInstall = {
   isSteamInstall: false,
-  appId: null,
   steamFound: false,
   launchViaSteam: true,
 };
 
-export async function getSteamInstall(
-  gameId: string,
-  launchViaSteam?: boolean,
-): Promise<SteamInstall> {
+export async function getSteamInstall(gameId: string, launchViaSteam?: boolean): Promise<SteamInstall> {
   const [detected, viaSteam] = await Promise.all([
-    rpcRead<{ isSteamInstall?: boolean; appId?: string | null; steamFound?: boolean }>(
-      "get-steam-install",
-      gameId,
-    ),
+    rpcRead<{ isSteamInstall?: boolean; steamFound?: boolean }>("get-steam-install", gameId),
     launchViaSteam ?? getConfigValue(`games.${gameId}.launchViaSteam`),
   ]);
   if (!detected) return NO_STEAM;
   return {
     isSteamInstall: !!detected.isSteamInstall,
-    appId: detected.appId ?? null,
     steamFound: !!detected.steamFound,
     launchViaSteam: viaSteam !== false,
   };
@@ -428,19 +331,10 @@ export async function getSteamInstall(
 
 interface ModSupportedGame {
   id: string;
-  displayName: string;
   variant: string;
-  experimental: boolean;
-  forcesDx11: boolean;
   gameBananaId: number | null;
   installed: boolean;
   enabled: boolean;
-}
-
-interface ToolchainUpdate {
-  package: string;
-  installed: string;
-  latest: string;
 }
 
 // ------------ Mods ------------
@@ -451,7 +345,6 @@ export interface ModsStatus {
   gameEnabled: boolean;
   gameId: string;
   supportsMods: boolean;
-  unsupportedReason: string | null;
   experimental: boolean;
   forcesDx11: boolean;
   variant: string | null;
@@ -459,8 +352,7 @@ export interface ModsStatus {
   toolchainPath: string;
   isDefault: boolean;
   versions: Record<string, string>;
-  updates: ToolchainUpdate[];
-  autoUpdate: boolean;
+  toolsInstalling: boolean;
   supportedGames: ModSupportedGame[];
 }
 
@@ -471,35 +363,36 @@ export interface LoaderSetting {
   kind: "bool" | "millis" | "key";
   value: string;
   accelerator?: string | null;
+  defaultAccelerator?: string | null;
   min: number | null;
   max: number | null;
 }
 
-export async function getLoaderSettings(gameId: string): Promise<LoaderSetting[]> {
-  const r = await rpcRead<{ settings?: LoaderSetting[] }>("mod-ini-settings", gameId);
-  return r?.settings ?? [];
+export async function getLoaderSettings(
+  gameId?: string,
+): Promise<{ gameId: string | null; rows: LoaderSetting[] }> {
+  const r = await rpcRead<{ gameId?: string; settings?: LoaderSetting[] }>(
+    "mod-ini-settings",
+    ...(gameId ? [gameId] : []),
+  );
+  return { gameId: r?.gameId ?? null, rows: r?.settings ?? [] };
 }
 
 export async function setLoaderSetting(
-  gameId: string,
+  gameId: string | null,
   id: string,
   value: string,
-): Promise<boolean> {
-  const r = await rpcAction<{ success?: boolean }>(
-    "Save mod loader setting",
-    "set-mod-ini-setting",
-    gameId,
-    id,
-    value,
-  );
-  return r?.success === true;
+  quiet = false,
+): Promise<{ ok: boolean; error: string | null }> {
+  const label = quiet ? null : "actions.failed.saveLoaderSetting";
+  const r = await rpcAction<Reply>(label, "set-mod-ini-setting", gameId, id, value);
+  return { ok: r?.success === true, error: r?.error ?? null };
 }
 
 interface ModSource {
   kind: "archive" | "gamebanana" | "manual";
   gbModId?: number;
   gbFileId?: number;
-  url?: string | null;
   version?: string | null;
   thumbnailUrl?: string | null;
 }
@@ -521,7 +414,6 @@ const NO_MODS: ModsStatus = {
   gameEnabled: false,
   gameId: "",
   supportsMods: false,
-  unsupportedReason: null,
   experimental: false,
   forcesDx11: false,
   variant: null,
@@ -529,73 +421,35 @@ const NO_MODS: ModsStatus = {
   toolchainPath: "",
   isDefault: true,
   versions: {},
-  updates: [],
-  autoUpdate: true,
+  toolsInstalling: false,
   supportedGames: [],
 };
 
 export async function getModsStatus(gameId: string): Promise<ModsStatus> {
-  const r = await rpcRead<ModsStatus>("mods-status", gameId);
-  return r ? { ...NO_MODS, ...r } : NO_MODS;
+  return { ...NO_MODS, ...(await rpcRead<ModsStatus>("mods-status", gameId)) };
 }
 
-export async function getModsMasterEnabled(): Promise<boolean> {
-  return (await getConfigValue("behavior.modsEnabled")) === true;
-}
+export const getModsMasterEnabled = async () => (await getConfigValue("behavior.modsEnabled")) === true;
 
-export async function listMods(gameId: string): Promise<ModEntry[]> {
+export async function listMods(gameId: string): Promise<ModEntry[] | undefined> {
   const r = await rpcRead<{ mods?: ModEntry[] }>("list-mods", gameId);
-  return r?.mods ?? [];
+  return r ? (r.mods ?? []) : undefined;
 }
 
-export async function installModToolchain(
-  gameId: string,
-): Promise<{ changed: boolean } | undefined> {
-  const r = await rpcAction<{ success?: boolean; changed?: boolean }>(
-    "Install mod tools",
-    "install-mod-toolchain",
-    gameId,
-  );
-  return r?.success ? { changed: r.changed === true } : undefined;
-}
-
-export async function uninstallModToolchain(
-  gameId?: string,
-): Promise<{ keptMods: string[]; sweptFiles: string[]; leftovers: string[] } | undefined> {
-  const r = await rpcAction<{
-    success?: boolean;
-    keptMods?: string[];
-    sweptFiles?: string[];
-    leftovers?: string[];
-  }>("Uninstall mod tools", "uninstall-mod-toolchain", gameId ?? null);
-  return r?.success
-    ? { keptMods: r.keptMods ?? [], sweptFiles: r.sweptFiles ?? [], leftovers: r.leftovers ?? [] }
-    : undefined;
-}
-
-export async function setGameModsEnabled(
-  gameId: string,
-  enabled: boolean,
-): Promise<{ sweptFiles: string[] } | undefined> {
-  const r = await rpcAction<{ success?: boolean; sweptFiles?: string[] }>(
-    "Save setting",
-    "set-game-mods-enabled",
-    gameId,
-    enabled,
-  );
-  return r?.success ? { sweptFiles: r.sweptFiles ?? [] } : undefined;
+export async function setGameModsEnabled(gameId: string, enabled: boolean): Promise<void> {
+  await rpcAction("actions.failed.saveSetting", "set-game-mods-enabled", gameId, enabled);
 }
 
 export async function importModArchive(
   gameId: string,
   paths?: string[],
 ): Promise<{ installed: string[]; failed: string[] } | "cancelled" | undefined> {
-  const r = await rpcAction<{
-    success?: boolean;
-    cancelled?: boolean;
-    installed?: string[];
-    failed?: string[];
-  }>("Import mod", "import-mod-archive", gameId, paths ?? null);
+  const r = await rpcAction<Reply & { installed?: string[]; failed?: string[] }>(
+    "actions.failed.importMod",
+    "import-mod-archive",
+    gameId,
+    paths ?? null,
+  );
   if (r?.cancelled) return "cancelled";
   if (!r?.success) return undefined;
   return { installed: r.installed ?? [], failed: r.failed ?? [] };
@@ -606,14 +460,9 @@ export async function setModEnabled(
   folderName: string,
   enabled: boolean,
 ): Promise<string | undefined> {
-  const r = await rpcAction<{ success?: boolean; folderName?: string }>(
-    enabled ? "Enable mod" : "Disable mod",
-    "set-mod-enabled",
-    gameId,
-    folderName,
-    enabled,
-  );
-  return r?.success === true ? (r.folderName ?? folderName) : undefined;
+  const label = enabled ? "actions.failed.enableMod" : "actions.failed.disableMod";
+  const r = await act<{ folderName?: string }>(label, "set-mod-enabled", gameId, folderName, enabled);
+  return r && (r.folderName ?? folderName);
 }
 
 interface BulkToggleResult {
@@ -626,19 +475,10 @@ export async function setModsEnabledBulk(
   folderNames: string[],
   enabled: boolean,
 ): Promise<BulkToggleResult | undefined> {
-  const r = await rpcAction<{ success?: boolean } & BulkToggleResult>(
-    enabled ? "Enable mods" : "Disable mods",
-    "set-mods-enabled-bulk",
-    gameId,
-    folderNames,
-    enabled,
-  );
-  return r?.success
-    ? {
-        changed: r.changed ?? [],
-        failed: r.failed ?? [],
-      }
-    : undefined;
+  const label = enabled ? "actions.failed.enableMods" : "actions.failed.disableMods";
+  const args = [gameId, folderNames, enabled];
+  const r = await act<Partial<BulkToggleResult>>(label, "set-mods-enabled-bulk", ...args);
+  return r && { changed: r.changed ?? [], failed: r.failed ?? [] };
 }
 
 export interface ModProfile {
@@ -661,72 +501,24 @@ export async function listModProfiles(gameId: string): Promise<ModProfileList | 
   return r ? { ...r, profiles: r.profiles ?? [] } : undefined;
 }
 
-export async function createModProfile(
-  gameId: string,
-  name: string,
-): Promise<ModProfile | undefined> {
-  const r = await rpcAction<{ success?: boolean; profile?: ModProfile }>(
-    "Create profile",
-    "create-mod-profile",
-    gameId,
-    name,
-  );
-  return r?.success ? r.profile : undefined;
-}
+type ProfileReply = { profile?: ModProfile };
 
-export async function renameModProfile(
-  gameId: string,
-  profileId: string,
-  name: string,
-): Promise<boolean> {
-  const r = await rpcAction<{ success?: boolean }>(
-    "Rename profile",
-    "rename-mod-profile",
-    gameId,
-    profileId,
-    name,
-  );
-  return r?.success === true;
-}
+export const createModProfile = async (gameId: string, name: string) =>
+  (await act<ProfileReply>("actions.failed.createProfile", "create-mod-profile", gameId, name))?.profile;
 
-export async function deleteModProfile(gameId: string, profileId: string): Promise<boolean> {
-  const r = await rpcAction<{ success?: boolean }>(
-    "Delete profile",
-    "delete-mod-profile",
-    gameId,
-    profileId,
-  );
-  return r?.success === true;
-}
+export const renameModProfile = (gameId: string, profileId: string, name: string) =>
+  ok("actions.failed.renameProfile", "rename-mod-profile", gameId, profileId, name);
 
-export async function duplicateModProfile(
-  gameId: string,
-  profileId: string,
-): Promise<ModProfile | undefined> {
-  const r = await rpcAction<{ success?: boolean; profile?: ModProfile }>(
-    "Duplicate profile",
-    "duplicate-mod-profile",
-    gameId,
-    profileId,
-  );
-  return r?.success ? r.profile : undefined;
-}
+export const deleteModProfile = (gameId: string, profileId: string) =>
+  ok("actions.failed.deleteProfile", "delete-mod-profile", gameId, profileId);
 
-export async function setModProfileMembers(
-  gameId: string,
-  profileId: string,
-  add: string[],
-  remove: string[],
-): Promise<ModProfile | undefined> {
-  const r = await rpcAction<{ success?: boolean; profile?: ModProfile }>(
-    "Update profile",
-    "set-mod-profile-members",
-    gameId,
-    profileId,
-    add,
-    remove,
-  );
-  return r?.success ? r.profile : undefined;
+export const duplicateModProfile = async (gameId: string, profileId: string) =>
+  (await act<ProfileReply>("actions.failed.duplicateProfile", "duplicate-mod-profile", gameId, profileId))
+    ?.profile;
+
+export async function setModProfileMembers(gameId: string, profileId: string, add: string[], remove: string[]) {
+  const args = [gameId, profileId, add, remove];
+  return (await act<ProfileReply>("actions.failed.updateProfile", "set-mod-profile-members", ...args))?.profile;
 }
 
 export interface ApplyProfileResult {
@@ -741,13 +533,13 @@ export async function applyModProfile(
   gameId: string,
   profileId: string,
 ): Promise<ApplyProfileResult | undefined> {
-  const r = await rpcAction<{ success?: boolean } & ApplyProfileResult>(
-    "Apply profile",
+  const r = await act<Partial<ApplyProfileResult>>(
+    "actions.failed.applyProfile",
     "apply-mod-profile",
     gameId,
     profileId,
   );
-  if (!r?.success) return undefined;
+  if (!r) return undefined;
   return {
     activeId: String(r.activeId || profileId),
     enabled: r.enabled ?? [],
@@ -757,20 +549,8 @@ export async function applyModProfile(
   };
 }
 
-export async function deleteMod(
-  gameId: string,
-  folderName: string,
-  modId?: string,
-): Promise<boolean> {
-  const r = await rpcAction<{ success?: boolean }>(
-    "Delete mod",
-    "delete-mod",
-    gameId,
-    folderName,
-    ...(modId ? [modId] : []),
-  );
-  return r?.success === true;
-}
+export const deleteMod = (gameId: string, folderName: string, modId?: string) =>
+  ok("actions.failed.deleteMod", "delete-mod", gameId, folderName, ...(modId ? [modId] : []));
 
 // ------------ Overlay and Mods Folder ------------
 // Overlay shortcuts and capture folder settings, plus choosing the mods folder and mod install progress.
@@ -781,13 +561,22 @@ export interface OverlayHotkey {
   default: string;
 }
 
-export interface OverlayOption {
+interface OverlayOption {
   id: string;
   label: string;
 }
 
 export interface OverlayAudioTrack extends OverlayOption {
   available: boolean;
+}
+
+const PER_APP_TRACKS = ["game", "discord"];
+
+export function toggledAudioTracks(selected: string[], id: string): string[] {
+  if (selected.includes(id)) return selected.filter((x) => x !== id);
+  const next = [...selected, id];
+  if (id === "desktop") return next.filter((x) => !PER_APP_TRACKS.includes(x));
+  return PER_APP_TRACKS.includes(id) ? next.filter((x) => x !== "desktop") : next;
 }
 
 export interface OverlayConfig {
@@ -811,66 +600,68 @@ export interface OverlayRecEstimate {
   sourceHeight: number;
 }
 
-export async function getOverlayConfig(): Promise<OverlayConfig | undefined> {
-  return rpcRead<OverlayConfig>("get-overlay-config");
-}
+export const getOverlayConfig = () => rpcRead<OverlayConfig>("get-overlay-config");
 
 export async function setOverlayHotkey(
   id: string,
   accelerator: string,
-): Promise<{ ok: boolean; warning: string | null }> {
-  const r = await rpcAction<{ success?: boolean; warning?: string | null }>(
-    "Change shortcut",
+  quiet = false,
+): Promise<{ ok: boolean; warning: string | null; error: string | null }> {
+  const r = await rpcAction<Reply & { warning?: string | null }>(
+    quiet ? null : "actions.failed.changeShortcut",
     "set-overlay-hotkey",
     id,
     accelerator,
   );
-  return { ok: r?.success === true, warning: r?.warning ?? null };
+  return { ok: r?.success === true, warning: r?.warning ?? null, error: r?.error ?? null };
 }
 
-export async function chooseCaptureFolder(): Promise<string | undefined> {
-  const r = await rpcAction<{ success?: boolean; path?: string }>(
-    "Change captures folder",
-    "set-overlay-capture-folder",
-    "pick",
-  );
-  return r?.success ? r.path : undefined;
+export async function suspendOverlayHotkeys(on: boolean): Promise<void> {
+  await rpc("suspend-overlay-hotkeys", on);
 }
 
-export async function resetCaptureFolder(): Promise<string | undefined> {
-  const r = await rpcAction<{ success?: boolean; path?: string }>(
-    "Reset captures folder",
-    "set-overlay-capture-folder",
-    null,
-  );
-  return r?.success ? r.path : undefined;
+export interface OverlayStatus {
+  state?: string;
+  error?: string;
+  unregistered?: string[];
+  invalid?: string[];
+  windowError?: string | null;
+  gameId?: string | null;
+  sessionStartedMs?: number | null;
+  recording?: boolean;
+  recordingSinceMs?: number;
+  hudFeedback?: { event?: string; payload?: Record<string, unknown> | null } | null;
 }
 
-export async function openCaptureFolder(): Promise<void> {
-  await rpcAction("Open captures folder", "open-capture-folder");
+export const getOverlayStatus = () => rpcRead<OverlayStatus>("get-overlay-status");
+
+export async function getCaptureSupport(): Promise<{ supported: boolean; recordingSupported: boolean }> {
+  const s = await rpc<{ supported?: boolean; recordingSupported?: boolean }>("overlay-capture-status");
+  return { supported: s?.supported === true, recordingSupported: s?.recordingSupported !== false };
 }
 
-export async function openModsFolder(gameId: string): Promise<void> {
-  await rpcAction("Open mods folder", "open-mods-folder", gameId);
+export async function closeOverlay(): Promise<void> {
+  await rpc("overlay-toggle", "close");
 }
 
-export async function chooseModsPath(): Promise<string | undefined> {
-  const r = await rpcAction<{ success?: boolean; path?: string }>(
-    "Change mods folder",
-    "set-mods-path",
-    "pick",
-  );
-  return r?.success ? r.path : undefined;
-}
+type PathReply = { path?: string };
 
-export async function resetModsPath(): Promise<string | undefined> {
-  const r = await rpcAction<{ success?: boolean; path?: string }>(
-    "Reset mods folder",
-    "set-mods-path",
-    null,
-  );
-  return r?.success ? r.path : undefined;
-}
+export const chooseCaptureFolder = async () =>
+  (await act<PathReply>("actions.failed.changeCapturesFolder", "set-overlay-capture-folder", "pick"))?.path;
+
+export const resetCaptureFolder = async () =>
+  (await act<PathReply>("actions.failed.resetCapturesFolder", "set-overlay-capture-folder", null))?.path;
+
+export const openCaptureFolder = () => ok("actions.failed.openCapturesFolder", "open-capture-folder");
+
+export const openModsFolder = (gameId: string) =>
+  ok("actions.failed.openModsFolder", "open-mods-folder", gameId);
+
+export const chooseModsPath = async () =>
+  (await act<PathReply>("actions.failed.changeModsFolder", "set-mods-path", "pick"))?.path;
+
+export const resetModsPath = async () =>
+  (await act<PathReply>("actions.failed.resetModsFolder", "set-mods-path", null))?.path;
 
 export interface ModProgress {
   gameId: string;
@@ -880,17 +671,16 @@ export interface ModProgress {
   failed: boolean;
 }
 
-export async function onModProgress(cb: (p: ModProgress) => void): Promise<() => void> {
-  return onEvent<Partial<ModProgress>>("mods-progress", (p) =>
+export const onModProgress = (cb: (p: ModProgress) => void) =>
+  onEvent("mods-progress", (p) =>
     cb({
-      gameId: String(p?.gameId ?? ""),
+      gameId: idOf(p),
       message: String(p?.message ?? ""),
       percentage: Number(p?.percentage ?? 0),
       done: p?.done === true,
       failed: p?.failed === true,
     }),
   );
-}
 
 // ------------ Customization and Library ------------
 // Wallpapers, game icons, graphics API, quality and voice packs, the list of games shown in the sidebar,
@@ -905,10 +695,17 @@ export const defaultGraphicsApi = (gameId: string): GraphicsApi =>
 
 const RESOURCE_QUALITIES = ["sd", "hd", "uhd"] as const;
 export const DEFAULT_RESOURCE_QUALITY: ResourceQuality = "hd";
+const option = <V extends string>(value: V, label: TKey): { value: V; label: string } => ({
+  value,
+  get label() {
+    return t(label);
+  },
+});
+
 export const RESOURCE_QUALITY_OPTIONS: { value: ResourceQuality; label: string }[] = [
-  { value: "sd", label: "SD" },
-  { value: "hd", label: "HD" },
-  { value: "uhd", label: "UHD" },
+  option("sd", "ipc.quality.sd"),
+  option("hd", "ipc.quality.hd"),
+  option("uhd", "ipc.quality.uhd"),
 ];
 
 export interface ResourceQualityInfo {
@@ -919,10 +716,7 @@ export interface ResourceQualityInfo {
 const isQuality = (v: unknown): v is ResourceQuality =>
   typeof v === "string" && (RESOURCE_QUALITIES as readonly string[]).includes(v);
 
-export async function getResourceQuality(
-  gameId: string,
-  withSizes = false,
-): Promise<ResourceQualityInfo> {
+export async function getResourceQuality(gameId: string, withSizes = false): Promise<ResourceQualityInfo> {
   const r = await rpcRead<{ installed?: unknown; sizes?: unknown }>(
     "get-resource-quality",
     gameId,
@@ -941,14 +735,46 @@ export async function getResourceQuality(
   return { installed, sizes: Object.keys(sizes).length ? sizes : null };
 }
 
+export interface QualityCheck {
+  selected: ResourceQuality;
+  launchWith: ResourceQuality;
+  onDisk: ResourceQuality[];
+  files: Partial<Record<ResourceQuality, { present: number; total: number }>>;
+}
+
+export async function checkResourceQuality(
+  gameId: string,
+): Promise<{ ok: true; check: QualityCheck } | { ok: false; error: string }> {
+  try {
+    const r = await rpc<
+      | (Reply & { selected?: unknown; launchWith?: unknown; onDisk?: unknown; files?: unknown })
+      | undefined
+    >("check-resource-quality", gameId);
+    if (!r || r.success === false || !isQuality(r.selected) || !isQuality(r.launchWith)) {
+      return { ok: false, error: r?.error || t("common.genericError") };
+    }
+    const files: QualityCheck["files"] = {};
+    for (const [k, v] of Object.entries((r.files ?? {}) as Record<string, unknown>)) {
+      const f = v as { present?: unknown; total?: unknown };
+      if (isQuality(k) && typeof f?.present === "number" && typeof f.total === "number") {
+        files[k] = { present: f.present, total: f.total };
+      }
+    }
+    const onDisk = Array.isArray(r.onDisk) ? r.onDisk.filter(isQuality) : [];
+    return { ok: true, check: { selected: r.selected, launchWith: r.launchWith, onDisk, files } };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 const VOICE_PACK_LANGUAGES = ["en-us", "ja-jp", "ko-kr", "zh-cn"] as const;
 export type VoicePackLanguage = (typeof VOICE_PACK_LANGUAGES)[number];
 export const DEFAULT_VOICE_PACK: VoicePackLanguage = "en-us";
 export const VOICE_PACK_OPTIONS: { value: VoicePackLanguage; label: string }[] = [
-  { value: "en-us", label: "EN" },
-  { value: "ja-jp", label: "JP" },
-  { value: "ko-kr", label: "KR" },
-  { value: "zh-cn", label: "CN" },
+  option("en-us", "ipc.voicePack.en"),
+  option("ja-jp", "ipc.voicePack.ja"),
+  option("ko-kr", "ipc.voicePack.ko"),
+  option("zh-cn", "ipc.voicePack.zh"),
 ];
 
 export async function getAppliedVoicePacks(gameId: string): Promise<string[] | null> {
@@ -971,7 +797,7 @@ function normSlice(v: unknown): MediaSlice {
 }
 
 export async function getCustomization(): Promise<Customization> {
-  const empty: Customization = {
+  const out: Customization = {
     wallpaper: {},
     gameIcons: {},
     graphicsApi: {},
@@ -990,38 +816,22 @@ export async function getCustomization(): Promise<Customization> {
       `games.${id}.playtimeColor`,
     ]),
   ]);
-  if (!cfg) return empty;
-  const asMap = (v: unknown) => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
-  const wallpaper: Record<string, MediaSlice> = {};
-  for (const [k, v] of Object.entries(asMap(cfg.wallpaper))) wallpaper[k] = normSlice(v);
-  const gameIcons: Record<string, MediaSlice> = {};
-  for (const [k, v] of Object.entries(asMap(cfg.gameIcons))) gameIcons[k] = normSlice(v);
-  const graphicsApi: Record<string, GraphicsApi> = {};
-  const resourceQuality: Record<string, ResourceQuality> = {};
-  const voicePack: Record<string, VoicePackLanguage> = {};
-  const playtimeColor: Record<string, string> = {};
+  if (!cfg) return out;
+  for (const [k, v] of Object.entries(rec(cfg.wallpaper) ?? {})) out.wallpaper[k] = normSlice(v);
+  for (const [k, v] of Object.entries(rec(cfg.gameIcons) ?? {})) out.gameIcons[k] = normSlice(v);
   for (const k of ids) {
     const api = cfg[`games.${k}.graphicsApi`];
-    if (api === "dx11" || api === "dx12") graphicsApi[k] = api;
+    if (api === "dx11" || api === "dx12") out.graphicsApi[k] = api;
     const quality = cfg[`games.${k}.resourceQuality`];
-    if (typeof quality === "string" && (RESOURCE_QUALITIES as readonly string[]).includes(quality)) {
-      resourceQuality[k] = quality as ResourceQuality;
-    }
+    if (isQuality(quality)) out.resourceQuality[k] = quality;
     const color = cfg[`games.${k}.playtimeColor`];
-    if (typeof color === "string" && isGameColor(color)) playtimeColor[k] = color.trim().toLowerCase();
+    if (typeof color === "string" && isGameColor(color)) out.playtimeColor[k] = color.trim().toLowerCase();
     const lang = cfg[`games.${k}.voicePackLanguage`];
     if (typeof lang === "string" && (VOICE_PACK_LANGUAGES as readonly string[]).includes(lang)) {
-      voicePack[k] = lang as VoicePackLanguage;
+      out.voicePack[k] = lang as VoicePackLanguage;
     }
   }
-  return {
-    wallpaper,
-    gameIcons,
-    graphicsApi,
-    resourceQuality,
-    voicePack,
-    playtimeColor,
-  };
+  return out;
 }
 
 interface LibraryConfig {
@@ -1050,32 +860,22 @@ export async function getLibrary(): Promise<LibraryConfig> {
 export async function saveLibrary(library: LibraryConfig): Promise<void> {
   await setConfigValue("library.visible", library.visible);
   if (library.setupComplete === savedSetupComplete) return;
-  const r = await rpcAction<{ success?: boolean }>(
-    "Save setting",
-    "set-config",
-    "library.setupComplete",
-    library.setupComplete,
-  );
-  savedSetupComplete = r?.success === true ? library.setupComplete : undefined;
+  const { setupComplete } = library;
+  const saved = await ok("actions.failed.saveSetting", "set-config", "library.setupComplete", setupComplete);
+  savedSetupComplete = saved ? setupComplete : undefined;
 }
 
-export async function selectWallpaperFile(): Promise<string | null> {
-  const r = await rpcRead<{ path?: string }>("select-wallpaper-file");
-  return r?.path || null;
-}
+export const selectWallpaperFile = async () =>
+  (await rpcRead<PathReply>("select-wallpaper-file"))?.path || null;
 
-export async function saveWallpaper(gameId: string, slice: MediaSlice): Promise<void> {
-  await rpcAction("Save wallpaper", "save-wallpaper", { gameId, config: slice });
-}
+export const saveWallpaper = (gameId: string, slice: MediaSlice) =>
+  ok("actions.failed.saveWallpaper", "save-wallpaper", { gameId, config: slice });
 
-export async function selectGameIconFile(): Promise<string | null> {
-  const r = await rpcRead<{ path?: string }>("select-game-icon-file");
-  return r?.path || null;
-}
+export const selectGameIconFile = async () =>
+  (await rpcRead<PathReply>("select-game-icon-file"))?.path || null;
 
-export async function saveGameIcon(gameId: string, slice: MediaSlice): Promise<void> {
-  await rpcAction("Save game icon", "save-game-icon", { gameId, config: slice });
-}
+export const saveGameIcon = (gameId: string, slice: MediaSlice) =>
+  ok("actions.failed.saveGameIcon", "save-game-icon", { gameId, config: slice });
 
 export interface RemoteMedia {
   wallpaper: string | null;
@@ -1093,20 +893,12 @@ export async function getWallpaperMedia(): Promise<Record<string, RemoteMedia>> 
   return out;
 }
 
-export async function onWallpaperMediaUpdated(
-  cb: (media: Record<string, RemoteMedia>) => void,
-): Promise<() => void> {
-  return onEvent<{ media?: Record<string, RemoteMedia> }>("wallpaper-media-updated", (p) =>
-    cb((p?.media || {}) as Record<string, RemoteMedia>),
-  );
-}
+export const onWallpaperMediaUpdated = (cb: (media: Record<string, RemoteMedia>) => void) =>
+  onEvent("wallpaper-media-updated", (p) => cb(p?.media || {}));
 
 // ------------ Playtime ------------
 // Playtime totals, sessions and daily minutes, and removing a session.
 interface PillStats {
-  todayMinutes: number;
-  weekMinutes: number;
-  monthMinutes: number;
   allTimeMinutes: number;
   sessions: number;
   lastPlayed: string | null;
@@ -1123,6 +915,7 @@ export interface SessionEntry {
   gameId: string;
   start: number;
   minutes: number;
+  local?: boolean;
   end?: number;
   live?: boolean;
 }
@@ -1158,21 +951,16 @@ export async function getPlaytime(): Promise<PlaytimeData> {
 export async function getOlderSessions(
   before: number,
 ): Promise<{ sessions: SessionEntry[]; hasMore: boolean } | null> {
-  const r = unwrap<{ sessions?: SessionEntry[]; hasMore?: boolean }>(
-    await rpcAction("Load earlier sessions", "get-playtime-sessions", before),
+  const r = await act<{ sessions?: SessionEntry[]; hasMore?: boolean }>(
+    "actions.failed.loadEarlierSessions",
+    "get-playtime-sessions",
+    before,
   );
   return r ? { sessions: r.sessions ?? [], hasMore: r.hasMore === true } : null;
 }
 
-export async function deletePlaytimeSession(gameId: string, start: number): Promise<boolean> {
-  const r = await rpcAction<{ success?: boolean }>(
-    "Remove session",
-    "playtime-delete-session",
-    gameId,
-    start,
-  );
-  return r?.success === true;
-}
+export const deletePlaytimeSession = (gameId: string, start: number) =>
+  ok("actions.failed.removeSession", "playtime-delete-session", gameId, start);
 
 // ------------ Download Queue ------------
 // The download queue: its state, the events it sends, and pausing, resuming, prioritising or cancelling a
@@ -1187,6 +975,8 @@ export interface QueueJob {
   downloaded: number;
   percent: number;
   speed: number;
+  networkSpeed: number;
+  diskSpeed: number;
   etaSecs: number;
   paused: boolean;
   error: string | null;
@@ -1194,28 +984,27 @@ export interface QueueJob {
   warning?: boolean;
   parked?: boolean;
   waitingNetwork?: boolean;
+  heldForGame?: boolean;
 }
 
 interface QueueState {
   jobs: QueueJob[];
 }
 
-export async function downloadState(): Promise<QueueState> {
-  const r = await rpcRead<{ jobs?: QueueJob[] }>("get-download-queue-state");
-  return { jobs: Array.isArray(r?.jobs) ? r.jobs : [] };
-}
+const queueState = (p: { jobs?: unknown } | null | undefined): QueueState => ({
+  jobs: Array.isArray(p?.jobs) ? p.jobs : [],
+});
 
-export async function onQueueState(cb: (s: QueueState) => void): Promise<() => void> {
-  return onEvent<{ jobs?: QueueJob[] }>("download-queue-state", (p) =>
-    cb({ jobs: Array.isArray(p?.jobs) ? p.jobs : [] }),
-  );
-}
+export const downloadState = async () => queueState(await rpcRead<QueueState>("get-download-queue-state"));
+
+export const onQueueState = (cb: (s: QueueState) => void) =>
+  onEvent("download-queue-state", (p) => cb(queueState(p)));
 
 const ENDED_PHASES = ["done", "cancelled", "deferred", "error"];
 
 const STARTS_DOWNLOAD = ["install", "update"];
 
-export interface QueuedJobWatch {
+interface QueuedJobWatch {
   taken: () => boolean;
   stop: () => void;
 }
@@ -1244,53 +1033,26 @@ export function watchQueuedJob(
   return { taken: () => taken, stop };
 }
 
-export function reportJobFailure(
-  label: string,
-  gameId: string,
-  detail: unknown,
-  queued: boolean,
-): void {
-  log.warn(`[action] ${label} failed:`, detail ?? "(no detail)");
-  if (queued) return;
-  const text =
-    detail instanceof Error
-      ? detail.message
-      : typeof detail === "string" && detail
-        ? detail
-        : "Something went wrong. Check the logs for details.";
-  useNotificationStore.getState().push({
-    type: "error",
-    title: `${label} failed`,
-    text,
-    key: jobFailureKey(gameId),
-  });
+export function reportJobFailure(label: TKey, gameId: string, detail: unknown, queued: boolean): void {
+  if (queued) log.warn(`[action] ${label}:`, detail ?? "(no detail)");
+  else surfaceFailure(label, label, detail, jobFailureKey(gameId));
 }
 
 async function queuedAction<T>(
-  label: string,
+  label: TKey,
   channel: string,
   job: { gameId: string; kinds: readonly string[]; onQueued?: () => void },
   ...args: unknown[]
 ): Promise<T | undefined> {
   const watch = watchQueuedJob(job.gameId, job.kinds, job.onQueued);
-  try {
-    const res = await rpc<T>(channel, ...args);
-    const r = res as { success?: boolean; error?: string; cancelled?: boolean } | undefined;
-    if (r && typeof r === "object" && r.success === false && !r.cancelled) {
-      reportJobFailure(label, job.gameId, r.error, watch.taken());
-    }
-    return res;
-  } catch (e) {
-    reportJobFailure(label, job.gameId, e, watch.taken());
-    return undefined;
-  } finally {
-    watch.stop();
-  }
+  return attempt<T>(channel, args, (detail) =>
+    reportJobFailure(label, job.gameId, detail, watch.taken()),
+  ).finally(watch.stop);
 }
 
 export async function downloadEnqueue(gameId: string, onQueued?: () => void): Promise<void> {
   await queuedAction(
-    "Download",
+    "actions.failed.download",
     "start-download",
     { gameId, kinds: STARTS_DOWNLOAD, onQueued },
     { gameId, versionType: "default" },
@@ -1298,38 +1060,35 @@ export async function downloadEnqueue(gameId: string, onQueued?: () => void): Pr
 }
 
 export async function pauseJob(job: QueueJob): Promise<void> {
-  if (job.kind === "repair") {
-    await rpcAction("Pause", "pause-repair", job.gameId);
-  } else {
-    await rpcAction("Pause", "pause-download", job.id);
-  }
+  if (job.kind === "repair") await rpcAction("actions.failed.pause", "pause-repair", job.gameId);
+  else await rpcAction("actions.failed.pause", "pause-download", job.id);
 }
 
 export async function resumeJob(job: QueueJob): Promise<void> {
-  if (job.kind === "repair") {
-    await rpcAction("Resume", "resume-repair", job.gameId);
-  } else {
-    await rpcAction("Resume", "resume-download", job.id);
-  }
+  if (job.kind === "repair") await rpcAction("actions.failed.resume", "resume-repair", job.gameId);
+  else await rpcAction("actions.failed.resume", "resume-download", job.id);
+}
+
+export async function keepGoingWhilePlaying(job: QueueJob): Promise<void> {
+  await rpcAction("actions.failed.keepGoing", "keep-going-while-playing", job.gameId);
 }
 
 export async function prioritizeDownload(id: string): Promise<void> {
-  const res = await rpcAction<{ deferred?: string }>("Prioritize download", "prioritize-download", id);
+  const label = "actions.failed.prioritizeDownload";
+  const res = await rpcAction<{ deferred?: string }>(label, "prioritize-download", id);
   if (res?.deferred) {
-    useNotificationStore.getState().push({ type: "info", title: "Up next", text: res.deferred });
+    useNotificationStore.getState().push({ type: "info", title: t("ipc.upNext"), text: res.deferred });
   }
 }
 
+const CANCEL_CHANNEL: Record<string, string> = {
+  repair: "cancel-repair",
+  verify: "cancel-verify",
+  move: "cancel-move",
+};
+
 export async function downloadCancel(id: string, kind = "install"): Promise<void> {
-  const channel =
-    kind === "repair"
-      ? "cancel-repair"
-      : kind === "verify"
-        ? "cancel-verify"
-        : kind === "move"
-          ? "cancel-move"
-          : "cancel-download";
-  await rpcAction("Cancel", channel, id);
+  await rpcAction("actions.failed.cancel", CANCEL_CHANNEL[kind] ?? "cancel-download", id);
 }
 
 // ------------ News and Maintenance ------------
@@ -1352,12 +1111,17 @@ export interface NewsData {
 }
 
 export async function applyActiveGame(id: string): Promise<void> {
-  await rpcAction("Switch game", "set-active-game", id);
+  await rpcAction("actions.failed.switchGame", "set-active-game", id);
 }
 
 export async function getNewsData(id: string): Promise<NewsData | undefined> {
   const outer = await rpcRead<{ data?: NewsData }>("get-news-data", id);
   return outer ? outer.data || {} : undefined;
+}
+
+export async function getSavedNewsData(id: string): Promise<NewsData | undefined> {
+  const outer = await rpcRead<{ data?: NewsData | null }>("get-news-data", id, { saved: true });
+  return outer?.data ?? undefined;
 }
 
 export interface GameLinks {
@@ -1366,13 +1130,10 @@ export interface GameLinks {
 }
 
 export async function getGameLinks(): Promise<Record<string, GameLinks>> {
-  const r = await rpcRead<{ links?: Record<string, GameLinks> }>("get-game-links");
-  return r?.links || {};
+  return (await rpcRead<{ links?: Record<string, GameLinks> }>("get-game-links"))?.links || {};
 }
 
-export async function openLogsFolder(): Promise<void> {
-  await rpcAction("Open logs folder", "open-logs-folder");
-}
+export const openLogsFolder = () => ok("actions.failed.openLogsFolder", "open-logs-folder");
 
 export async function wipeLauncherData(): Promise<void> {
   let saved: [string, string][] = [];
@@ -1382,8 +1143,7 @@ export async function wipeLauncherData(): Promise<void> {
   } catch (e) {
     log.warn("[action] Could not clear the interface's saved state:", e);
   }
-  const r = await rpcAction<{ success?: boolean }>("Wipe launcher data", "wipe-launcher-data");
-  if (r?.success === true) return;
+  if (await ok("actions.failed.wipeLauncherData", "wipe-launcher-data")) return;
   try {
     saved.forEach(([k, v]) => {
       if (localStorage.getItem(k) === null) localStorage.setItem(k, v);
@@ -1399,12 +1159,7 @@ export const lastRepairMode = (gameId: string): "quick" | "full" | undefined => 
 
 export async function repairGame(gameId: string, quick = false): Promise<boolean> {
   repairModes[gameId] = quick ? "quick" : "full";
-  const r = await rpcAction<{ success?: boolean }>(
-    "Repair",
-    quick ? "start-quick-repair" : "start-repair",
-    gameId,
-  );
-  return r?.success === true;
+  return ok("actions.failed.repair", quick ? "start-quick-repair" : "start-repair", gameId);
 }
 
 interface VerifyResult {
@@ -1418,13 +1173,12 @@ export async function verifyGameIntegrity(
   onQueued?: () => void,
 ): Promise<VerifyResult | undefined> {
   const watch = watchQueuedJob(gameId, ["verify"], onQueued);
-  const r = await rpcAction<{
-    success?: boolean;
-    invalidFiles?: unknown[];
-    message?: string;
-    updatePending?: boolean;
-  }>("Verify game files", "verify-game-integrity", gameId).finally(watch.stop);
-  if (!r?.success) return undefined;
+  const r = await act<{ invalidFiles?: unknown[]; message?: string; updatePending?: boolean }>(
+    "actions.failed.verifyGameFiles",
+    "verify-game-integrity",
+    gameId,
+  ).finally(watch.stop);
+  if (!r) return undefined;
   return {
     brokenFiles: Array.isArray(r.invalidFiles) ? r.invalidFiles.length : 0,
     message: r.message || undefined,
@@ -1433,12 +1187,12 @@ export async function verifyGameIntegrity(
 }
 
 export async function moveGame(gameId: string): Promise<void> {
-  await queuedAction("Move game", "move-game-location", { gameId, kinds: ["move"] }, gameId);
+  await queuedAction("actions.failed.moveGame", "move-game-location", { gameId, kinds: ["move"] }, gameId);
 }
 
 export async function uninstallGame(gameId: string): Promise<boolean> {
-  const r = await queuedAction<{ success?: boolean }>(
-    "Uninstall",
+  const r = await queuedAction<Reply>(
+    "actions.failed.uninstall",
     "uninstall-game",
     { gameId, kinds: ["uninstall"] },
     gameId,
@@ -1446,9 +1200,8 @@ export async function uninstallGame(gameId: string): Promise<boolean> {
   return r?.success === true;
 }
 
-export async function openLeftoverFolder(gameId: string): Promise<void> {
-  await rpcAction("Open folder", "open-leftover-folder", gameId);
-}
+export const openLeftoverFolder = (gameId: string) =>
+  ok("actions.failed.openFolder", "open-leftover-folder", gameId);
 
 interface DiskSpace {
   free: number;
@@ -1463,7 +1216,30 @@ export async function getDiskSpace(path?: string): Promise<DiskSpace | null> {
 // ------------ Install Flow ------------
 // Everything the install dialog needs: disk space, default paths, size preview, content packs, starting
 // or resuming a download, and finding a game that is already installed.
-export interface InstallPathHealth {
+export interface GameStorage {
+  gamePath: string;
+  gameBytes: number;
+  mods: { bytes: number; installed: number; enabled: number } | null;
+  media: { bytes: number; screenshots: number; clips: number };
+  drive: string;
+  free: number | null;
+  total: number | null;
+}
+const NO_STORAGE: GameStorage = {
+  gamePath: "",
+  gameBytes: 0,
+  mods: null,
+  media: { bytes: 0, screenshots: 0, clips: 0 },
+  drive: "",
+  free: null,
+  total: null,
+};
+export async function getGameStorage(gameId: string): Promise<GameStorage | null> {
+  const r = await rpcRead<Partial<GameStorage>>("get-game-storage", gameId);
+  return r ? { ...NO_STORAGE, ...r } : null;
+}
+
+interface InstallPathHealth {
   path: string;
   tooDeep: boolean;
   notWritable: boolean;
@@ -1471,13 +1247,7 @@ export interface InstallPathHealth {
   message: string;
 }
 export async function getInstallPathHealth(gameId: string): Promise<InstallPathHealth> {
-  const r = await rpcRead<{
-    path?: string | null;
-    tooDeep?: boolean;
-    notWritable?: boolean;
-    missing?: boolean;
-    message?: string | null;
-  }>("get-install-path-health", gameId);
+  const r = await rpcRead<Partial<InstallPathHealth>>("get-install-path-health", gameId);
   return {
     path: r?.path ?? "",
     tooDeep: !!r?.tooDeep,
@@ -1494,13 +1264,7 @@ interface DefaultInstallPath {
 }
 export async function getDefaultInstallPath(gameId: string): Promise<DefaultInstallPath | null> {
   const r = await rpcRead<DefaultInstallPath>("get-default-install-path", { gameId });
-  return r?.path
-    ? {
-        path: r.path,
-        maxRootLength: r.maxRootLength ?? 0,
-        folderName: r.folderName,
-      }
-    : null;
+  return r?.path ? { path: r.path, maxRootLength: r.maxRootLength ?? 0, folderName: r.folderName } : null;
 }
 
 interface InstallPreviewPart {
@@ -1525,10 +1289,10 @@ interface InstallPreviewResult {
   error: string | null;
 }
 export async function getInstallPreview(gameId: string): Promise<InstallPreviewResult> {
-  const r = (await rpc("get-install-preview", gameId).catch((e) => {
+  const r = await rpc<(Partial<InstallPreview> & Reply) | null>("get-install-preview", gameId).catch((e) => {
     log.warn("[read] get-install-preview failed:", e);
     return null;
-  })) as (Partial<InstallPreview> & { success?: boolean; error?: string }) | null;
+  });
   if (!r || r.success === false) {
     if (r?.error) log.warn("[read] get-install-preview failed:", r.error);
     return { preview: null, error: r?.error ?? null };
@@ -1562,22 +1326,15 @@ interface ContentPackList {
   error: boolean;
 }
 export async function getContentPacks(gameId: string): Promise<ContentPackList> {
-  const r = await rpcRead<{ packs?: ContentPack[]; supported?: boolean }>(
-    "get-content-packs",
-    gameId,
-  );
+  const r = await rpcRead<{ packs?: ContentPack[]; supported?: boolean }>("get-content-packs", gameId);
   if (!r) return { supported: true, packs: [], error: true };
   if (!r.supported) return { supported: false, packs: [], error: false };
   return { supported: true, packs: Array.isArray(r.packs) ? r.packs : [], error: false };
 }
 
 export async function setContentPacks(gameId: string, tags: string[] | null): Promise<boolean> {
-  const r = await rpcAction<{ success?: boolean }>(
-    "Save setting",
-    "set-config",
-    `games.${gameId}.contentTags`,
-    tags,
-  );
+  const key = `games.${gameId}.contentTags`;
+  const r = await rpcAction<Reply>("actions.failed.saveSetting", "set-config", key, tags);
   return !!r && r.success !== false;
 }
 
@@ -1592,7 +1349,7 @@ export async function startDownload(
   onQueued?: () => void,
 ): Promise<void> {
   await queuedAction(
-    "Install",
+    "actions.failed.install",
     "start-download",
     { gameId, kinds: STARTS_DOWNLOAD, onQueued },
     { installPath, versionType: "default", gameId },
@@ -1601,7 +1358,7 @@ export async function startDownload(
 
 export async function resumeInstall(gameId: string, pending: PendingInstall): Promise<void> {
   await queuedAction(
-    "Resume install",
+    "actions.failed.resumeInstall",
     "start-download",
     { gameId, kinds: STARTS_DOWNLOAD },
     { installPath: pending.path, versionType: pending.versionType, gameId },
@@ -1615,107 +1372,68 @@ interface LocateResult {
   cancelled?: boolean;
 }
 
-export async function locateGameInstall(gameId: string): Promise<LocateResult> {
-  const r = (await rpc("browse-game-path", gameId).catch((e) => {
-    log.warn("[action] Locate game install failed:", e);
+async function locate(channel: string, what: string, gameId: string): Promise<LocateResult> {
+  const r = await rpc<(Reply & PathReply) | null>(channel, gameId).catch((e) => {
+    log.warn(`[action] ${what} game install failed:`, e);
     return null;
-  })) as {
-    success?: boolean;
-    path?: string;
-    cancelled?: boolean;
-    error?: string;
-  } | null;
+  });
   if (r?.success && r.path) return { ok: true, path: r.path };
   return { ok: false, cancelled: !!r?.cancelled, error: r?.error };
 }
 
-export async function detectDefaultGameInstall(gameId: string): Promise<LocateResult> {
-  const r = (await rpc("detect-default-game-path", gameId).catch((e) => {
-    log.warn("[action] Detect default game install failed:", e);
-    return null;
-  })) as { success?: boolean; path?: string; error?: string } | null;
-  if (r?.success && r.path) return { ok: true, path: r.path };
-  return { ok: false, error: r?.error };
-}
+export const locateGameInstall = (gameId: string) => locate("browse-game-path", "Locate", gameId);
 
-export async function openGameFolder(gameId: string): Promise<void> {
-  await rpcAction("Open game folder", "open-game-folder", gameId);
-}
+export const detectDefaultGameInstall = (gameId: string) =>
+  locate("detect-default-game-path", "Detect default", gameId);
 
-export async function openScreenshotFolder(gameId: string): Promise<void> {
-  await rpcAction("Open screenshots folder", "open-screenshot-folder", gameId);
-}
+export const openGameFolder = (gameId: string) =>
+  ok("actions.failed.openGameFolder", "open-game-folder", gameId);
+
+export const openScreenshotFolder = (gameId: string) =>
+  ok("actions.failed.openScreenshotsFolder", "open-screenshot-folder", gameId);
 
 // ------------ Network and Window Events ------------
 // Online status, window maximize and restore, power saving, and the install complete and games
 // detected events.
-export async function getNetworkStatus(): Promise<boolean | null> {
-  const r = await rpcRead<{ isOnline?: boolean }>("get-network-status");
+const isOnline = async (channel: string) => {
+  const r = await rpcRead<{ isOnline?: boolean }>(channel);
   return typeof r?.isOnline === "boolean" ? r.isOnline : null;
-}
+};
 
-export async function networkRecheck(): Promise<boolean | null> {
-  const r = await rpcRead<{ isOnline?: boolean }>("network-recheck");
-  return typeof r?.isOnline === "boolean" ? r.isOnline : null;
-}
+export const getNetworkStatus = () => isOnline("get-network-status");
 
-export async function onNetworkStatusChanged(
-  cb: (online: boolean) => void,
-): Promise<() => void> {
-  return onEvent<{ isOnline?: boolean }>("network-status-changed", (p) =>
-    cb(p?.isOnline !== false),
-  );
-}
+export const networkRecheck = () => isOnline("network-recheck");
 
-export async function onInstallationComplete(
-  cb: (gameId: string, version: string | null) => void,
-): Promise<() => void> {
-  return onEvent<{ gameId?: string; version?: string | null }>("installation-complete", (p) =>
-    cb(String(p?.gameId || ""), p?.version ?? null),
-  );
-}
+export const onNetworkStatusChanged = (cb: (online: boolean) => void) =>
+  onEvent("network-status-changed", (p) => cb(p?.isOnline !== false));
 
-export async function onGamesDetected(
-  cb: (gameIds: string[]) => void,
-): Promise<() => void> {
-  return onEvent<{ gameIds?: unknown }>("games-detected", (p) =>
-    cb(Array.isArray(p?.gameIds) ? p.gameIds.map(String) : []),
-  );
-}
+export const onInstallationComplete = (cb: (gameId: string, version: string | null) => void) =>
+  onEvent("installation-complete", (p) => cb(String(p?.gameId || ""), p?.version ?? null));
 
-export async function onRendererPowerSave(cb: (suspended: boolean) => void): Promise<() => void> {
-  return onEvent<boolean>("renderer-power-save", (p) => cb(p !== false));
-}
+export const onGamesDetected = (cb: (gameIds: string[]) => void) =>
+  onEvent("games-detected", (p) => cb(Array.isArray(p?.gameIds) ? p.gameIds.map(String) : []));
 
-export async function onWindowRestored(cb: () => void): Promise<() => void> {
-  return onEvent<unknown>("window-restored", () => cb());
-}
+export const onRendererPowerSave = (cb: (suspended: boolean) => void) =>
+  onEvent("renderer-power-save", (p) => cb(p !== false));
 
-export async function onWindowMaximizedChanged(
-  cb: (maximized: boolean) => void,
-): Promise<() => void> {
-  return onEvent<{ maximized?: boolean }>("window:maximized-changed", (p) => cb(!!p?.maximized));
-}
+export const onWindowRestored = (cb: () => void) => onEvent("window-restored", () => cb());
 
-export async function toggleMaximizeWindow(): Promise<boolean> {
-  const r = await rpcRead<{ maximized?: boolean }>("toggle-maximize-window");
-  return !!r?.maximized;
-}
+export const onWindowMaximizedChanged = (cb: (maximized: boolean) => void) =>
+  onEvent("window:maximized-changed", (p) => cb(!!p?.maximized));
 
-export async function getWindowMaximized(): Promise<boolean> {
-  const r = await rpcRead<{ maximized?: boolean }>("get-window-state");
-  return !!r?.maximized;
-}
+const windowState = (channel: string) => rpcRead<{ maximized?: boolean; powerSave?: boolean }>(channel);
 
-export async function getRendererPowerSave(): Promise<boolean> {
-  const r = await rpcRead<{ powerSave?: boolean }>("get-window-state");
-  return r?.powerSave === true;
-}
+export const toggleMaximizeWindow = async () => !!(await windowState("toggle-maximize-window"))?.maximized;
+
+export const getWindowMaximized = async () => !!(await windowState("get-window-state"))?.maximized;
+
+export const getRendererPowerSave = async () => (await windowState("get-window-state"))?.powerSave === true;
 
 const num = (v: unknown, fallback = 0): number =>
   typeof v === "number" && Number.isFinite(v) ? v : fallback;
 const strOrNull = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
-const rec = (v: unknown): Record<string, unknown> | null =>
+const str = (v: unknown): string => (typeof v === "string" ? v : "");
+const rec =(v: unknown): Record<string, unknown> | null =>
   v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 
 // ------------ Captures ------------
@@ -1739,39 +1457,33 @@ interface CaptureList {
   error?: string;
 }
 
-function asMediaItem(raw: unknown): MediaItem | null {
+function asMediaItem(raw: unknown): MediaItem[] {
   const m = rec(raw);
-  if (!m || typeof m.path !== "string") return null;
+  if (!m || typeof m.path !== "string") return [];
   const takenAt = typeof m.takenAt === "string" ? Date.parse(m.takenAt) : NaN;
-  return {
-    path: m.path,
-    kind: m.kind === "clip" ? "clip" : "screenshot",
-    gameId: strOrNull(m.gameId),
-    name: typeof m.name === "string" ? m.name : "",
-    sizeBytes: num(m.sizeBytes),
-    takenAt: Number.isFinite(takenAt) ? takenAt : 0,
-    thumbPath: strOrNull(m.thumbPath),
-  };
+  return [
+    {
+      path: m.path,
+      kind: m.kind === "clip" ? "clip" : "screenshot",
+      gameId: strOrNull(m.gameId),
+      name: str(m.name),
+      sizeBytes: num(m.sizeBytes),
+      takenAt: Number.isFinite(takenAt) ? takenAt : 0,
+      thumbPath: strOrNull(m.thumbPath),
+    },
+  ];
 }
 
 export async function listCaptures(): Promise<CaptureList> {
-  const empty: CaptureList = { ok: false, items: [], folder: "" };
-  const raw = await rpc<{
-    success: boolean;
-    captures?: unknown[];
-    folder?: string;
-    error?: string;
-  }>("overlay-list-captures");
-  if (!raw?.success) return { ...empty, error: raw?.error || "Could not read your captures." };
+  const r = await call<{ captures?: unknown[]; folder?: string }>(
+    "overlay-list-captures",
+    "ipc.captures.readFailed",
+  );
+  if (!r.ok) return { ok: false, items: [], folder: "", error: r.error };
   return {
     ok: true,
-    items: Array.isArray(raw.captures)
-      ? raw.captures.flatMap((c) => {
-          const parsed = asMediaItem(c);
-          return parsed ? [parsed] : [];
-        })
-      : [],
-    folder: typeof raw.folder === "string" ? raw.folder : "",
+    items: Array.isArray(r.captures) ? r.captures.flatMap(asMediaItem) : [],
+    folder: str(r.folder),
   };
 }
 
@@ -1779,30 +1491,29 @@ const isCaptureFolderKey = (key: unknown) =>
   key === "overlayCaptureFolder" || key === "behavior.overlayCaptureFolder";
 
 export async function onCapturesChanged(cb: () => void): Promise<() => void> {
-  const a = await onEvent<unknown>("overlay-capture", () => cb());
-  const b = await onEvent<unknown>("overlay-record-stopped", () => cb());
-  const c = await onEvent<unknown>("overlay-capture-deleted", () => cb());
-  const d = await onEvent<{ key?: unknown } | null>("settings-changed", (payload) => {
-    if (isCaptureFolderKey(payload?.key)) cb();
-  });
-  return () => {
-    a();
-    b();
-    c();
-    d();
-  };
+  const offs = await Promise.all([
+    onEvent("overlay-capture", () => cb()),
+    onEvent("overlay-record-stopped", () => cb()),
+    onEvent("overlay-capture-deleted", () => cb()),
+    onEvent("settings-changed", (p) => {
+      if (isCaptureFolderKey(p?.key)) cb();
+    }),
+  ]);
+  return () => offs.forEach((off) => off());
 }
 
 export async function deleteCapture(path: string): Promise<{ ok: boolean; error?: string }> {
-  const raw = await rpc<{ success: boolean; error?: string }>("overlay-delete-capture", path);
-  if (raw?.success) return { ok: true };
-  return { ok: false, error: raw?.error || "Could not delete that capture." };
+  const r = await call("overlay-delete-capture", "ipc.captures.deleteFailed", path);
+  return r.ok ? { ok: true } : { ok: false, error: r.error };
 }
 
-export async function openCapture(path: string): Promise<void> {
-  await rpcAction("Open", "overlay-open-capture", path);
+async function captureAction(label: TKey, channel: string, path: string, quiet: boolean) {
+  const r = await rpcAction<Reply>(quiet ? null : label, channel, path);
+  return { ok: r?.success !== false, error: r?.error ?? null };
 }
 
-export async function revealCapture(path: string): Promise<void> {
-  await rpcAction("Show in folder", "overlay-reveal-capture", path);
-}
+export const openCapture = (path: string, quiet = false) =>
+  captureAction("actions.failed.open", "overlay-open-capture", path, quiet);
+
+export const revealCapture = (path: string, quiet = false) =>
+  captureAction("actions.failed.showInFolder", "overlay-reveal-capture", path, quiet);

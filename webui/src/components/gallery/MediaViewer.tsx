@@ -1,25 +1,54 @@
 // ------------ Capture Viewer ------------
-// The full-size viewer that opens over the gallery for a screenshot or clip. Has previous and next arrows, file
-// details, and buttons to open the file, show it in its folder or delete it.
+// The full-size capture viewer, which the overlay opens too, and its Delete button.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ChevronLeft, ChevronRight, ExternalLink, FolderOpen, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, ExternalLink, FolderOpen, Trash2, X, Loader2 } from "lucide-react";
 import { openCapture, revealCapture, type MediaItem } from "../../lib/ipc";
+import { onEvent } from "../../lib/rpc";
 import { iconFallback, iconSrcFor, localFileSrc } from "../../lib/customMedia";
-import { fmtBytes, fmtDateTime, fmtDuration } from "../../lib/format";
+import { fmtBytes, fmtDateTime, fmtDuration, fmtRelTime } from "../../lib/format";
+import { useNow, useTauriEvent, useEscapeKey } from "../../lib/hooks";
+import { useAutoClear } from "./media";
 import { useTimeFormat } from "../../store/settingsStore";
 import { useCustomizationStore } from "../../store/customizationStore";
-import { useEscapeKey } from "../../lib/useClickOutside";
 import { useFocusTrap } from "../../lib/useFocusTrap";
 import { gameMeta } from "../../data/games";
-import { DeleteButton } from "./DeleteButton";
+import type { TKey } from "../../lib/i18n";
+import { useT } from "../../lib/useT";
+import { useMediaStore } from "../../store/mediaStore";
+import { useModalStore } from "../../store/modalStore";
+import { ActionButton } from "../ui/controls";
 
-function ViewerButton({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
+// ------------ Viewer ------------
+// The full-size viewer that opens over the gallery for a screenshot or clip. Has previous and next arrows, file
+// details, and buttons to open the file, show it in its folder or delete it. The overlay's Captures tab opens it with
+// `overlay`: a one-line summary instead of the details panel, errors shown in place, a Delete that asks by being
+// pressed twice, and it closes along with the overlay.
+const onOverlayClosed = (cb: () => void) => onEvent("overlay-closed", () => cb());
+const noEvents = async (_cb: () => void) => () => {};
+
+function ViewerButton({
+  onClick,
+  danger = false,
+  overlay = false,
+  children,
+}: {
+  onClick: () => void;
+  danger?: boolean;
+  overlay?: boolean;
+  children: React.ReactNode;
+}) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="flex shrink-0 items-center gap-[6px] rounded-ui border border-white/15 bg-white/[0.06] px-3 py-[7px] text-[12px] font-medium text-white transition-colors duration-150 hover:bg-white/[0.12]"
+      className={`flex shrink-0 items-center gap-[6px] border px-3 py-[7px] text-[12px] font-medium transition-colors duration-150 ${
+        overlay ? "rounded-[8px]" : "rounded-ui"
+      } ${
+        danger
+          ? "border-[#ef4444]/40 bg-[#ef4444]/[0.08] text-danger-soft hover:bg-[#ef4444]/[0.16]"
+          : "border-white/15 bg-white/[0.06] text-white hover:bg-white/[0.12]"
+      }`}
     >
       {children}
     </button>
@@ -35,10 +64,11 @@ function Arrow({
   onClick: () => void;
   children: React.ReactNode;
 }) {
+  const t = useT();
   return (
     <button
       type="button"
-      aria-label={side === "left" ? "Previous" : "Next"}
+      aria-label={side === "left" ? t("gallery.viewer.previous") : t("common.next")}
       onClick={onClick}
       className={`absolute top-1/2 grid h-[42px] w-[42px] -translate-y-1/2 place-items-center rounded-full bg-white/[0.08] text-white/70 hover:bg-white/[0.16] hover:text-white ${
         side === "left" ? "left-5" : "right-5"
@@ -59,6 +89,27 @@ function Info({ label, value }: { label: string; value: string }) {
   );
 }
 
+function OverlaySummary({
+  item,
+  resolution,
+  index,
+  total,
+}: {
+  item: MediaItem;
+  resolution: string;
+  index: number;
+  total: number;
+}) {
+  const t = useT();
+  const now = useNow();
+  return (
+    <div className="ov-mono mt-[2px] truncate text-[11px] text-white/45">
+      {fmtRelTime(item.takenAt, now)} · {item.sizeBytes > 0 ? fmtBytes(item.sizeBytes) : ""}
+      {resolution ? ` · ${resolution}` : ""} · {t("overlay.viewer.position", { index: index + 1, total })}
+    </div>
+  );
+}
+
 interface LoadedMeta {
   path: string;
   resolution: string;
@@ -70,15 +121,20 @@ export function MediaViewer({
   path,
   onPath,
   onClose,
+  overlay,
 }: {
   items: MediaItem[];
   path: string;
   onPath: (path: string) => void;
   onClose: () => void;
+  overlay?: { onDelete: (path: string) => void };
 }) {
   const timeFormat = useTimeFormat();
+  const t = useT();
   const icons = useCustomizationStore((s) => s.gameIcons);
   const [meta, setMeta] = useState<LoadedMeta | null>(null);
+  const [notice, setNotice] = useState<{ path: string; text: string } | null>(null);
+  const [armed, setArmed] = useState<string | null>(null);
   const video = useRef<HTMLVideoElement>(null);
   const root = useRef<HTMLDivElement>(null);
 
@@ -92,6 +148,7 @@ export function MediaViewer({
     (delta: number) => {
       if (items.length === 0) return;
       const next = (index + delta + items.length) % items.length;
+      setNotice(null);
       onPath(items[next].path);
     },
     [items, index, onPath],
@@ -99,6 +156,7 @@ export function MediaViewer({
 
   const isTop = useEscapeKey(onClose);
   useFocusTrap(root, true, true);
+  useTauriEvent(overlay ? onOverlayClosed : noEvents, onClose);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -113,6 +171,9 @@ export function MediaViewer({
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [isTop, step]);
+
+  useAutoClear(notice, setNotice, 5000);
+  useAutoClear(armed, setArmed, 3000);
 
   useEffect(() => {
     const element = video.current;
@@ -131,6 +192,14 @@ export function MediaViewer({
   const loaded = meta?.path === current.path ? meta : null;
   const nextAfterDelete = items[index + 1]?.path ?? items[index - 1]?.path ?? null;
 
+  const act = (call: typeof openCapture, fallback: TKey) => {
+    const at = current.path;
+    setNotice(null);
+    void call(at, !!overlay).then((r) => {
+      if (!r.ok) setNotice({ path: at, text: r.error ?? t(fallback) });
+    });
+  };
+
   return createPortal(
     <div
       ref={root}
@@ -139,34 +208,70 @@ export function MediaViewer({
       aria-modal="true"
       aria-label={current.name}
       tabIndex={-1}
-      className="fixed inset-0 z-(--z-viewer) flex flex-col outline-none"
+      className={`fixed inset-0 ${overlay ? "z-[120]" : "z-(--z-viewer)"} flex flex-col outline-none`}
       style={{ background: "#07070b" }}
     >
-      <header className="drag-region flex shrink-0 items-center gap-2 border-b border-white/[0.08] px-5 py-3">
+      <header
+        className={`flex shrink-0 items-center border-b border-white/[0.08] px-5 py-3 ${
+          overlay ? "gap-3" : "drag-region gap-2"
+        }`}
+      >
         <div className="min-w-0 flex-1">
           <div className="truncate text-[13.5px] font-medium">{current.name}</div>
-          <div className="mt-[2px] truncate text-[11px] text-white/45">
-            {game.name} · {fmtDateTime(current.takenAt, timeFormat)} · {index + 1} of {items.length}
-          </div>
+          {overlay ? (
+            <OverlaySummary item={current} resolution={loaded?.resolution ?? ""} index={index} total={items.length} />
+          ) : (
+            <div className="mt-[2px] truncate text-[11px] text-white/45">
+              {t("gallery.viewer.subtitle", {
+                game: game.name,
+                date: fmtDateTime(current.takenAt, timeFormat),
+                n: index + 1,
+                total: items.length,
+              })}
+            </div>
+          )}
+          {overlay && notice?.path === current.path && (
+            <div role="alert" className="mt-[2px] truncate text-[11px] text-danger-soft">
+              {notice.text}
+            </div>
+          )}
         </div>
-        <ViewerButton onClick={() => void openCapture(current.path)}>
+        <ViewerButton overlay={!!overlay} onClick={() => act(openCapture, "overlay.viewer.openFailed")}>
           <ExternalLink size={14} />
-          Open
+          {t("gallery.open")}
         </ViewerButton>
-        <ViewerButton onClick={() => void revealCapture(current.path)}>
+        <ViewerButton overlay={!!overlay} onClick={() => act(revealCapture, "overlay.viewer.revealFailed")}>
           <FolderOpen size={14} />
-          Show in folder
+          {t("gallery.showInFolder")}
         </ViewerButton>
-        <DeleteButton
-          items={[current]}
-          onDeleted={() => {
-            if (nextAfterDelete) onPath(nextAfterDelete);
-            else onClose();
-          }}
-        />
+        {overlay ? (
+          <ViewerButton
+            overlay
+            danger
+            onClick={() => {
+              if (armed !== current.path) {
+                setArmed(current.path);
+                return;
+              }
+              setArmed(null);
+              overlay.onDelete(current.path);
+            }}
+          >
+            <Trash2 size={14} />
+            {armed === current.path ? t("overlay.viewer.deleteConfirm") : t("common.delete")}
+          </ViewerButton>
+        ) : (
+          <DeleteButton
+            items={[current]}
+            onDeleted={() => {
+              if (nextAfterDelete) onPath(nextAfterDelete);
+              else onClose();
+            }}
+          />
+        )}
         <button
           type="button"
-          aria-label="Close"
+          aria-label={t("common.close")}
           onClick={onClose}
           className="ml-1 grid h-[30px] w-[30px] shrink-0 place-items-center rounded-[8px] text-white/60 hover:bg-white/[0.08] hover:text-white"
         >
@@ -223,31 +328,84 @@ export function MediaViewer({
           )}
         </div>
 
-        <aside className="w-[264px] shrink-0 overflow-y-auto border-l border-white/[0.08] px-5 py-5">
-          <dl className="flex flex-col gap-3">
-            <div className="flex items-center gap-2">
-              {game.icon && current.gameId && (
-                <img
-                  src={iconSrcFor(current.gameId, icons)}
-                  onError={iconFallback(current.gameId)}
-                  alt=""
-                  className="h-6 w-6 rounded-[6px] object-cover"
-                />
+        {!overlay && (
+          <aside className="w-[264px] shrink-0 overflow-y-auto border-l border-white/[0.08] px-5 py-5">
+            <dl className="flex flex-col gap-3">
+              <div className="flex items-center gap-2">
+                {game.icon && current.gameId && (
+                  <img
+                    src={iconSrcFor(current.gameId, icons)}
+                    onError={iconFallback(current.gameId)}
+                    alt=""
+                    className="h-6 w-6 rounded-[6px] object-cover"
+                  />
+                )}
+                <Info label={t("gallery.viewer.info.game")} value={game.name} />
+              </div>
+              <Info label={t("gallery.viewer.info.taken")} value={fmtDateTime(current.takenAt, timeFormat)} />
+              <Info label={t("gallery.viewer.info.size")} value={current.sizeBytes > 0 ? fmtBytes(current.sizeBytes) : ""} />
+              <Info label={t("gallery.viewer.info.resolution")} value={loaded?.resolution ?? ""} />
+              {current.kind === "clip" && (
+                <Info label={t("gallery.viewer.info.duration")} value={fmtDuration(loaded?.durationMs ?? null)} />
               )}
-              <Info label="Game" value={game.name} />
-            </div>
-            <Info label="Taken" value={fmtDateTime(current.takenAt, timeFormat)} />
-            <Info label="Size" value={current.sizeBytes > 0 ? fmtBytes(current.sizeBytes) : ""} />
-            <Info label="Resolution" value={loaded?.resolution ?? ""} />
-            {current.kind === "clip" && (
-              <Info label="Duration" value={fmtDuration(loaded?.durationMs ?? null)} />
-            )}
-            <Info label="Kind" value={current.kind === "clip" ? "Clip" : "Screenshot"} />
-            <Info label="File" value={current.path} />
-          </dl>
-        </aside>
+              <Info
+                label={t("gallery.viewer.info.kind")}
+                value={current.kind === "clip" ? t("gallery.clip") : t("gallery.screenshot")}
+              />
+              <Info label={t("gallery.viewer.info.file")} value={current.path} />
+            </dl>
+          </aside>
+        )}
       </div>
     </div>,
     document.body,
+  );
+}
+
+// ------------ Delete Capture Button ------------
+// The red Delete button for one or many captures. Asks first, then sends the files to the Recycle Bin.
+export function DeleteButton({
+  items,
+  onDeleted,
+}: {
+  items: MediaItem[];
+  onDeleted?: () => void;
+}) {
+  const [pending, setPending] = useState(false);
+  const remove = useMediaStore((s) => s.remove);
+  const openConfirm = useModalStore((s) => s.openConfirm);
+  const t = useT();
+
+  const confirm = () => {
+    const count = items.length;
+    if (count === 0) return;
+    openConfirm({
+      title: t("gallery.delete.title", { count }),
+      message:
+        count === 1
+          ? t("gallery.delete.messageOne")
+          : t("gallery.delete.messageMany"),
+      confirmLabel: t("common.delete"),
+      danger: true,
+      onConfirm: () => {
+        setPending(true);
+        void remove(items.map((i) => i.path))
+          .then((deleted) => {
+            if (deleted > 0) onDeleted?.();
+          })
+          .finally(() => setPending(false));
+      },
+    });
+  };
+
+  return (
+    <ActionButton
+      variant="danger"
+      disabled={pending || items.length === 0}
+      icon={pending ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+      onClick={confirm}
+    >
+      {t("common.delete")}
+    </ActionButton>
   );
 }

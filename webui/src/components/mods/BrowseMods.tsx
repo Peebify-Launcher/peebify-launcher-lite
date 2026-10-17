@@ -15,14 +15,15 @@ import {
   ShieldAlert,
   X,
 } from "lucide-react";
-import type { GameId } from "../../types/game";
-import { gameById } from "../../data/games";
-import { useNotificationStore } from "../../store/notificationStore";
-import { activeInstallFor, modInstallKey, useModsStore } from "../../store/modsStore";
+import { type GameId, gameById } from "../../data/games";
+import { useNotificationStore } from "../../store/notifications";
+import { activeInstallFor, modInstallKey, useModsStore } from "../../store/mods";
 import { useSettingsStore } from "../../store/settingsStore";
 import { openExternal } from "../../lib/tauri";
 import { fmtBytes, fmtCompact, fmtRelativeDays } from "../../lib/format";
-import { useNow } from "../../lib/useRelativeTime";
+import { useNow } from "../../lib/hooks";
+import { t as translate, type TKey } from "../../lib/i18n";
+import { useT } from "../../lib/useT";
 import type { ModEntry } from "../../lib/ipc";
 import {
   cancelGameBananaInstall,
@@ -39,33 +40,29 @@ import {
   type GameBananaProfile,
   type GameBananaSort,
 } from "../../lib/gamebanana";
-import { ActionButton } from "../ui/ActionButton";
+import { ActionButton } from "../ui/controls";
 import { SearchField } from "../ui/SearchField";
 import { Select } from "../ui/Select";
+import { Hint, IconButton, WRAPPED_TIP } from "../ui/Tooltip";
 import { Lightbox } from "./Lightbox";
 import { ModProgressRow } from "./ModProgressRow";
 
-const SORTS: { value: GameBananaSort; label: string }[] = [
-  { value: "new", label: "Newest" },
-  { value: "updated", label: "Recently updated" },
-  { value: "likes", label: "Most liked" },
-  { value: "views", label: "Most viewed" },
-  { value: "downloads", label: "Most downloaded" },
+const SORTS: { value: GameBananaSort; label: TKey }[] = [
+  { value: "new", label: "mods.browse.sort.new" },
+  { value: "updated", label: "mods.browse.sort.updated" },
+  { value: "likes", label: "mods.browse.sort.likes" },
+  { value: "views", label: "mods.browse.sort.views" },
+  { value: "downloads", label: "mods.browse.sort.downloads" },
 ];
 
-const SEARCH_SORTS: { value: GameBananaSort; label: string }[] = [
-  { value: "relevance", label: "Best match" },
+const SEARCH_SORTS: { value: GameBananaSort; label: TKey }[] = [
+  { value: "relevance", label: "mods.browse.sort.relevance" },
   ...SORTS,
 ];
 
 const ALL_CATEGORIES = "0";
 
-const PER_PAGE_OPTIONS = [
-  { value: "16", label: "16 per page" },
-  { value: "24", label: "24 per page" },
-  { value: "32", label: "32 per page" },
-  { value: "50", label: "50 per page" },
-];
+const PER_PAGE_OPTIONS = ["16", "24", "32", "50"];
 
 const DEFAULT_PER_PAGE = "16";
 
@@ -100,6 +97,7 @@ export function BrowseMods({
   initialMod?: { modId: number; name: string; thumbnailUrl: string | null } | null;
   onInitialModHandled?: () => void;
 }) {
+  const t = useT();
   const push = useNotificationStore((s) => s.push);
   const now = useNow();
   const refreshInstalled = useModsStore((s) => s.refreshIfCurrent);
@@ -238,7 +236,7 @@ export function BrowseMods({
     if (token !== detailToken.current) return;
     setDetailLoading(false);
     if (full) setDetail(full);
-    else setDetail((d) => (d ? { ...d, filesError: "Couldn't load this mod from GameBanana." } : d));
+    else setDetail((d) => (d ? { ...d, filesError: translate("mods.browse.loadFailed") } : d));
   };
 
   const openMod = (mod: GameBananaMod) => {
@@ -305,13 +303,13 @@ export function BrowseMods({
     push(
       result.alreadyInstalled
         ? {
-            title: "Already installed",
-            text: `${label} is already in your ${game.name} mods, so nothing was downloaded.`,
+            title: t("mods.browse.alreadyInstalledTitle"),
+            text: t("mods.browse.alreadyInstalledText", { name: label, game: game.name }),
           }
         : {
             type: "success",
-            title: "Mod installed",
-            text: `${label} is switched on and ready for ${game.name}.`,
+            title: t("mods.toast.installedTitle"),
+            text: t("mods.toast.installedText", { name: label, game: game.name }),
           },
     );
   };
@@ -330,7 +328,7 @@ export function BrowseMods({
     if (token !== detailToken.current) return;
     setDetailLoading(false);
     if (full) setDetail(full);
-    else setDetail((d) => (d ? { ...d, filesError: "GameBanana did not answer." } : d));
+    else setDetail((d) => (d ? { ...d, filesError: t("mods.browse.noAnswer") } : d));
   };
 
   const installedCopies = libraryMods.filter(
@@ -376,14 +374,18 @@ export function BrowseMods({
         if (copy.source.gbFileId !== undefined) next.delete(copy.source.gbFileId);
         return next.add(file.id);
       });
-      push({ type: "success", title: "Mod updated", text: `${detail.name} now has ${file.fileName}.` });
+      push({
+        type: "success",
+        title: t("mods.toast.updatedTitle"),
+        text: t("mods.browse.updatedText", { name: detail.name, file: file.fileName }),
+      });
     } else {
       void refreshInstalled(gameId);
     }
   };
 
   const categoryOptions = [
-    { value: ALL_CATEGORIES, label: "All categories" },
+    { value: ALL_CATEGORIES, label: t("mods.browse.allCategories") },
     ...categories.map((c) => ({ value: String(c.id), label: c.name })),
   ];
 
@@ -397,15 +399,15 @@ export function BrowseMods({
           <button
             type="button"
             onClick={closeDetail}
-            aria-label="Back to the mod list"
+            aria-label={t("mods.browse.backToList")}
             className="mt-0.5 rounded-[8px] p-1.5 text-white/60 transition hover:bg-white/[0.08] hover:text-white"
           >
             <ArrowLeft size={18} />
           </button>
           <div className="min-w-0 flex-1">
-            <h2 className="truncate text-[18px] font-semibold" title={detail.name}>
-              {detail.name}
-            </h2>
+            <Hint tip={detail.name} className="block">
+              <h2 className="truncate text-[18px] font-semibold">{detail.name}</h2>
+            </Hint>
             <p className="mt-0.5 truncate text-[12.5px] text-white/50">
               {[
                 detail.submitter,
@@ -429,15 +431,14 @@ export function BrowseMods({
               </>
             )}
             {detail.profileUrl && (
-              <button
+              <IconButton
                 type="button"
+                label={t("mods.browse.openOnGameBanana")}
                 onClick={() => void openExternal(detail.profileUrl!)}
                 className="rounded-[8px] p-1.5 text-white/50 transition hover:bg-white/[0.08] hover:text-white"
-                aria-label="Open on GameBanana"
-                title="Open on GameBanana"
               >
                 <ExternalLink size={16} />
-              </button>
+              </IconButton>
             )}
           </div>
         </div>
@@ -447,14 +448,14 @@ export function BrowseMods({
             <button
               type="button"
               onClick={() => setLightboxOpen(true)}
-              aria-label="View this image full size"
+              aria-label={t("mods.browse.viewFullSize")}
               className="relative block w-full cursor-zoom-in overflow-hidden rounded-ui"
               style={{ background: "rgba(0,0,0,0.35)" }}
             >
               <HeroImage key={hero.url} src={hero.url} previewSrc={hero.heroUrl} />
               {detail.images.length > 1 && (
                 <span className="absolute bottom-3 right-3 rounded-full bg-black/60 px-2.5 py-1 text-[11.5px] text-white/70">
-                  {heroIndex + 1} of {detail.images.length}
+                  {t("mods.imageCounter", { index: heroIndex + 1, total: detail.images.length })}
                 </span>
               )}
             </button>
@@ -466,7 +467,7 @@ export function BrowseMods({
                     type="button"
                     onClick={() => setHeroIndex(i)}
                     aria-pressed={i === heroIndex}
-                    aria-label={`Show image ${i + 1} of ${detail.images.length}`}
+                    aria-label={t("mods.browse.showImage", { index: i + 1, total: detail.images.length })}
                     className={`h-[56px] w-[86px] shrink-0 overflow-hidden rounded-[8px] border transition ${
                       i === heroIndex
                         ? "border-(--accent-b)/70"
@@ -491,7 +492,7 @@ export function BrowseMods({
         )}
 
         <h3 className="mb-2.5 text-[12px] font-semibold uppercase tracking-[0.07em] text-white/40">
-          Downloads
+          {t("common.downloads")}
         </h3>
         <ModProgressRow gameId={gameId} />
         {detailLoading && detail.files.length === 0 ? (
@@ -502,22 +503,21 @@ export function BrowseMods({
           </div>
         ) : detail.files.length === 0 && detail.filesError ? (
           <div className="py-6 text-center">
-            <p className="text-[13px] text-white/60">Couldn't load the files for this mod.</p>
+            <p className="text-[13px] text-white/60">{t("mods.browse.filesError")}</p>
             <p className="mt-1 text-[12px] text-white/40">{detail.filesError}</p>
             <div className="mt-3 flex justify-center">
-              <ActionButton onClick={() => void retryFiles()}>Retry</ActionButton>
+              <ActionButton onClick={() => void retryFiles()}>{t("common.retry")}</ActionButton>
             </div>
           </div>
         ) : detail.files.length === 0 ? (
           <p className="py-6 text-center text-[13px] text-white/45">
-            This mod has no downloadable files.
+            {t("mods.browse.noFiles")}
           </p>
         ) : (
           <div className="flex flex-col gap-2">
             {otherFileInstalled && (
               <p className="text-[12px] text-white/55">
-                An older file of this mod is already installed. Use Update in your Library to replace
-                it instead of installing a second copy.
+                {t("mods.browse.olderInstalled")}
               </p>
             )}
             {detail.files.map((file) => {
@@ -528,9 +528,9 @@ export function BrowseMods({
                   className="flex items-center justify-between gap-4 rounded-ui border border-white/[0.08] bg-white/[0.04] px-4 py-3"
                 >
                   <div className="min-w-0">
-                    <p className="truncate text-[13.5px] font-medium" title={file.fileName}>
-                      {file.fileName}
-                    </p>
+                    <Hint tip={file.fileName} className="block">
+                      <p className="truncate text-[13.5px] font-medium">{file.fileName}</p>
+                    </Hint>
                     {(file.sizeBytes > 0 || file.version) && (
                       <p className="mt-0.5 truncate text-[12px] text-white/45">
                         {[
@@ -542,23 +542,19 @@ export function BrowseMods({
                       </p>
                     )}
                     {file.description && (
-                      <p
-                        className="mt-0.5 line-clamp-2 text-[12px] text-white/55"
-                        title={file.description}
-                      >
-                        {file.description}
-                      </p>
+                      <Hint tip={<span className={WRAPPED_TIP}>{file.description}</span>} className="block">
+                        <p className="mt-0.5 line-clamp-2 text-[12px] text-white/55">{file.description}</p>
+                      </Hint>
                     )}
                     {!file.installable && (
                       <p className="mt-1.5 flex items-center gap-1.5 text-[12px] text-amber-300/90">
                         <ShieldAlert size={13} className="shrink-0" />
-                        GameBanana's virus scan flagged this file as "{file.avResult}", so Peebify
-                        won't install it.
+                        {t("mods.browse.virusFlagged", { result: file.avResult })}
                       </p>
                     )}
                     {olderCopy && file.installable && (
                       <p className="mt-1.5 text-[12px] text-white/55">
-                        You have an older version of this file. Update replaces it.
+                        {t("mods.browse.olderVersion")}
                       </p>
                     )}
                     {installError?.fileId === file.id && (
@@ -570,18 +566,18 @@ export function BrowseMods({
                   </div>
                   {installedIds.has(file.id) || installedFileIds.has(file.id) ? (
                     <span className="flex shrink-0 items-center gap-1.5 px-2 text-[12.5px] text-emerald-300/80">
-                      <Check size={14} /> Installed
+                      <Check size={14} /> {t("common.installed")}
                     </span>
                   ) : activeInstall === modInstallKey(gameId, detail.id, file.id) ? (
                     installStarted ? (
-                      <span className="shrink-0 px-2 text-[12.5px] text-white/55">Installing…</span>
+                      <span className="shrink-0 px-2 text-[12.5px] text-white/55">{t("common.installing")}</span>
                     ) : (
                       <ActionButton
                         disabled={cancelling}
                         onClick={() => void cancelInstall()}
                         icon={<X size={15} />}
                       >
-                        {cancelling ? "Cancelling…" : "Cancel"}
+                        {cancelling ? t("common.cancelling") : t("common.cancel")}
                       </ActionButton>
                     )
                   ) : (
@@ -591,7 +587,7 @@ export function BrowseMods({
                       onClick={() => void (olderCopy ? updateTo(file, olderCopy) : install(file))}
                       icon={<Download size={15} />}
                     >
-                      {olderCopy ? "Update" : "Install"}
+                      {olderCopy ? t("common.update") : t("common.install")}
                     </ActionButton>
                   )}
                 </div>
@@ -621,11 +617,11 @@ export function BrowseMods({
         <SearchField
           value={input}
           onChange={setInput}
-          placeholder={`Search every ${game.name} mod on GameBanana…`}
-          ariaLabel="Search GameBanana"
+          placeholder={t("mods.browse.searchPlaceholder", { game: game.name })}
+          ariaLabel={t("mods.browse.searchLabel")}
         />
         <Select
-          ariaLabel="Category"
+          ariaLabel={t("mods.browse.category")}
           options={categoryOptions}
           value={category}
           onChange={(v) => {
@@ -634,8 +630,8 @@ export function BrowseMods({
           }}
         />
         <Select
-          ariaLabel="Sort"
-          options={searching ? SEARCH_SORTS : SORTS}
+          ariaLabel={t("common.sort")}
+          options={(searching ? SEARCH_SORTS : SORTS).map((o) => ({ value: o.value, label: t(o.label) }))}
           value={activeSort}
           onChange={(v) => {
             if (searching) setSearchSort(v as GameBananaSort);
@@ -644,8 +640,8 @@ export function BrowseMods({
           }}
         />
         <Select
-          ariaLabel="Mods per page"
-          options={PER_PAGE_OPTIONS}
+          ariaLabel={t("mods.browse.perPageLabel")}
+          options={PER_PAGE_OPTIONS.map((n) => ({ value: n, label: t("mods.browse.perPage", { n }) }))}
           value={perPage}
           onChange={(v) => {
             setSetting("modsPerPage", v);
@@ -656,10 +652,10 @@ export function BrowseMods({
 
       <p className="mb-4 text-[12px] text-white/55">
         {!searching
-          ? "Everything here is made by other people. Peebify does not check any of it, so install at your own risk."
+          ? t("mods.browse.disclaimer")
           : matches.truncated
-            ? `Showing ${matches.shown} of about ${matches.total} matches for “${query}”. Sorting, categories, and page size apply to the ones Peebify has loaded, so narrow the search to reach the rest.`
-            : `Showing every match for “${query}”. It is all made by other people, so install at your own risk.`}
+            ? t("mods.browse.truncated", { shown: matches.shown, total: matches.total, query })
+            : t("mods.browse.allMatches", { query })}
       </p>
 
       <ModProgressRow gameId={gameId} />
@@ -669,7 +665,7 @@ export function BrowseMods({
           <p className="text-[13.5px] text-white/70">{feedMessage.title}</p>
           <p className="mt-1 text-[12.5px] text-white/45">{feedMessage.text}</p>
           <div className="mt-4 flex justify-center">
-            <ActionButton onClick={() => void load()}>Retry</ActionButton>
+            <ActionButton onClick={() => void load()}>{t("common.retry")}</ActionButton>
           </div>
         </div>
       ) : loading && mods.length === 0 ? (
@@ -689,7 +685,7 @@ export function BrowseMods({
         </div>
       ) : mods.length === 0 ? (
         <p className="py-16 text-center text-[13px] text-white/45">
-          {query ? `Nothing found for “${query}”.` : "No mods found."}
+          {query ? t("mods.browse.nothingFound", { query }) : t("mods.browse.noMods")}
         </p>
       ) : (
         <div
@@ -709,11 +705,11 @@ export function BrowseMods({
                 <CardThumb src={mod.thumbnailUrl} />
               </div>
               <div className="min-w-0 p-3">
-                <p className="truncate text-[13px] font-medium" title={mod.name}>
-                  {mod.name}
-                </p>
+                <Hint tip={mod.name} className="block">
+                  <p className="truncate text-[13px] font-medium">{mod.name}</p>
+                </Hint>
                 <p className="mt-0.5 truncate text-[11.5px] text-white/55">
-                  {mod.submitter ?? "Unknown author"}
+                  {mod.submitter ?? t("mods.browse.unknownAuthor")}
                 </p>
                 <div className="mt-2 flex items-center gap-3 text-[11px] text-white/55">
                   <span className="flex items-center gap-1">
@@ -733,8 +729,9 @@ export function BrowseMods({
       {!failed && (mods.length > 0 || page > 1) && (
         <div className="mt-5 flex items-center justify-between">
           <span className="text-[12.5px] text-white/45">
-            Page {page}
-            {totalPages > 1 ? ` of ${totalPages}` : ""}
+            {totalPages > 1
+              ? t("mods.browse.pageOf", { page, total: totalPages })
+              : t("mods.browse.page", { page })}
           </span>
           <div className="flex gap-2">
             <ActionButton
@@ -742,14 +739,14 @@ export function BrowseMods({
               disabled={page <= 1 || loading}
               icon={<ChevronLeft size={15} />}
             >
-              Previous
+              {t("common.previous")}
             </ActionButton>
             <ActionButton
               onClick={() => setPage((p) => p + 1)}
               disabled={loading || !hasMore}
               icon={<ChevronRight size={15} />}
             >
-              Next
+              {t("common.next")}
             </ActionButton>
           </div>
         </div>
@@ -759,13 +756,14 @@ export function BrowseMods({
 }
 
 function CardThumb({ src }: { src: string | null }) {
+  const t = useT();
   const [loaded, setLoaded] = useState(false);
   const [imgFailed, setImgFailed] = useState(false);
 
   if (!src || imgFailed) {
     return (
       <div className="flex h-full items-center justify-center text-[12px] text-white/25">
-        No preview
+        {t("mods.browse.noPreview")}
       </div>
     );
   }
@@ -787,6 +785,7 @@ function CardThumb({ src }: { src: string | null }) {
 }
 
 function HeroImage({ src, previewSrc }: { src: string; previewSrc?: string }) {
+  const t = useT();
   const preview = previewSrc && previewSrc !== src ? previewSrc : null;
   const [loaded, setLoaded] = useState(false);
   const [imgFailed, setImgFailed] = useState(false);
@@ -797,7 +796,7 @@ function HeroImage({ src, previewSrc }: { src: string; previewSrc?: string }) {
   if (imgFailed && !showPreview) {
     return (
       <div className="flex min-h-[200px] items-center justify-center text-[12.5px] text-white/35">
-        Preview unavailable
+        {t("mods.previewUnavailable")}
       </div>
     );
   }

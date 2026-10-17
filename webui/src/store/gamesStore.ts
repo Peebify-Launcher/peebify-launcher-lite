@@ -2,6 +2,7 @@
 // Which games are installed, running, launching, waiting on an install, or have an update available.
 import { create } from "zustand";
 import type { GameUpdateVersions, PendingInstall } from "../lib/ipc";
+import type { ResourceQuality } from "../data/games";
 
 interface GamesState {
   runningGames: string[];
@@ -9,19 +10,15 @@ interface GamesState {
   launchingViaSteam: string[];
   installed: string[];
   pendingInstalls: Record<string, PendingInstall>;
+  qualitySwitches: Record<string, ResourceQuality>;
   updates: string[];
-  steamManaged: string[];
   updateVersions: Record<string, GameUpdateVersions>;
   setRunningGames: (ids: string[]) => void;
   setLaunching: (id: string, launching: boolean, viaSteam?: boolean) => void;
   setInstalled: (ids: string[]) => void;
   setPendingInstalls: (pending: Record<string, PendingInstall>) => void;
-  setUpdate: (
-    id: string,
-    available: boolean,
-    steamManaged?: boolean,
-    versions?: GameUpdateVersions,
-  ) => void;
+  setQualitySwitches: (switches: Record<string, ResourceQuality>) => void;
+  setUpdate: (id: string, available: boolean, versions?: GameUpdateVersions) => void;
 }
 
 export const useGamesStore = create<GamesState>((set) => ({
@@ -30,8 +27,8 @@ export const useGamesStore = create<GamesState>((set) => ({
   launchingViaSteam: [],
   installed: [],
   pendingInstalls: {},
+  qualitySwitches: {},
   updates: [],
-  steamManaged: [],
   updateVersions: {},
   setRunningGames: (ids) =>
     set((s) => ({
@@ -60,12 +57,10 @@ export const useGamesStore = create<GamesState>((set) => ({
   setInstalled: (ids) =>
     set((s) => {
       const kept = s.updates.filter((x) => ids.includes(x));
-      const keptSteam = s.steamManaged.filter((x) => ids.includes(x));
       const versionIds = Object.keys(s.updateVersions);
       return {
         installed: ids,
         updates: kept.length === s.updates.length ? s.updates : kept,
-        steamManaged: keptSteam.length === s.steamManaged.length ? s.steamManaged : keptSteam,
         updateVersions: versionIds.every((id) => ids.includes(id))
           ? s.updateVersions
           : Object.fromEntries(
@@ -74,7 +69,8 @@ export const useGamesStore = create<GamesState>((set) => ({
       };
     }),
   setPendingInstalls: (pending) => set({ pendingInstalls: pending }),
-  setUpdate: (id, available, steamManaged = false, versions) =>
+  setQualitySwitches: (switches) => set({ qualitySwitches: switches }),
+  setUpdate: (id, available, versions) =>
     set((s) => {
       let updateVersions = s.updateVersions;
       if (versions) {
@@ -89,11 +85,6 @@ export const useGamesStore = create<GamesState>((set) => ({
             ? s.updates
             : [...s.updates, id]
           : s.updates.filter((x) => x !== id),
-        steamManaged: steamManaged
-          ? s.steamManaged.includes(id)
-            ? s.steamManaged
-            : [...s.steamManaged, id]
-          : s.steamManaged.filter((x) => x !== id),
         updateVersions,
       };
     }),

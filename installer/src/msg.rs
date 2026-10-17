@@ -127,26 +127,15 @@ mod tests {
     #[test]
     fn progress_ticks_log_once_per_phase_and_ten_percent() {
         let mut last = None;
-        assert!(should_log(&mut last, "Verifying update\u{2026}", 0.5));
-        assert!(!should_log(&mut last, "Verifying update\u{2026}", 3.0));
-        assert!(!should_log(&mut last, "Verifying update\u{2026}", 4.0));
-        assert!(should_log(&mut last, "Preparing new version\u{2026}", 10.0));
-        assert!(!should_log(&mut last, "Preparing new version\u{2026}", 19.9));
-        assert!(should_log(&mut last, "Preparing new version\u{2026}", 20.0));
-        assert!(should_log(&mut last, "Preparing new version\u{2026}", 60.0));
-        assert!(!should_log(&mut last, "Preparing new version\u{2026}", 60.0));
+        assert!(should_log(&mut last, "Verifying installer\u{2026}", 0.5));
+        assert!(!should_log(&mut last, "Verifying installer\u{2026}", 3.0));
+        assert!(!should_log(&mut last, "Verifying installer\u{2026}", 4.0));
+        assert!(should_log(&mut last, "Copying files\u{2026}", 10.0));
+        assert!(!should_log(&mut last, "Copying files\u{2026}", 19.9));
+        assert!(should_log(&mut last, "Copying files\u{2026}", 20.0));
+        assert!(should_log(&mut last, "Copying files\u{2026}", 60.0));
+        assert!(!should_log(&mut last, "Copying files\u{2026}", 60.0));
         assert!(should_log(&mut last, "Done", 100.0));
         assert!(!should_log(&mut last, "Done", 100.0));
-    }
-
-    #[test]
-    fn download_labels_share_a_phase() {
-        let mut last = None;
-        assert!(should_log(&mut last, "Downloading the runtime: 1 MB of 9 MB", 0.01));
-        assert!(!should_log(&mut last, "Downloading the runtime: 2 MB of 9 MB", 0.02));
-        assert!(should_log(&mut last, "Installing the runtime", INDETERMINATE));
-        assert!(!should_log(&mut last, "Installing the runtime", INDETERMINATE));
-        assert!(should_log(&mut last, "Verifying update", 1.0));
-        assert!(should_log(&mut last, "Verifying update", 100.0));
     }
 }

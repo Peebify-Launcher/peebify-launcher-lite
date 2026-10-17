@@ -6,8 +6,9 @@ import { createPortal } from "react-dom";
 import { m } from "framer-motion";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import type { GameBananaImage } from "../../lib/gamebanana";
-import { useEscapeKey } from "../../lib/useClickOutside";
+import { useEscapeKey } from "../../lib/hooks";
 import { useFocusTrap } from "../../lib/useFocusTrap";
+import { useT } from "../../lib/useT";
 
 export function Lightbox({
   title,
@@ -22,6 +23,7 @@ export function Lightbox({
   onClose: () => void;
   onIndexChange: (index: number) => void;
 }) {
+  const t = useT();
   const current = images[index];
   const root = useRef<HTMLDivElement>(null);
   const isTop = useEscapeKey(onClose);
@@ -54,7 +56,7 @@ export function Lightbox({
       ref={root}
       role="dialog"
       aria-modal="true"
-      aria-label={`Image ${index + 1} of ${images.length}`}
+      aria-label={t("mods.lightbox.dialogLabel", { index: index + 1, total: images.length })}
       tabIndex={-1}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
@@ -67,7 +69,7 @@ export function Lightbox({
       <button
         type="button"
         onClick={onClose}
-        aria-label="Close the image viewer"
+        aria-label={t("mods.lightbox.close")}
         className="absolute right-5 top-5 z-10 rounded-full bg-white/[0.08] p-2.5 text-white/70 transition hover:bg-white/[0.15] hover:text-white"
       >
         <X size={18} />
@@ -80,7 +82,7 @@ export function Lightbox({
             e.stopPropagation();
             onIndexChange(index - 1);
           }}
-          aria-label="Previous image"
+          aria-label={t("mods.lightbox.previous")}
           className="absolute left-5 z-10 rounded-full bg-white/[0.08] p-3 text-white/70 transition hover:bg-white/[0.15] hover:text-white"
         >
           <ChevronLeft size={20} />
@@ -93,7 +95,7 @@ export function Lightbox({
             e.stopPropagation();
             onIndexChange(index + 1);
           }}
-          aria-label="Next image"
+          aria-label={t("mods.lightbox.next")}
           className="absolute right-5 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/[0.08] p-3 text-white/70 transition hover:bg-white/[0.15] hover:text-white"
         >
           <ChevronRight size={20} />
@@ -103,12 +105,12 @@ export function Lightbox({
       <LightboxImage
         key={current.url}
         src={current.url}
-        alt={`${title}, image ${index + 1} of ${images.length}`}
+        alt={t("mods.lightbox.alt", { title, index: index + 1, total: images.length })}
       />
 
       {images.length > 1 && (
         <span className="absolute bottom-6 left-1/2 -translate-x-1/2 rounded-full bg-black/60 px-3 py-1.5 text-[12.5px] text-white/70">
-          {index + 1} of {images.length}
+          {t("mods.imageCounter", { index: index + 1, total: images.length })}
         </span>
       )}
     </m.div>,
@@ -117,6 +119,7 @@ export function Lightbox({
 }
 
 function LightboxImage({ src, alt }: { src: string; alt: string }) {
+  const t = useT();
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
 
@@ -126,7 +129,7 @@ function LightboxImage({ src, alt }: { src: string; alt: string }) {
         onClick={(e) => e.stopPropagation()}
         className="flex h-[60vh] w-[70vw] items-center justify-center rounded-ui bg-white/[0.04] text-[13px] text-white/45"
       >
-        Preview unavailable
+        {t("mods.previewUnavailable")}
       </div>
     );
   }

@@ -1,73 +1,63 @@
-// ------------ Download Helpers ------------
-// Small helpers for download queue jobs: is it still active, can it be paused or cancelled, what to call it
-// on screen, and how to retry it after a failure.
+// ------------ Download Jobs ------------
+// Helpers for download queue jobs: is it still active, can it be paused or cancelled, what to call it on
+// screen, how to retry or cancel it, and how far along its stages it is.
 import {
   downloadEnqueue,
   lastRepairMode,
   repairGame,
   resumeInstall,
   verifyGameIntegrity,
+  downloadCancel,
   type QueueJob,
 } from "./ipc";
 import { useGamesStore } from "../store/gamesStore";
 import { useModalStore } from "../store/modalStore";
-import { supportsQuickRepair } from "../data/games";
-import type { GameId } from "../types/game";
+import { gameById, supportsQuickRepair, type GameId } from "../data/games";
+import { t, type TKey } from "./i18n";
 
+// ------------ Job Helpers ------------
+// Is a job still active, can it be paused or cancelled, what to call it on screen, and how to retry it after
+// a failure.
 export const TERMINAL_PHASES = ["done", "cancelled", "deferred", "error"];
 export const isActiveJob = (j: QueueJob): boolean => !TERMINAL_PHASES.includes(j.phase);
 
 export const baseKindOf = (j: QueueJob): string => j.baseKind || j.kind;
 
-export const KIND_VERB: Record<string, string> = {
-  install: "installed",
-  update: "updated",
-  repair: "repaired",
-  verify: "verified",
-  move: "moved",
-  uninstall: "removed",
-};
-
-export const KIND_NOUN: Record<string, string> = {
-  install: "install",
-  update: "update",
-  repair: "repair",
-  verify: "verify",
-  move: "move",
-  uninstall: "removal",
-};
-
-const PHASE_LABELS: Record<string, string> = {
-  verifying: "Verifying",
-  scanning: "Checking",
-  downloading: "Downloading",
-  extracting: "Extracting",
-  installing: "Finalizing",
-  validating: "Finalizing",
-  repairing: "Repairing",
-  moving: "Finalizing",
+const PHASE_LABELS: Record<string, TKey> = {
+  verifying: "stages.phase.verifying",
+  scanning: "stages.phase.checking",
+  downloading: "stages.phase.downloading",
+  extracting: "stages.phase.extracting",
+  installing: "stages.phase.finalizing",
+  validating: "stages.phase.finalizing",
+  repairing: "stages.phase.repairing",
+  moving: "stages.phase.finalizing",
 };
 
 export function phaseLabel(j: QueueJob): string {
-  if (j.parked) return "Waiting";
-  if (j.paused) return "Paused";
-  if (j.waitingNetwork) return "Waiting for connection";
-  if (j.phase === "queued") return "Queued";
-  if (j.phase === "done") return "Done";
-  if (j.phase === "cancelled") return "Cancelled";
-  if (j.phase === "deferred") return "Deferred";
-  if (j.phase === "error") return "Error";
-  if (j.kind === "move") return j.phase === "moving" ? "Removing old copy" : "Transferring";
-  if (j.kind === "uninstall") return "Removing";
-  if (j.kind === "verify") return "Verifying";
+  if (j.parked) return t("stages.phase.waiting");
+  if (j.paused) return t("stages.phase.paused");
+  if (j.waitingNetwork) return t("stages.phase.waitingNetwork");
+  if (j.heldForGame) return t("stages.phase.heldForGame");
+  if (j.phase === "queued") return t("stages.phase.queued");
+  if (j.phase === "done") return t("stages.phase.done");
+  if (j.phase === "cancelled") return t("stages.phase.cancelled");
+  if (j.phase === "deferred") return t("stages.phase.deferred");
+  if (j.phase === "error") return t("stages.phase.error");
+  if (j.kind === "move") {
+    return t(j.phase === "moving" ? "stages.phase.removingOldCopy" : "stages.phase.transferring");
+  }
+  if (j.kind === "uninstall") return t("stages.phase.removing");
+  if (j.kind === "verify") return t("stages.phase.verifying");
   if (j.kind === "repair") {
     const mapped = PHASE_LABELS[j.phase];
-    return !mapped || mapped === "Downloading" ? "Verifying" : mapped;
+    return t(!mapped || mapped === "stages.phase.downloading" ? "stages.phase.verifying" : mapped);
   }
-  return PHASE_LABELS[j.phase] ?? j.phase;
+  const mapped = PHASE_LABELS[j.phase];
+  return mapped ? t(mapped) : j.phase;
 }
 
-export const isDownloadKind = (kind: string): boolean =>
+const isDownloadKind = (kind: string): boolean =>
   kind === "install" || kind === "update";
 export const canPauseJob = (j: QueueJob): boolean =>
   (isDownloadKind(j.kind) || j.kind === "repair") && j.phase !== "extracting" && !j.parked;
@@ -78,15 +68,6 @@ export const canCancelJob = (j: QueueJob): boolean =>
   (j.kind === "move" && j.phase !== "moving");
 export const isJobDownloading = (j: QueueJob): boolean =>
   isDownloadKind(j.kind) && j.phase === "downloading" && !j.paused;
-
-export const remainingDownloadBytes = (jobs: QueueJob[]): number =>
-  jobs.reduce(
-    (sum, j) =>
-      isDownloadKind(j.kind) && j.phase === "downloading" && j.total > 0
-        ? sum + Math.max(0, j.total - j.downloaded)
-        : sum,
-    0,
-  );
 
 export const withKind = (j: QueueJob, kind: string): QueueJob =>
   j.kind === kind ? j : { ...j, kind };
@@ -134,4 +115,110 @@ export async function retryJob(gameId: string, kind: string): Promise<void> {
     return;
   }
   useModalStore.getState().openInstall(gameId as GameId);
+}
+
+// ------------ Job Stages ------------
+// Splits a download, repair, move or verify job into named stages (like Download then Finalize) and works
+// out which stage and how much overall progress a job is at.
+interface JobStage {
+  id: string;
+  label: string;
+  weight: number;
+}
+
+const stage = (id: string, label: TKey, weight: number): JobStage => ({
+  id,
+  get label() {
+    return t(label);
+  },
+  weight,
+});
+
+const DOWNLOAD_STAGES: JobStage[] = [
+  stage("check", "stages.check", 18),
+  stage("download", "common.download", 58),
+  stage("finalize", "stages.finalize", 24),
+];
+
+const REPAIR_STAGES: JobStage[] = [
+  stage("scan", "stages.scan", 16),
+  stage("verify", "stages.verify", 46),
+  stage("replace", "stages.replace", 38),
+];
+
+const MOVE_STAGES: JobStage[] = [stage("transfer", "stages.transfer", 100)];
+
+const VERIFY_STAGES: JobStage[] = [stage("verify", "stages.verify", 100)];
+
+const REMOVE_STAGES: JobStage[] = [stage("remove", "common.remove", 100)];
+
+export function stagesFor(kind: string): JobStage[] {
+  if (kind === "repair") return REPAIR_STAGES;
+  if (kind === "move") return MOVE_STAGES;
+  if (kind === "verify") return VERIFY_STAGES;
+  if (kind === "uninstall") return REMOVE_STAGES;
+  return DOWNLOAD_STAGES;
+}
+
+const PHASE_STAGES: Record<string, string[]> = {
+  scanning: ["check", "verify"],
+  downloading: ["download", "transfer"],
+  repairing: ["replace", "finalize"],
+  verifying: ["verify", "finalize"],
+  validating: ["verify", "finalize"],
+  extracting: ["finalize", "replace"],
+  installing: ["finalize", "replace"],
+  moving: ["transfer", "finalize"],
+};
+
+const PREPARING_STAGES = ["check", ...PHASE_STAGES.downloading];
+
+export function stageIndexFor(job: QueueJob, stages: JobStage[]): number {
+  if (job.phase === "queued") return -1;
+  if (job.phase === "done") return stages.length;
+  const preparing = job.phase === "downloading" && job.total <= 0;
+  for (const id of preparing ? PREPARING_STAGES : (PHASE_STAGES[job.phase] ?? [])) {
+    const index = stages.findIndex((s) => s.id === id);
+    if (index !== -1) return index;
+  }
+  return 0;
+}
+
+export function stagePercent(job: QueueJob): number {
+  return Math.max(0, Math.min(100, job.percent));
+}
+
+export function overallPercent(job: QueueJob, kind: string): number {
+  const stages = stagesFor(kind);
+  const index = stageIndexFor(job, stages);
+  if (index < 0) return 0;
+  const total = stages.reduce((sum, s) => sum + s.weight, 0);
+  if (total <= 0) return 0;
+  if (index >= stages.length) return 100;
+  let done = 0;
+  for (let i = 0; i < index; i += 1) done += stages[i].weight;
+  done += (stages[index].weight * stagePercent(job)) / 100;
+  return (done / total) * 100;
+}
+
+// ------------ Cancel Job ------------
+// Cancels a download or other queue job. Installs ask first, because cancelling throws away the files
+// downloaded so far.
+export function requestCancelJob(job: QueueJob): void {
+  const kind = baseKindOf(job);
+  const discardsFiles = kind === "install";
+
+  if (!discardsFiles) {
+    void downloadCancel(job.id, kind);
+    return;
+  }
+
+  useModalStore.getState().openConfirm({
+    title: t("actions.cancelInstall.title", { game: gameById(job.gameId as GameId).name }),
+    message: t("actions.cancelInstall.message"),
+    confirmLabel: t("actions.cancelInstall.confirm"),
+    cancelLabel: t("actions.cancelInstall.keep"),
+    danger: true,
+    onConfirm: () => void downloadCancel(job.id, kind),
+  });
 }

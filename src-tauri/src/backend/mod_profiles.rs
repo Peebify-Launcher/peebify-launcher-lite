@@ -7,15 +7,15 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
-use super::state::BackendState;
+use super::BackendState;
 use super::{arg_str, err_response, game_profiles, mods, ok_with, resolve_profile};
 
 const PROFILES_FILE: &str = "profiles.json";
-const MAX_PROFILES_PER_GAME: usize = 50;
+pub(crate) const MAX_PROFILES_PER_GAME: usize = 50;
 const MAX_NAME_LEN: usize = 60;
 const MAX_MODS_PER_PROFILE: usize = 2000;
 
-static PROFILES_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+pub(crate) static PROFILES_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 fn profiles_root(app: &AppHandle) -> PathBuf {
     app.state::<BackendState>().user_data.join("mods")
@@ -25,12 +25,12 @@ fn profiles_path(app: &AppHandle) -> PathBuf {
     profiles_root(app).join(PROFILES_FILE)
 }
 
-fn load_store(app: &AppHandle) -> Result<Value, String> {
+pub(crate) fn load_store(app: &AppHandle) -> Result<Value, String> {
     super::fs_util::read_json_store(&profiles_path(app))
         .map(|stored| stored.filter(Value::is_object).unwrap_or_else(|| json!({})))
 }
 
-fn supports_mods(game_id: &str) -> bool {
+pub(crate) fn supports_mods(game_id: &str) -> bool {
     game_profiles::known_profile(game_id)
         .and_then(game_profiles::mod_config)
         .is_some()
@@ -49,12 +49,12 @@ fn moddable_only(store: &Value) -> Value {
     Value::Object(kept)
 }
 
-fn write_store(app: &AppHandle, store: &Value) -> Result<(), String> {
+pub(crate) fn write_store(app: &AppHandle, store: &Value) -> Result<(), String> {
     let body = serde_json::to_string_pretty(&moddable_only(store)).map_err(|e| e.to_string())?;
     super::fs_util::write_atomic(&profiles_path(app), body.as_bytes())
 }
 
-fn clean_name(raw: &str) -> String {
+pub(crate) fn clean_name(raw: &str) -> String {
     let trimmed: String = raw.trim().chars().take(MAX_NAME_LEN).collect();
     if trimmed.is_empty() {
         "Profile".to_string()
@@ -63,29 +63,28 @@ fn clean_name(raw: &str) -> String {
     }
 }
 
-fn profiles_of(store: &Value, game_id: &str) -> Vec<Value> {
+pub(crate) fn profiles_of(store: &Value, game_id: &str) -> Vec<Value> {
     store[game_id]["profiles"]
         .as_array()
         .map(|profiles| profiles.iter().filter(|p| p.is_object()).cloned().collect())
         .unwrap_or_default()
 }
 
-fn find_index(profiles: &[Value], profile_id: &str) -> Option<usize> {
+pub(crate) fn find_index(profiles: &[Value], profile_id: &str) -> Option<usize> {
     profiles
         .iter()
         .position(|p| p["id"].as_str() == Some(profile_id))
 }
 
-fn mod_ids_of(profile: &Value) -> Vec<String> {
-    profile["modIds"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
+pub(crate) fn string_list(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
         .unwrap_or_default()
+}
+
+pub(crate) fn mod_ids_of(profile: &Value) -> Vec<String> {
+    string_list(Some(&profile["modIds"]))
 }
 
 fn new_profile(name: &str, mod_ids: Vec<String>) -> Value {
@@ -97,7 +96,7 @@ fn new_profile(name: &str, mod_ids: Vec<String>) -> Value {
     })
 }
 
-pub(super) fn strip_copy_suffix(name: &str) -> &str {
+pub(crate) fn strip_copy_suffix(name: &str) -> &str {
     let Some(open) = name.rfind(" (") else {
         return name;
     };
@@ -148,7 +147,7 @@ pub(super) fn active_profile_name(app: &AppHandle, game_id: &str) -> Option<Stri
     profiles[index]["name"].as_str().map(str::to_string)
 }
 
-fn ensure_game(app: &AppHandle, game_id: &str) -> (Vec<Value>, String) {
+pub(crate) fn ensure_game(app: &AppHandle, game_id: &str) -> (Vec<Value>, String) {
     let _guard = PROFILES_LOCK.lock();
     match load_store(app) {
         Ok(mut store) => seeded_profiles(app, game_id, &mut store),
@@ -194,6 +193,12 @@ fn game_id_from(app: &AppHandle, args: &[Value]) -> Result<String, String> {
         ));
     }
     Ok(game_profiles::profile_id(profile).to_string())
+}
+
+fn target(app: &AppHandle, args: &[Value]) -> Result<(String, String), String> {
+    let game_id = game_id_from(app, args)?;
+    let profile_id = arg_str(args, 1).ok_or("No profile was specified.")?;
+    Ok((game_id, profile_id.to_string()))
 }
 
 pub(super) fn forget_mod(app: &AppHandle, game_id: &str, mod_id: &str) {
@@ -260,50 +265,6 @@ pub(super) fn add_to_active(app: &AppHandle, game_id: &str, mod_ids: &[String]) 
             mod_ids.len()
         );
     }
-}
-
-pub(super) fn split_mod_ids(
-    app: &AppHandle,
-    game_id: &str,
-    reassigned: &[(String, String)],
-) -> Result<(), String> {
-    if reassigned.is_empty() {
-        return Ok(());
-    }
-    let _guard = PROFILES_LOCK.lock();
-    let mut store = load_store(app)?;
-    if split_ids_in(&mut store, game_id, reassigned) {
-        write_store(app, &store)?;
-        log::info!(
-            "mod-profiles: {} {game_id} mod(s) got ids of their own, and their profiles follow",
-            reassigned.len()
-        );
-    }
-    Ok(())
-}
-
-fn split_ids_in(store: &mut Value, game_id: &str, reassigned: &[(String, String)]) -> bool {
-    let Some(profiles) = store
-        .get_mut(game_id)
-        .and_then(|entry| entry.get_mut("profiles"))
-        .and_then(Value::as_array_mut)
-    else {
-        return false;
-    };
-    let mut changed = false;
-    for profile in profiles.iter_mut() {
-        let Some(ids) = profile.get_mut("modIds").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        for (old, new) in reassigned {
-            let holds = |id: &str| ids.iter().any(|v| v.as_str() == Some(id));
-            if holds(old) && !holds(new) {
-                ids.push(Value::String(new.clone()));
-                changed = true;
-            }
-        }
-    }
-    changed
 }
 
 pub(super) async fn list_mod_profiles(app: &AppHandle, args: &[Value]) -> Result<Value, String> {
@@ -375,12 +336,9 @@ pub(super) async fn create_mod_profile(app: &AppHandle, args: &[Value]) -> Resul
 }
 
 pub(super) async fn rename_mod_profile(app: &AppHandle, args: &[Value]) -> Result<Value, String> {
-    let game_id = match game_id_from(app, args) {
-        Ok(id) => id,
+    let (game_id, profile_id) = match target(app, args) {
+        Ok(found) => found,
         Err(e) => return Ok(err_response(e)),
-    };
-    let Some(profile_id) = arg_str(args, 1).map(str::to_string) else {
-        return Ok(err_response("No profile was specified."));
     };
     let name = clean_name(arg_str(args, 2).unwrap_or_default());
 
@@ -405,12 +363,9 @@ pub(super) async fn rename_mod_profile(app: &AppHandle, args: &[Value]) -> Resul
 }
 
 pub(super) async fn delete_mod_profile(app: &AppHandle, args: &[Value]) -> Result<Value, String> {
-    let game_id = match game_id_from(app, args) {
-        Ok(id) => id,
+    let (game_id, profile_id) = match target(app, args) {
+        Ok(found) => found,
         Err(e) => return Ok(err_response(e)),
-    };
-    let Some(profile_id) = arg_str(args, 1).map(str::to_string) else {
-        return Ok(err_response("No profile was specified."));
     };
 
     let outcome = mutate(app, &game_id, |profiles, _| {
@@ -437,12 +392,9 @@ pub(super) async fn duplicate_mod_profile(
     app: &AppHandle,
     args: &[Value],
 ) -> Result<Value, String> {
-    let game_id = match game_id_from(app, args) {
-        Ok(id) => id,
+    let (game_id, profile_id) = match target(app, args) {
+        Ok(found) => found,
         Err(e) => return Ok(err_response(e)),
-    };
-    let Some(profile_id) = arg_str(args, 1).map(str::to_string) else {
-        return Ok(err_response("No profile was specified."));
     };
 
     let outcome = mutate(app, &game_id, |profiles, _| {
@@ -477,7 +429,7 @@ pub(super) async fn duplicate_mod_profile(
     })
 }
 
-pub(super) async fn apply_mod_profile(app: &AppHandle, args: &[Value]) -> Result<Value, String> {
+pub(crate) async fn apply_mod_profile(app: &AppHandle, args: &[Value]) -> Result<Value, String> {
     let game_id = match game_id_from(app, args) {
         Ok(id) => id,
         Err(e) => return Ok(err_response(e)),
@@ -558,26 +510,12 @@ pub(super) async fn set_mod_profile_members(
     app: &AppHandle,
     args: &[Value],
 ) -> Result<Value, String> {
-    let game_id = match game_id_from(app, args) {
-        Ok(id) => id,
+    let (game_id, profile_id) = match target(app, args) {
+        Ok(found) => found,
         Err(e) => return Ok(err_response(e)),
     };
-    let Some(profile_id) = arg_str(args, 1).map(str::to_string) else {
-        return Ok(err_response("No profile was specified."));
-    };
-    let listed = |index: usize| -> Vec<String> {
-        args.get(index)
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let add = listed(2);
-    let remove = listed(3);
+    let add = string_list(args.get(2));
+    let remove = string_list(args.get(3));
     if add.is_empty() && remove.is_empty() {
         return Ok(err_response("Nothing to change."));
     }
@@ -632,40 +570,12 @@ pub(super) async fn set_mod_profile_members(
 mod tests {
     use super::*;
 
-    fn ids(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| s.to_string()).collect()
-    }
-
     #[test]
     fn copy_suffix_is_stripped_only_when_numeric() {
         assert_eq!(strip_copy_suffix("hat (2)"), "hat");
         assert_eq!(strip_copy_suffix("hat (red)"), "hat (red)");
         assert_eq!(strip_copy_suffix("hat ()"), "hat ()");
         assert_eq!(strip_copy_suffix("hat"), "hat");
-    }
-
-    #[test]
-    fn a_split_id_joins_the_profiles_that_held_the_shared_one() {
-        let mut store = json!({
-            "zzz": {
-                "active": "p1",
-                "profiles": [
-                    { "id": "p1", "name": "A", "modIds": ["keqing", "other"] },
-                    { "id": "p2", "name": "B", "modIds": ["other"] },
-                    { "id": "p3", "name": "C", "modIds": ["keqing", "raiden"] },
-                ],
-            },
-        });
-        let split = vec![("keqing".to_string(), "raiden".to_string())];
-        assert!(split_ids_in(&mut store, "zzz", &split));
-        let members = |i: usize| mod_ids_of(&store["zzz"]["profiles"][i]);
-        assert_eq!(members(0), ids(&["keqing", "other", "raiden"]));
-        assert_eq!(members(1), ids(&["other"]));
-        assert_eq!(members(2), ids(&["keqing", "raiden"]));
-        assert!(!split_ids_in(&mut store, "zzz", &[]));
-        assert!(!split_ids_in(&mut store, "zzz", &split));
-        assert!(!split_ids_in(&mut store, "genshin", &split));
-        assert!(store.get("genshin").is_none());
     }
 
     #[test]

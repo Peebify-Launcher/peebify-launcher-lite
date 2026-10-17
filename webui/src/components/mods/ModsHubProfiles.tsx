@@ -1,16 +1,17 @@
 // ------------ Mod Profiles ------------
 // The profiles list in the Mods Library. Create, rename, duplicate, delete and pick a profile, and apply one so
 // only its mods are switched on in the game.
-import { useEffect, useRef, useState } from "react";
+import { useEffect } from "react";
 import { Check, Copy, Layers, Pencil, Play, Plus, Trash2, X } from "lucide-react";
-import type { GameId } from "../../types/game";
-import { useModProfilesStore } from "../../store/modProfilesStore";
-import { useModsStore } from "../../store/modsStore";
+import type { GameId } from "../../data/games";
+import { useModProfilesStore, useModsStore } from "../../store/mods";
 import { useModalStore } from "../../store/modalStore";
-import { useNotificationStore } from "../../store/notificationStore";
-import { ActionButton } from "../ui/ActionButton";
-import { GroupBox } from "../ui/SettingsGroup";
-import { TooltipPortal, useAnchoredTip } from "../ui/Tooltip";
+import { useNotificationStore } from "../../store/notifications";
+import { useT } from "../../lib/useT";
+import { ActionButton } from "../ui/controls";
+import { GroupBox } from "../ui/panels";
+import { Hint } from "../ui/Tooltip";
+import { useProfileEditor } from "./ModsHubRow";
 
 const INPUT =
   "w-full rounded-[7px] border border-(--accent-b)/50 bg-white/[0.06] px-[10px] py-[7px] text-[12.5px] text-white outline-none placeholder:text-white/30";
@@ -28,26 +29,20 @@ function IconAction({
   disabled?: boolean;
   danger?: boolean;
 }) {
-  const tip = useAnchoredTip<HTMLSpanElement>("bottom");
   return (
-    <span ref={tip.anchorRef} {...tip.bind} className="inline-flex">
+    <Hint tip={label}>
       <button
         type="button"
         aria-label={label}
         disabled={disabled}
         onClick={onClick}
         className={`inline-flex h-[30px] w-[30px] items-center justify-center rounded-ui border border-white/[0.08] bg-white/[0.04] transition duration-150 hover:bg-white/[0.1] disabled:cursor-not-allowed disabled:opacity-30 ${
-          danger ? "text-[#fca5a5] hover:border-[#ef4444]/40" : "text-white/55 hover:text-white/85"
+          danger ? "text-danger-soft hover:border-[#ef4444]/40" : "text-white/55 hover:text-white/85"
         }`}
       >
         {children}
       </button>
-      {tip.shown && (
-        <TooltipPortal x={tip.pos.x} y={tip.pos.y} placement="bottom">
-          {label}
-        </TooltipPortal>
-      )}
-    </span>
+    </Hint>
   );
 }
 
@@ -64,12 +59,11 @@ export function ModsHubProfiles({
   disabled: boolean;
   onSelect: (id: string) => void;
 }) {
+  const t = useT();
   const profiles = useModProfilesStore((s) => s.profiles);
   const activeId = useModProfilesStore((s) => s.activeId);
   const applying = useModProfilesStore((s) => s.applying);
   const loadedGameId = useModProfilesStore((s) => s.loadedGameId);
-  const create = useModProfilesStore((s) => s.create);
-  const rename = useModProfilesStore((s) => s.rename);
   const remove = useModProfilesStore((s) => s.remove);
   const duplicate = useModProfilesStore((s) => s.duplicate);
   const apply = useModProfilesStore((s) => s.apply);
@@ -77,35 +71,15 @@ export function ModsHubProfiles({
   const openConfirm = useModalStore((s) => s.openConfirm);
   const push = useNotificationStore((s) => s.push);
 
-  const [mode, setMode] = useState<"new" | "rename" | null>(null);
-  const [draft, setDraft] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    setMode(null);
-  }, [gameId]);
-
-  useEffect(() => {
-    if (mode) inputRef.current?.select();
-  }, [mode]);
-
   const loaded = loadedGameId === gameId;
   const selected = profiles.find((p) => p.id === selectedId) ?? null;
+  const { mode, setMode, draft, setDraft, inputRef, commit } = useProfileEditor(gameId, selected, onSelect);
+
+  useEffect(() => {
+    setMode(null);
+  }, [gameId, setMode]);
   const locked = disabled || !!applying;
   const missing = selected ? selected.modCount - selected.resolvedCount : 0;
-
-  const commit = async () => {
-    const name = draft.trim();
-    const which = mode;
-    setMode(null);
-    if (!name) return;
-    if (which === "new") {
-      const created = await create(gameId, name);
-      if (created) onSelect(created.id);
-    } else if (which === "rename" && selected && name !== selected.name) {
-      await rename(gameId, selected.id, name);
-    }
-  };
 
   const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") void commit();
@@ -119,18 +93,20 @@ export function ModsHubProfiles({
     if (!result) return;
     const changes = result.enabled.length + result.disabled.length;
     const parts: string[] = [];
-    if (result.enabled.length) parts.push(`${result.enabled.length} on`);
-    if (result.disabled.length) parts.push(`${result.disabled.length} off`);
-    if (result.missing.length) parts.push(`${result.missing.length} no longer installed`);
-    const offNote = "Mods load once they are turned on for this game.";
+    if (result.enabled.length) parts.push(t("mods.profiles.partOn", { count: result.enabled.length }));
+    if (result.disabled.length) parts.push(t("mods.profiles.partOff", { count: result.disabled.length }));
+    if (result.missing.length) parts.push(t("mods.profiles.partMissing", { count: result.missing.length }));
+    const offNote = t("mods.profiles.offNote");
     const summary = canApply
-      ? parts.join(", ") || "Nothing needed changing."
+      ? parts.join(", ") || t("mods.profiles.nothingNeeded")
       : parts.length
-        ? `${parts.join(", ")}. ${offNote}`
+        ? t("mods.profiles.summaryWithNote", { summary: parts.join(", "), note: offNote })
         : offNote;
     push({
       type: result.failed.length ? "warning" : "success",
-      title: changes ? `Switched to ${selected.name}` : `${selected.name} was already applied`,
+      title: changes
+        ? t("mods.profiles.switchedTo", { name: selected.name })
+        : t("mods.profiles.alreadyApplied", { name: selected.name }),
       text: result.failed.length
         ? result.failed.map((f) => `${f.folderName}: ${f.error}`).join("; ")
         : summary,
@@ -140,10 +116,9 @@ export function ModsHubProfiles({
   const confirmDelete = () => {
     if (!selected) return;
     openConfirm({
-      title: `Delete the "${selected.name}" profile?`,
-      message:
-        "This only forgets the list of mods. None of your mod files are deleted, and whatever is switched on right now stays on.",
-      confirmLabel: "Delete profile",
+      title: t("mods.profiles.deleteTitle", { name: selected.name }),
+      message: t("mods.profiles.deleteMessage"),
+      confirmLabel: t("mods.profiles.deleteConfirm"),
       danger: true,
       onConfirm: () => {
         void remove(gameId, selected.id);
@@ -152,14 +127,14 @@ export function ModsHubProfiles({
   };
 
   return (
-    <GroupBox className="self-start">
+    <GroupBox divided className="self-start">
       <div className="flex items-center justify-between px-4 py-3">
         <span className="flex items-center gap-2 text-[12.5px] font-medium text-white/55">
           <Layers size={14} />
-          Profiles
+          {t("mods.profiles.title")}
         </span>
         <IconAction
-          label="New profile"
+          label={t("mods.profiles.newProfile")}
           disabled={locked || mode !== null}
           onClick={() => {
             setDraft("");
@@ -212,22 +187,21 @@ export function ModsHubProfiles({
               >
                 <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium">{p.name}</span>
                 {isActive && (
-                  <span
-                    role="img"
-                    aria-label="Active profile"
-                    title="Active profile"
-                    className="shrink-0 text-(--accent-text)"
-                  >
-                    <Check size={13} strokeWidth={2.5} aria-hidden />
-                  </span>
+                  <Hint tip={t("mods.profiles.active")} className="inline-flex shrink-0">
+                    <span role="img" aria-label={t("mods.profiles.active")} className="text-(--accent-text)">
+                      <Check size={13} strokeWidth={2.5} aria-hidden />
+                    </span>
+                  </Hint>
                 )}
-                <span
-                  title={`${p.resolvedCount} installed mod${p.resolvedCount === 1 ? "" : "s"}`}
-                  className="shrink-0 text-[11px] tabular-nums text-white/35"
+                <Hint
+                  tip={t("mods.profiles.installedCount", { count: p.resolvedCount })}
+                  className="inline-flex shrink-0"
                 >
-                  {p.resolvedCount}
-                  <span className="sr-only"> installed mod{p.resolvedCount === 1 ? "" : "s"}</span>
-                </span>
+                  <span className="text-[11px] tabular-nums text-white/35">
+                    {p.resolvedCount}
+                    <span className="sr-only"> {t("mods.profiles.installedSuffix", { count: p.resolvedCount })}</span>
+                  </span>
+                </Hint>
               </button>
             );
           })
@@ -238,7 +212,7 @@ export function ModsHubProfiles({
             value={draft}
             autoFocus
             maxLength={60}
-            placeholder="Profile name"
+            placeholder={t("mods.profiles.namePlaceholder")}
             onChange={(e) => setDraft(e.target.value)}
             onBlur={() => void commit()}
             onKeyDown={onKey}
@@ -246,15 +220,14 @@ export function ModsHubProfiles({
           />
         )}
         {loaded && profiles.length === 0 && mode !== "new" && (
-          <p className="px-[10px] py-2 text-[12px] text-white/40">No profiles yet.</p>
+          <p className="px-[10px] py-2 text-[12px] text-white/40">{t("mods.profiles.none")}</p>
         )}
       </div>
 
       {selected && missing > 0 && (
         <p className="flex items-center gap-1.5 px-4 py-3 text-[12px] text-white/45">
           <X size={12} className="shrink-0" />
-          {missing} mod{missing === 1 ? " in" : "s in"} this profile
-          {missing === 1 ? " is" : " are"} no longer installed.
+          {t("mods.profiles.missing", { count: missing })}
         </p>
       )}
 
@@ -265,11 +238,11 @@ export function ModsHubProfiles({
           disabled={locked || !selected}
           onClick={() => void applySelected()}
         >
-          {applying ? "Applying…" : "Apply"}
+          {applying ? t("mods.profiles.applying") : t("common.apply")}
         </ActionButton>
         <span className="ml-auto flex gap-[6px]">
           <IconAction
-            label="Rename"
+            label={t("common.rename")}
             disabled={locked || !selected || mode !== null}
             onClick={() => {
               if (!selected) return;
@@ -280,7 +253,7 @@ export function ModsHubProfiles({
             <Pencil size={14} />
           </IconAction>
           <IconAction
-            label="Duplicate"
+            label={t("common.duplicate")}
             disabled={locked || !selected}
             onClick={() => {
               if (selected) void duplicate(gameId, selected.id);
@@ -289,7 +262,7 @@ export function ModsHubProfiles({
             <Copy size={14} />
           </IconAction>
           <IconAction
-            label={profiles.length > 1 ? "Delete" : "You need at least one profile"}
+            label={profiles.length > 1 ? t("common.delete") : t("mods.profiles.needOne")}
             danger
             disabled={locked || !selected || profiles.length <= 1}
             onClick={confirmDelete}

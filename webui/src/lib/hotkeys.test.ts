@@ -1,6 +1,6 @@
 import type { KeyboardEvent } from "react";
 import { describe, expect, it } from "vitest";
-import { acceleratorOf, captureHint } from "./hotkeys";
+import { acceleratorOf, captureHint, spacedAccelerator } from "./hotkeys";
 
 function press(key: string, code: string, mods: Partial<KeyboardEvent> = {}): KeyboardEvent {
   return {
@@ -21,6 +21,13 @@ describe("acceleratorOf", () => {
       "Ctrl+Shift+K",
     );
     expect(acceleratorOf(press("k", "KeyK"))).toBeNull();
+  });
+});
+
+describe("spacedAccelerator", () => {
+  it("keeps the plus key as a key of its own", () => {
+    expect(spacedAccelerator("Ctrl+Shift+S")).toBe("Ctrl + Shift + S");
+    expect(spacedAccelerator("Ctrl++")).toBe("Ctrl + +");
   });
 });
 

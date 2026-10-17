@@ -9,12 +9,13 @@ use tauri::{AppHandle, Emitter, Manager};
 use windows::core::{Interface, Ref, HRESULT, PCWSTR};
 use windows::Graphics::Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem};
 use windows::Graphics::DirectX::DirectXPixelFormat;
+use windows::Graphics::SizeInt32;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::System::WinRT::Direct3D11::{
@@ -25,7 +26,7 @@ use windows::Win32::UI::Shell::{
     IFileOperationProgressSink, IFileOperationProgressSink_Impl, IShellItem,
 };
 
-use super::state::BackendState;
+use super::BackendState;
 use super::{arg_str, err_response, ok_with};
 
 const FRAME_POOL_DEPTH: i32 = 3;
@@ -37,14 +38,15 @@ pub fn is_supported() -> bool {
 }
 
 // ------------ Window Frame Grab ------------
-// Sets up Direct3D and grabs a single frame from the game window, cropped to the visible game area.
-struct Device {
-    device: ID3D11Device,
-    context: ID3D11DeviceContext,
-    winrt: windows::Graphics::DirectX::Direct3D11::IDirect3DDevice,
+// Sets up Direct3D and grabs a single frame from the game window, cropped to the visible game area. The recorder
+// uses the same device and capture item setup.
+pub(super) struct Device {
+    pub(super) device: ID3D11Device,
+    pub(super) context: ID3D11DeviceContext,
+    pub(super) winrt: windows::Graphics::DirectX::Direct3D11::IDirect3DDevice,
 }
 
-fn create_device() -> Result<Device, String> {
+pub(super) fn create_device(flags: D3D11_CREATE_DEVICE_FLAG) -> Result<Device, String> {
     let mut device: Option<ID3D11Device> = None;
     let mut context: Option<ID3D11DeviceContext> = None;
 
@@ -53,7 +55,7 @@ fn create_device() -> Result<Device, String> {
             None,
             D3D_DRIVER_TYPE_HARDWARE,
             windows::Win32::Foundation::HMODULE::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            flags,
             None,
             D3D11_SDK_VERSION,
             Some(&mut device),
@@ -81,6 +83,22 @@ fn create_device() -> Result<Device, String> {
     })
 }
 
+pub(super) fn window_item(hwnd: HWND, recording: bool) -> Result<(GraphicsCaptureItem, SizeInt32), String> {
+    let (done, what) = if recording { ("recorded", "record") } else { ("captured", "capture") };
+    let interop: IGraphicsCaptureItemInterop =
+        windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
+            .map_err(|e| format!("Windows would not provide the capture factory. {e}"))?;
+    let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(hwnd) }
+        .map_err(|e| format!("That window cannot be {done}. {e}"))?;
+    let size = item
+        .Size()
+        .map_err(|e| format!("could not read the window size: {e}"))?;
+    if size.Width <= 0 || size.Height <= 0 {
+        return Err(format!("The window has no size to {what}."));
+    }
+    Ok((item, size))
+}
+
 pub struct Frame {
     pub width: u32,
     pub height: u32,
@@ -97,7 +115,7 @@ pub(super) struct Region {
 
 pub(super) fn client_region(hwnd: HWND) -> Option<Region> {
     use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
-    let client = super::overlay_window::client_rect(hwnd.0)?;
+    let client = super::overlay::client_rect(hwnd.0)?;
     let mut bounds = windows_sys::Win32::Foundation::RECT {
         left: 0,
         top: 0,
@@ -153,27 +171,15 @@ pub fn capture_window(hwnd: HWND) -> Result<Frame, String> {
     if !is_supported() {
         return Err("This version of Windows cannot capture a window.".to_string());
     }
-    if super::overlay_window::is_exclusive_fullscreen(hwnd.0) {
+    if super::overlay::is_exclusive_fullscreen(hwnd.0) {
         return Err(
             "The game is in exclusive fullscreen, which Windows cannot capture. Switch it to Borderless or Windowed."
                 .to_string(),
         );
     }
 
-    let device = create_device()?;
-
-    let interop: IGraphicsCaptureItemInterop =
-        windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
-            .map_err(|e| format!("Windows would not provide the capture factory. {e}"))?;
-    let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(hwnd) }
-        .map_err(|e| format!("That window cannot be captured. {e}"))?;
-
-    let size = item
-        .Size()
-        .map_err(|e| format!("could not read the window size: {e}"))?;
-    if size.Width <= 0 || size.Height <= 0 {
-        return Err("The window has no size to capture.".to_string());
-    }
+    let device = create_device(D3D11_CREATE_DEVICE_BGRA_SUPPORT)?;
+    let (item, size) = window_item(hwnd, false)?;
 
     let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
         &device.winrt,
@@ -229,7 +235,20 @@ fn read_frame(
         .map_err(|e| format!("could not reach the frame's texture: {e}"))?;
     let texture: ID3D11Texture2D = unsafe { access.GetInterface() }
         .map_err(|e| format!("could not reach the frame's texture: {e}"))?;
+    let content = frame
+        .ContentSize()
+        .ok()
+        .and_then(|size| Some((u32::try_from(size.Width).ok()?, u32::try_from(size.Height).ok()?)));
+    read_texture(&device.device, &device.context, &texture, wanted, content)
+}
 
+pub(super) fn read_texture(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    texture: &ID3D11Texture2D,
+    wanted: Option<Region>,
+    content: Option<(u32, u32)>,
+) -> Result<Frame, String> {
     let mut desc = D3D11_TEXTURE2D_DESC::default();
     unsafe { texture.GetDesc(&mut desc) };
 
@@ -241,28 +260,21 @@ fn read_frame(
         ..desc
     };
     let mut staging: Option<ID3D11Texture2D> = None;
-    unsafe {
-        device
-            .device
-            .CreateTexture2D(&staging_desc, None, Some(&mut staging))
-    }
-    .map_err(|e| format!("could not allocate a readback texture: {e}"))?;
+    unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) }
+        .map_err(|e| format!("could not allocate a readback texture: {e}"))?;
     let staging = staging.ok_or("Direct3D returned no readback texture")?;
 
-    unsafe { device.context.CopyResource(&staging, &texture) };
+    unsafe { context.CopyResource(&staging, texture) };
 
     let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-    unsafe {
-        device
-            .context
-            .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+    unsafe { context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
+        .map_err(|e| format!("could not read the captured frame: {e}"))?;
+    if mapped.pData.is_null() {
+        unsafe { context.Unmap(&staging, 0) };
+        return Err("Direct3D mapped no frame data".to_string());
     }
-    .map_err(|e| format!("could not read the captured frame: {e}"))?;
 
-    let (content_width, content_height) = frame
-        .ContentSize()
-        .ok()
-        .and_then(|size| Some((u32::try_from(size.Width).ok()?, u32::try_from(size.Height).ok()?)))
+    let (content_width, content_height) = content
         .filter(|(w, h)| *w > 0 && *h > 0)
         .unwrap_or((desc.Width, desc.Height));
     let region = visible_region(
@@ -287,7 +299,7 @@ fn read_frame(
         bgra[row * row_bytes..(row + 1) * row_bytes].copy_from_slice(source);
     }
 
-    unsafe { device.context.Unmap(&staging, 0) };
+    unsafe { context.Unmap(&staging, 0) };
 
     Ok(Frame {
         width,
@@ -308,7 +320,7 @@ fn bgra_into_rgb(mut pixels: Vec<u8>) -> Vec<u8> {
     pixels
 }
 
-fn frame_to_rgb(frame: Frame) -> Result<image::RgbImage, String> {
+pub(super) fn frame_to_rgb(frame: Frame) -> Result<image::RgbImage, String> {
     let Frame {
         width,
         height,
@@ -410,11 +422,10 @@ pub(super) const THUMB_WIDTH: u32 = 320;
 pub(super) const THUMB_QUALITY: u8 = 80;
 
 fn hide_dir(dir: &Path) {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, INVALID_FILE_ATTRIBUTES,
     };
-    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
+    let wide = super::process_utils::wide_path(dir);
     let attrs = unsafe { GetFileAttributesW(wide.as_ptr()) };
     if attrs == INVALID_FILE_ATTRIBUTES || attrs & FILE_ATTRIBUTE_HIDDEN != 0 {
         return;
@@ -638,30 +649,24 @@ pub(super) async fn take_screenshot(app: &AppHandle, args: &[Value]) -> Result<V
     }
     let outcome = take_screenshot_inner(app, args).await;
     SHOOTING.store(false, std::sync::atomic::Ordering::Release);
-    match &outcome {
-        Ok(value) if value.get("success") == Some(&Value::Bool(false)) => {
-            let error = value
+    let failed = match &outcome {
+        Ok(value) if value.get("success") == Some(&Value::Bool(false)) => Some(
+            value
                 .get("error")
                 .and_then(Value::as_str)
-                .unwrap_or("The screenshot failed.");
-            let _ = app.emit(
-                "overlay-capture-failed",
-                json!({ "error": error }),
-            );
-        }
-        Err(e) => {
-            let _ = app.emit(
-                "overlay-capture-failed",
-                json!({ "error": e }),
-            );
-        }
-        _ => {}
+                .unwrap_or("The screenshot failed."),
+        ),
+        Err(e) => Some(e.as_str()),
+        _ => None,
+    };
+    if let Some(error) = failed {
+        let _ = app.emit("overlay-capture-failed", json!({ "error": error }));
     }
     outcome
 }
 
 async fn take_screenshot_inner(app: &AppHandle, args: &[Value]) -> Result<Value, String> {
-    let Some(raw_hwnd) = super::overlay_window::game_hwnd().map(|h| h as i64) else {
+    let Some(raw_hwnd) = super::overlay::game_hwnd().map(|h| h as i64) else {
         return Ok(err_response("No game is running."));
     };
 
@@ -734,7 +739,8 @@ async fn take_screenshot_inner(app: &AppHandle, args: &[Value]) -> Result<Value,
 }
 
 // ------------ Capture Gallery ------------
-// Lists everything in the captures folder newest first, and finds a capture again safely when you open, show or delete it.
+// Lists everything in the captures folder newest first, finds a capture again safely when you open, show or delete it,
+// and opens a game's screenshot folder.
 pub(super) fn collect_captures(
     dir: &Path,
     out: &mut Vec<(std::time::SystemTime, PathBuf, u64, bool)>,
@@ -973,6 +979,24 @@ pub(super) async fn delete_capture(app: &AppHandle, args: &[Value]) -> Result<Va
     }
 }
 
+pub(super) async fn open_screenshot_folder(
+    app: &AppHandle,
+    args: &[Value],
+) -> Result<Value, String> {
+    let game_id = arg_str(args, 0)
+        .filter(|id| super::game_profiles::is_known_game_id(id))
+        .map(str::to_string)
+        .unwrap_or_else(|| super::active_game_id(app));
+    let root = super::overlay::capture_dir(app);
+    let per_game = root.join(game_folder(&game_id));
+    let dir = if per_game.is_dir() { per_game } else { root };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return Ok(err_response(format!("Could not open that folder: {e}")));
+    }
+    super::fs_util::dialog::open_folder(&dir)?;
+    Ok(super::ok_response())
+}
+
 // ------------ Recycle Bin Delete ------------
 // Deleting a capture sends it to the Recycle Bin through the Windows shell, and refuses to delete it for good if the bin cannot take it.
 const NOT_RECYCLABLE_MSG: &str = "This capture can't go to the Recycle Bin (it may be too large for it, or this drive has none), so it was not deleted.";
@@ -987,71 +1011,32 @@ struct RecycleOnly {
     refused: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+macro_rules! accept_all {
+    ($($name:ident($($arg:ident: $ty:ty),*);)*) => {
+        $(fn $name(&self, $($arg: $ty),*) -> windows::core::Result<()> {
+            Ok(())
+        })*
+    };
+}
+
 #[allow(non_snake_case)]
 impl IFileOperationProgressSink_Impl for RecycleOnly_Impl {
-    fn StartOperations(&self) -> windows::core::Result<()> {
-        Ok(())
-    }
-    fn FinishOperations(&self, _hr: HRESULT) -> windows::core::Result<()> {
-        Ok(())
-    }
-    fn PreRenameItem(
-        &self,
-        _flags: u32,
-        _item: Ref<'_, IShellItem>,
-        _new_name: &PCWSTR,
-    ) -> windows::core::Result<()> {
-        Ok(())
-    }
-    fn PostRenameItem(
-        &self,
-        _flags: u32,
-        _item: Ref<'_, IShellItem>,
-        _new_name: &PCWSTR,
-        _hr: HRESULT,
-        _created: Ref<'_, IShellItem>,
-    ) -> windows::core::Result<()> {
-        Ok(())
-    }
-    fn PreMoveItem(
-        &self,
-        _flags: u32,
-        _item: Ref<'_, IShellItem>,
-        _folder: Ref<'_, IShellItem>,
-        _new_name: &PCWSTR,
-    ) -> windows::core::Result<()> {
-        Ok(())
-    }
-    fn PostMoveItem(
-        &self,
-        _flags: u32,
-        _item: Ref<'_, IShellItem>,
-        _folder: Ref<'_, IShellItem>,
-        _new_name: &PCWSTR,
-        _hr: HRESULT,
-        _created: Ref<'_, IShellItem>,
-    ) -> windows::core::Result<()> {
-        Ok(())
-    }
-    fn PreCopyItem(
-        &self,
-        _flags: u32,
-        _item: Ref<'_, IShellItem>,
-        _folder: Ref<'_, IShellItem>,
-        _new_name: &PCWSTR,
-    ) -> windows::core::Result<()> {
-        Ok(())
-    }
-    fn PostCopyItem(
-        &self,
-        _flags: u32,
-        _item: Ref<'_, IShellItem>,
-        _folder: Ref<'_, IShellItem>,
-        _new_name: &PCWSTR,
-        _hr: HRESULT,
-        _created: Ref<'_, IShellItem>,
-    ) -> windows::core::Result<()> {
-        Ok(())
+    accept_all! {
+        StartOperations();
+        FinishOperations(_hr: HRESULT);
+        PreRenameItem(_flags: u32, _item: Ref<'_, IShellItem>, _new_name: &PCWSTR);
+        PostRenameItem(_flags: u32, _item: Ref<'_, IShellItem>, _new_name: &PCWSTR, _hr: HRESULT, _created: Ref<'_, IShellItem>);
+        PreMoveItem(_flags: u32, _item: Ref<'_, IShellItem>, _folder: Ref<'_, IShellItem>, _new_name: &PCWSTR);
+        PostMoveItem(_flags: u32, _item: Ref<'_, IShellItem>, _folder: Ref<'_, IShellItem>, _new_name: &PCWSTR, _hr: HRESULT, _created: Ref<'_, IShellItem>);
+        PreCopyItem(_flags: u32, _item: Ref<'_, IShellItem>, _folder: Ref<'_, IShellItem>, _new_name: &PCWSTR);
+        PostCopyItem(_flags: u32, _item: Ref<'_, IShellItem>, _folder: Ref<'_, IShellItem>, _new_name: &PCWSTR, _hr: HRESULT, _created: Ref<'_, IShellItem>);
+        PostDeleteItem(_flags: u32, _item: Ref<'_, IShellItem>, _hr: HRESULT, _created: Ref<'_, IShellItem>);
+        PreNewItem(_flags: u32, _folder: Ref<'_, IShellItem>, _new_name: &PCWSTR);
+        PostNewItem(_flags: u32, _folder: Ref<'_, IShellItem>, _new_name: &PCWSTR, _template: &PCWSTR, _attributes: u32, _hr: HRESULT, _created: Ref<'_, IShellItem>);
+        UpdateProgress(_total: u32, _done: u32);
+        ResetTimer();
+        PauseTimer();
+        ResumeTimer();
     }
     fn PreDeleteItem(&self, flags: u32, _item: Ref<'_, IShellItem>) -> windows::core::Result<()> {
         use windows::Win32::UI::Shell::TSF_DELETE_RECYCLE_IF_POSSIBLE;
@@ -1059,47 +1044,6 @@ impl IFileOperationProgressSink_Impl for RecycleOnly_Impl {
             self.refused.store(true, std::sync::atomic::Ordering::Relaxed);
             return Err(windows::Win32::Foundation::E_ABORT.into());
         }
-        Ok(())
-    }
-    fn PostDeleteItem(
-        &self,
-        _flags: u32,
-        _item: Ref<'_, IShellItem>,
-        _hr: HRESULT,
-        _created: Ref<'_, IShellItem>,
-    ) -> windows::core::Result<()> {
-        Ok(())
-    }
-    fn PreNewItem(
-        &self,
-        _flags: u32,
-        _folder: Ref<'_, IShellItem>,
-        _new_name: &PCWSTR,
-    ) -> windows::core::Result<()> {
-        Ok(())
-    }
-    fn PostNewItem(
-        &self,
-        _flags: u32,
-        _folder: Ref<'_, IShellItem>,
-        _new_name: &PCWSTR,
-        _template: &PCWSTR,
-        _attributes: u32,
-        _hr: HRESULT,
-        _created: Ref<'_, IShellItem>,
-    ) -> windows::core::Result<()> {
-        Ok(())
-    }
-    fn UpdateProgress(&self, _total: u32, _done: u32) -> windows::core::Result<()> {
-        Ok(())
-    }
-    fn ResetTimer(&self) -> windows::core::Result<()> {
-        Ok(())
-    }
-    fn PauseTimer(&self) -> windows::core::Result<()> {
-        Ok(())
-    }
-    fn ResumeTimer(&self) -> windows::core::Result<()> {
         Ok(())
     }
 }
@@ -1142,10 +1086,7 @@ fn recycle_with_shell(path: &Path) -> Result<(), RecycleError> {
         FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO, FOF_NO_UI,
     };
     let io = |e: windows::core::Error| RecycleError::Io(shell_io_error(e));
-    let wide: Vec<u16> = super::fs_util::plain_path(path)
-        .encode_utf16()
-        .chain([0])
-        .collect();
+    let wide = peebify_helpers::common::wide(&super::fs_util::plain_path(path));
     let refused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     unsafe {
         let item: IShellItem =
@@ -1351,16 +1292,7 @@ mod tests {
     }
 
     #[test]
-    fn screenshots_pack_to_rgb_in_place() {
-        let bgra = vec![1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 0];
-        assert_eq!(bgra_into_rgb(bgra), vec![3, 2, 1, 6, 5, 4, 9, 8, 7]);
-        let frame = Frame {
-            width: 2,
-            height: 1,
-            bgra: vec![10, 20, 30, 255, 40, 50, 60, 255],
-        };
-        let image = frame_to_rgb(frame).unwrap();
-        assert_eq!(image.get_pixel(1, 0).0, [60, 50, 40]);
+    fn a_frame_with_too_few_pixels_is_refused() {
         let short = Frame {
             width: 2,
             height: 2,

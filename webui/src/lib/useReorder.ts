@@ -3,6 +3,7 @@
 // a keyboard option using Alt and the arrow keys.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useReducedMotionSafe } from "./motion";
+import type { TKey } from "./i18n";
 
 const DRAG_THRESHOLD_PX = 4;
 const EDGE_SCROLL_ZONE_PX = 46;
@@ -13,7 +14,7 @@ const SWAP_MS = 260;
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
 const LIFT_SCALE = 1.02;
 
-export const REORDER_KEY_HINT = "Press Alt with the up or down arrow to move this game";
+export const REORDER_KEY_HINT: TKey = "games.reorderHint";
 
 type Phase = "drag" | "settle" | "land";
 

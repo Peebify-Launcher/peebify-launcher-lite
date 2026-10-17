@@ -13,10 +13,9 @@ mod host {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-    use windows_sys::core::BOOL;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_BAD_LENGTH, ERROR_PARTIAL_COPY, HANDLE, HWND,
-        INVALID_HANDLE_VALUE, LPARAM, WAIT_OBJECT_0,
+        CloseHandle, GetLastError, ERROR_BAD_LENGTH, ERROR_PARTIAL_COPY, HANDLE,
+        INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W,
@@ -27,12 +26,10 @@ mod host {
         CreateEventW, OpenEventW, SetEvent, Sleep, WaitForSingleObject,
         SYNCHRONIZATION_SYNCHRONIZE,
     };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, IsWindowVisible, HHOOK,
-    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::HHOOK;
 
     use peebify_helpers::common::process::{
-        create_log_file, find_processes, process_alive, PinnedLibrary,
+        create_log_file, find_processes, process_alive, visible_windows_of, PinnedLibrary,
     };
     use peebify_helpers::common::wide;
     use peebify_helpers::mods::*;
@@ -103,33 +100,6 @@ mod host {
             .into_iter()
             .filter(|&pid| process_alive(pid))
             .collect()
-    }
-
-    struct WindowSearch {
-        pid: u32,
-        found: bool,
-    }
-
-    unsafe extern "system" fn visible_window_of(window: HWND, param: LPARAM) -> BOOL {
-        let search = &mut *(param as *mut WindowSearch);
-        let mut owner = 0u32;
-        GetWindowThreadProcessId(window, &mut owner);
-        if owner == search.pid && IsWindowVisible(window) != 0 {
-            search.found = true;
-            return 0;
-        }
-        1
-    }
-
-    fn has_visible_window(pid: u32) -> bool {
-        let mut search = WindowSearch { pid, found: false };
-        unsafe {
-            EnumWindows(
-                Some(visible_window_of),
-                &mut search as *mut WindowSearch as LPARAM,
-            )
-        };
-        search.found
     }
 
     enum Mapped {
@@ -254,7 +224,7 @@ mod host {
                     }
                     Mapped::Unreadable(error)
                         if watch.seen_for(pid, now) >= UNREADABLE_GRACE
-                            && has_visible_window(pid) =>
+                            && !visible_windows_of(pid).is_empty() =>
                     {
                         log.line(&format!(
                             "the module list of pid {pid} cannot be read (error {error}) but its window is up, so the hook is assumed to have landed"

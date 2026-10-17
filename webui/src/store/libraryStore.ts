@@ -1,8 +1,7 @@
 // ------------ Library Store ------------
 // Which games are shown in the sidebar and in what order, and whether first run setup is done.
 import { create } from "zustand";
-import { GAMES } from "../data/games";
-import type { GameId } from "../types/game";
+import { GAMES, type GameId } from "../data/games";
 import { getLibrary, saveLibrary } from "../lib/ipc";
 import { useUiStore } from "./uiStore";
 

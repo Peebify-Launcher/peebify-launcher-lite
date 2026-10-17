@@ -3,16 +3,15 @@
 // playtime color. Saves to the backend as you change them.
 import { useCallback } from "react";
 import { create } from "zustand";
-import { gameColor } from "../data/playtime";
+import { gameColor, type GraphicsApi, type ResourceQuality } from "../data/games";
 import {
   getCustomization,
+  saveGameIcon,
+  saveWallpaper,
   setConfigValue,
   type MediaSlice,
-  type GraphicsApi,
-  type ResourceQuality,
   type VoicePackLanguage,
 } from "../lib/ipc";
-import { rpcAction } from "../lib/rpc";
 
 interface CustomizationState {
   wallpaper: Record<string, MediaSlice>;
@@ -36,10 +35,7 @@ const playtimeColorTimers = new Map<string, number>();
 
 type MediaSection = "wallpaper" | "gameIcons";
 
-const MEDIA_SAVE: Record<MediaSection, { label: string; channel: string }> = {
-  wallpaper: { label: "Save wallpaper", channel: "save-wallpaper" },
-  gameIcons: { label: "Save game icon", channel: "save-game-icon" },
-};
+const MEDIA_SAVE = { wallpaper: saveWallpaper, gameIcons: saveGameIcon };
 
 async function saveMediaSlice(
   section: MediaSection,
@@ -47,9 +43,7 @@ async function saveMediaSlice(
   slice: MediaSlice,
   previous: MediaSlice | undefined,
 ): Promise<void> {
-  const { label, channel } = MEDIA_SAVE[section];
-  const res = await rpcAction<{ success?: boolean }>(label, channel, { gameId, config: slice });
-  if (res?.success === true) return;
+  if (await MEDIA_SAVE[section](gameId, slice)) return;
   useCustomizationStore.setState((s) => {
     if (s[section][gameId] !== slice) return {};
     const next = { ...s[section] };

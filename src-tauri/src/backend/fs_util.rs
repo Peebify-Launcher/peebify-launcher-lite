@@ -1,26 +1,53 @@
 // ------------ File System Helpers ------------
 // Shared odds and ends for touching the disk: finding bundled resources, safe atomic writes, working out why a write failed, path safety checks, MD5 hashing and reading the JSON stores.
-use std::io::Read;
-use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+// Also the small text formats several games share: dotted version strings and INI files.
+use std::path::{Path, PathBuf};
 
-use md5::{Digest, Md5};
+pub use peebify_transfer::fsx::{
+    checksum_file, checksum_matches, classify, explain_disk_full, fat_limit_message,
+    finalize_replace, fmt_io, is_access_denied, md5_file, md5_hex, not_writable_message,
+    retry_while_locked, safe_join, tmp_sibling, write_all_at, write_atomic, FailureKind,
+    CANCELLED_MSG, CRC32_PREFIX, CRC64_PREFIX,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FailureKind {
-    Network,
-    DiskFull,
-    Validation,
-    Cancelled,
-    Locked,
-    AccessDenied,
-    DeviceGone,
-    FileTooLarge,
-    ShareLost,
-    Other,
+pub fn is_disk_full(message: &str) -> bool {
+    message.starts_with("Not enough disk space") || classify(message) == FailureKind::DiskFull
 }
 
-pub const SHARE_LOST_ATTEMPTS: u32 = 3;
+pub fn walk_files(
+    dir: &Path,
+    cancel: &std::sync::atomic::AtomicBool,
+    mut visit: impl FnMut(&Path, u64),
+) -> bool {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return false;
+        }
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => stack.push(entry.path()),
+                Ok(t) if t.is_file() => {
+                    visit(&entry.path(), entry.metadata().map(|m| m.len()).unwrap_or(0));
+                }
+                _ => {}
+            }
+        }
+    }
+    true
+}
+
+pub fn folder_bytes(dir: &Path, cancel: &std::sync::atomic::AtomicBool) -> Option<u64> {
+    let mut total = 0u64;
+    walk_files(dir, cancel, |_, len| total = total.saturating_add(len)).then_some(total)
+}
+
+pub fn directory_size(dir: &Path) -> u64 {
+    folder_bytes(dir, &std::sync::atomic::AtomicBool::new(false)).unwrap_or(0)
+}
 
 pub fn resource(app: &tauri::AppHandle, name: &str) -> Option<PathBuf> {
     use tauri::Manager;
@@ -120,195 +147,6 @@ fn asset_scope_accepts(path: &Path) -> bool {
     path.is_absolute()
 }
 
-pub fn classify(message: &str) -> FailureKind {
-    let msg = message.to_lowercase();
-    let has = |needles: &[&str]| needles.iter().any(|n| msg.contains(n));
-
-    if has(&[
-        "cancelled",
-        "canceled",
-        "aborted by user",
-        "repair aborted",
-        "download aborted",
-    ]) {
-        return FailureKind::Cancelled;
-    }
-    let code = os_error_code(&msg);
-    if matches!(code, Some(112) | Some(39)) || has(&["there is not enough space"]) {
-        return FailureKind::DiskFull;
-    }
-    if matches!(code, Some(21) | Some(55) | Some(483) | Some(1167)) {
-        return FailureKind::DeviceGone;
-    }
-    if code == Some(223) {
-        return FailureKind::FileTooLarge;
-    }
-    if msg.contains("could not replace") && has(&["[os:32]", "[os:33]", "[os:5]"]) {
-        return FailureKind::Locked;
-    }
-    if has(&["[os:5]", "(os error 5)", "access is denied"]) {
-        return FailureKind::AccessDenied;
-    }
-    if has(&["validation failed", "failed verification"]) {
-        return FailureKind::Validation;
-    }
-    if has(&[
-        "request error",
-        "stream error",
-        "error sending request",
-        "decoding response body",
-        "stalled",
-        "timed out",
-        "timeout",
-        "dns error",
-        "getaddrinfo",
-        "socket hang up",
-        "econnreset",
-        "connection refused",
-        "connection reset",
-        "connection closed",
-        "connection aborted",
-    ]) {
-        return FailureKind::Network;
-    }
-    if matches!(code, Some(59) | Some(64)) {
-        return FailureKind::ShareLost;
-    }
-    FailureKind::Other
-}
-
-pub fn os_error_code(message: &str) -> Option<i32> {
-    ["(os error ", "[os:"].iter().find_map(|marker| {
-        let start = message.rfind(marker)? + marker.len();
-        let digits: String = message[start..]
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect();
-        digits.parse().ok()
-    })
-}
-
-pub fn drive_failure_message(
-    kind: FailureKind,
-    dir: &Path,
-    file: &Path,
-    file_size: u64,
-) -> Option<String> {
-    match kind {
-        FailureKind::DeviceGone => Some(format!(
-            "The drive holding {} is no longer available. Reconnect it and try again.",
-            dir.display()
-        )),
-        FailureKind::FileTooLarge => Some(fat_limit_message(file, file_size).unwrap_or_else(|| {
-            format!(
-                "{} is too large for the drive it is on. Pick an NTFS or exFAT drive.",
-                file.display()
-            )
-        })),
-        FailureKind::ShareLost => Some(format!(
-            "The network drive holding {} stopped responding. Check the connection and try again.",
-            dir.display()
-        )),
-        _ => None,
-    }
-}
-
-pub fn fmt_io(context: &str, e: &std::io::Error) -> String {
-    match e.raw_os_error() {
-        Some(code) => format!("{context}: {e} [os:{code}]"),
-        None => format!("{context}: {e}"),
-    }
-}
-
-const REPLACE_ATTEMPTS: u32 = 5;
-const REPLACE_RETRY_BASE_MS: u64 = 200;
-
-pub fn finalize_replace(tmp_path: &Path, dest: &Path) -> Result<(), String> {
-    replace_retrying(tmp_path, dest).map_err(|e| {
-        fmt_io(
-            &format!(
-                "Could not replace {}. Is the game running, or is a file locked by antivirus?",
-                dest.display()
-            ),
-            &e,
-        )
-    })
-}
-
-pub fn tmp_sibling(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".tmp");
-    PathBuf::from(name)
-}
-
-pub fn write_atomic(dest: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| fmt_io(&format!("Could not create {}", parent.display()), &e))?;
-    }
-    let tmp = tmp_sibling(dest);
-    let written = std::fs::File::create(&tmp).and_then(|mut file| {
-        use std::io::Write;
-        file.write_all(bytes)?;
-        file.sync_all()
-    });
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(fmt_io(&format!("Could not write {}", tmp.display()), &e));
-    }
-    replace_retrying(&tmp, dest).map_err(|e| {
-        if dest.exists() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        fmt_io(&format!("Could not save {}", dest.display()), &e)
-    })
-}
-
-fn replace_retrying(tmp_path: &Path, dest: &Path) -> std::io::Result<()> {
-    let mut attempt = 0u32;
-    loop {
-        match try_replace(tmp_path, dest) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                attempt += 1;
-                let retryable = matches!(e.raw_os_error(), Some(5) | Some(32));
-                if attempt >= REPLACE_ATTEMPTS || !retryable {
-                    return Err(e);
-                }
-                log::warn!(
-                    "Replacing {} is blocked ({e}), retry {attempt}/{REPLACE_ATTEMPTS}",
-                    dest.display()
-                );
-                std::thread::sleep(Duration::from_millis(
-                    REPLACE_RETRY_BASE_MS * u64::from(attempt),
-                ));
-            }
-        }
-    }
-}
-
-pub fn retry_while_locked<T>(
-    mut op: impl FnMut() -> std::io::Result<T>,
-) -> std::io::Result<T> {
-    let mut attempt = 0u32;
-    loop {
-        match op() {
-            Ok(value) => return Ok(value),
-            Err(e) => {
-                attempt += 1;
-                let retryable = matches!(e.raw_os_error(), Some(5) | Some(32) | Some(33));
-                if attempt >= REPLACE_ATTEMPTS || !retryable {
-                    return Err(e);
-                }
-                log::warn!("A file is locked ({e}), retry {attempt}/{REPLACE_ATTEMPTS}");
-                std::thread::sleep(Duration::from_millis(
-                    REPLACE_RETRY_BASE_MS * u64::from(attempt),
-                ));
-            }
-        }
-    }
-}
-
 pub fn manifest_key(rel: &str) -> String {
     rel.replace('\\', "/")
         .split('/')
@@ -325,17 +163,6 @@ pub fn probe_writable(dir: &Path) -> std::io::Result<()> {
     let probe = dir.join(WRITE_PROBE_NAME);
     std::fs::write(&probe, b"")?;
     std::fs::remove_file(&probe)
-}
-
-pub fn is_access_denied(e: &std::io::Error) -> bool {
-    e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(5)
-}
-
-pub fn not_writable_message(dir: &Path) -> String {
-    format!(
-        "Peebify cannot write to {}. Pick a folder you own, or copy the game into one and use Locate.",
-        dir.display()
-    )
 }
 
 pub fn dir_denies_writes(dir: &Path) -> bool {
@@ -356,176 +183,28 @@ pub fn dir_denies_writes(dir: &Path) -> bool {
     }
 }
 
-pub const FAT_MAX_FILE_BYTES: u64 = u32::MAX as u64;
-
-fn is_fat_name(name: &str) -> bool {
-    matches!(
-        name.to_ascii_uppercase().as_str(),
-        "FAT" | "FAT12" | "FAT16" | "FAT32"
-    )
-}
-
-pub fn volume_fs_name(path: &Path) -> Option<String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
-    let existing = path.ancestors().find(|p| p.exists())?;
-    let wide: Vec<u16> = existing
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut root = [0u16; 1024];
-    if unsafe { GetVolumePathNameW(wide.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
-        return None;
-    }
-    let mut fs_name = [0u16; 64];
-    let ok = unsafe {
-        GetVolumeInformationW(
-            root.as_ptr(),
-            std::ptr::null_mut(),
-            0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            fs_name.as_mut_ptr(),
-            fs_name.len() as u32,
-        )
-    };
-    if ok == 0 {
-        return None;
-    }
-    let len = fs_name.iter().position(|&c| c == 0).unwrap_or(fs_name.len());
-    Some(String::from_utf16_lossy(&fs_name[..len]))
-}
-
-pub fn fat_limit_message(path: &Path, file_size: u64) -> Option<String> {
-    if file_size <= FAT_MAX_FILE_BYTES {
-        return None;
-    }
-    let name = volume_fs_name(path)?;
-    is_fat_name(&name).then(|| {
-        format!(
-            "This drive is formatted as {name}, which cannot store files larger than 4 GB. Pick an NTFS or exFAT drive."
-        )
-    })
-}
-
-pub fn explain_disk_full(path: &Path, file_size: u64, message: String) -> String {
-    if classify(&message) != FailureKind::DiskFull {
-        return message;
-    }
-    match fat_limit_message(path, file_size) {
-        Some(hint) => format!("{hint} ({message})"),
-        None => message,
-    }
-}
-
-pub fn write_all_at(file: &std::fs::File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
-    use std::os::windows::fs::FileExt;
-    while !buf.is_empty() {
-        let written = file.seek_write(buf, offset)?;
-        if written == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WriteZero,
-                "wrote zero bytes",
-            ));
-        }
-        buf = &buf[written..];
-        offset += written as u64;
-    }
-    Ok(())
-}
-
-fn try_replace(tmp_path: &Path, dest: &Path) -> std::io::Result<()> {
-    let first = match std::fs::rename(tmp_path, dest) {
-        Ok(()) => return Ok(()),
-        Err(e) => e,
-    };
-    let Ok(meta) = std::fs::metadata(dest) else {
-        return Err(first);
-    };
-    let mut perms = meta.permissions();
-    if !perms.readonly() {
-        return Err(first);
-    }
-    #[allow(clippy::permissions_set_readonly_false)]
-    perms.set_readonly(false);
-    if std::fs::set_permissions(dest, perms).is_err() {
-        return Err(first);
-    }
-    std::fs::rename(tmp_path, dest)
-}
-
-pub fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, String> {
-    let normalised = rel.replace('\\', "/");
-    let trimmed = normalised.trim_start_matches('/');
-    if trimmed.is_empty() {
-        return Err("refusing empty path from manifest".to_string());
-    }
-
-    let mut out = root.to_path_buf();
-    let mut pushed = 0usize;
-    for component in Path::new(trimmed).components() {
-        match component {
-            Component::Normal(part) => {
-                let name = part.to_string_lossy();
-                if name.contains(':') {
-                    return Err(format!(
-                        "refusing manifest path '{rel}': ':' is not allowed in a name"
-                    ));
-                }
-                if let Some(problem) = unsafe_name_problem(&name) {
-                    return Err(format!("refusing manifest path '{rel}': {problem}"));
-                }
-                out.push(part);
-                pushed += 1;
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                return Err(format!("refusing manifest path '{rel}': contains '..'"));
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(format!(
-                    "refusing manifest path '{rel}': not a relative path"
-                ));
+pub fn list_files(dir: &Path) -> Vec<(PathBuf, u64)> {
+    fn walk(dir: &Path, files: &mut Vec<(PathBuf, u64)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            log::warn!("Cannot read {}", dir.display());
+            return;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let is_dir = entry
+                .file_type()
+                .map(|t| t.is_dir() && !t.is_symlink())
+                .unwrap_or(false);
+            if is_dir {
+                walk(&entry.path(), files);
+            } else {
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                files.push((entry.path(), size));
             }
         }
     }
-
-    if pushed == 0 {
-        return Err(format!(
-            "refusing manifest path '{rel}': it names no file under the install"
-        ));
-    }
-
-    Ok(out)
-}
-
-const RESERVED_DEVICE_NAMES: [&str; 24] = [
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "CONIN$",
-    "CONOUT$",
-];
-
-fn unsafe_name_problem(name: &str) -> Option<&'static str> {
-    if name.trim_end_matches(['.', ' ']).is_empty() {
-        return Some("a name made only of dots or spaces");
-    }
-    if name
-        .chars()
-        .any(|c| (c as u32) < 0x20 || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
-    {
-        return Some("a name with characters Windows does not allow");
-    }
-    let stem = name
-        .split('.')
-        .next()
-        .unwrap_or(name)
-        .trim_end_matches(' ')
-        .to_ascii_uppercase();
-    RESERVED_DEVICE_NAMES
-        .contains(&stem.as_str())
-        .then_some("a reserved device name")
+    let mut files = Vec::new();
+    walk(dir, &mut files);
+    files
 }
 
 pub fn find_link(dir: &Path) -> Option<PathBuf> {
@@ -548,98 +227,6 @@ pub fn find_link(dir: &Path) -> Option<PathBuf> {
         }
     }
     None
-}
-
-const STREAM_CHUNK_SIZE: usize = 1 << 20;
-thread_local! {
-    static HASH_BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-pub const CANCELLED_MSG: &str = "Operation cancelled by user.";
-
-pub fn md5_hex(bytes: &[u8]) -> String {
-    let mut hasher = Md5::new();
-    hasher.update(bytes);
-    hex::encode(hasher.finalize())
-}
-
-pub const CRC64_PREFIX: &str = "crc64:";
-static CRC64_XZ: crc::Crc<u64> = crc::Crc::<u64>::new(&crc::CRC_64_XZ);
-
-pub enum ContentHasher {
-    Md5(Md5),
-    Crc64(crc::Digest<'static, u64>),
-}
-
-impl ContentHasher {
-    pub fn for_expected(expected: &str) -> Self {
-        if expected.starts_with(CRC64_PREFIX) {
-            Self::Crc64(CRC64_XZ.digest())
-        } else {
-            Self::Md5(Md5::new())
-        }
-    }
-
-    pub fn update(&mut self, bytes: &[u8]) {
-        match self {
-            Self::Md5(hasher) => hasher.update(bytes),
-            Self::Crc64(digest) => digest.update(bytes),
-        }
-    }
-
-    pub fn finish(self) -> String {
-        match self {
-            Self::Md5(hasher) => hex::encode(hasher.finalize()),
-            Self::Crc64(digest) => format!("{CRC64_PREFIX}{}", digest.finalize()),
-        }
-    }
-}
-
-pub fn checksum_matches(expected: &str, got: &str) -> bool {
-    got.eq_ignore_ascii_case(expected)
-}
-
-pub fn md5_file(
-    path: &Path,
-    should_cancel: &mut dyn FnMut() -> bool,
-    on_progress: &mut dyn FnMut(u64),
-) -> Result<String, String> {
-    checksum_file(path, "", should_cancel, on_progress)
-}
-
-pub fn checksum_file(
-    path: &Path,
-    expected: &str,
-    should_cancel: &mut dyn FnMut() -> bool,
-    on_progress: &mut dyn FnMut(u64),
-) -> Result<String, String> {
-    let mut file = std::fs::File::open(path)
-        .map_err(|e| super::fs_util::fmt_io(&format!("Could not read {}", path.display()), &e))?;
-    let mut hasher = ContentHasher::for_expected(expected);
-    let mut hash_with = |buf: &mut [u8]| -> Result<(), String> {
-        loop {
-            if should_cancel() {
-                return Err(CANCELLED_MSG.to_string());
-            }
-            let read = file.read(buf).map_err(|e| {
-                super::fs_util::fmt_io(&format!("Could not read {}", path.display()), &e)
-            })?;
-            if read == 0 {
-                return Ok(());
-            }
-            hasher.update(&buf[..read]);
-            on_progress(read as u64);
-        }
-    };
-    HASH_BUF.with(|cell| match cell.try_borrow_mut() {
-        Ok(mut buf) => {
-            if buf.len() < STREAM_CHUNK_SIZE {
-                buf.resize(STREAM_CHUNK_SIZE, 0);
-            }
-            hash_with(&mut buf)
-        }
-        Err(_) => hash_with(&mut vec![0u8; STREAM_CHUNK_SIZE]),
-    })?;
-    Ok(hasher.finish())
 }
 
 pub fn sanitize_folder_name(name: &str) -> String {
@@ -677,6 +264,10 @@ pub fn plain_path(path: &Path) -> String {
     }
 }
 
+pub fn corrupt_sibling(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.corrupt-{}", path.display(), chrono::Utc::now().timestamp_millis()))
+}
+
 pub fn read_json_store(path: &Path) -> Result<Option<serde_json::Value>, String> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -686,11 +277,7 @@ pub fn read_json_store(path: &Path) -> Result<Option<serde_json::Value>, String>
     match serde_json::from_slice(&bytes) {
         Ok(value) => Ok(Some(value)),
         Err(e) => {
-            let aside = PathBuf::from(format!(
-                "{}.corrupt-{}",
-                path.display(),
-                chrono::Utc::now().timestamp_millis()
-            ));
+            let aside = corrupt_sibling(path);
             match std::fs::rename(path, &aside) {
                 Ok(()) => log::warn!(
                     "{} could not be parsed ({e}), so it was set aside as {} and starts empty",
@@ -719,23 +306,387 @@ fn unfinished_save(path: &Path) -> Option<serde_json::Value> {
     Some(value)
 }
 
+// ------------ Version Strings ------------
+// Game versions are dotted strings that are not always semver ("2.4.0", "1.0.12.3", "1.2.0b").
+
+fn version_parts(version: &str) -> Vec<Result<i64, String>> {
+    version
+        .trim()
+        .split('.')
+        .map(|part| part.parse::<i64>().map_err(|_| part.to_lowercase()))
+        .collect()
+}
+
+pub fn is_version_newer(remote: &str, local: &str) -> bool {
+    if remote.is_empty() || local.is_empty() {
+        return false;
+    }
+    let (remote, local) = (version_parts(remote), version_parts(local));
+    let number = |parts: &[Result<i64, String>], i: usize| match parts.get(i) {
+        Some(Ok(n)) => *n,
+        _ => 0,
+    };
+    (0..remote.len().max(local.len()))
+        .map(|i| number(&remote, i).cmp(&number(&local, i)))
+        .find(|order| order.is_ne())
+        .is_some_and(|order| order.is_gt())
+}
+
+pub fn json_version(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+pub fn same_version(a: &str, b: &str) -> bool {
+    let (a, b) = (version_parts(a), version_parts(b));
+    let zero = Ok(0i64);
+    (0..a.len().max(b.len())).all(|i| a.get(i).unwrap_or(&zero) == b.get(i).unwrap_or(&zero))
+}
+
+// ------------ INI Files ------------
+
+pub fn ini_key_value(line: &str) -> Option<(&str, &str)> {
+    let trimmed = line.trim();
+    if trimmed.starts_with(';') || trimmed.starts_with('#') {
+        return None;
+    }
+    let (k, v) = trimmed.split_once('=')?;
+    Some((k.trim(), v.trim()))
+}
+
+pub fn ini_entries(text: &str) -> impl Iterator<Item = (&str, &str, &str)> {
+    let mut section = "";
+    text.lines().filter_map(move |line| {
+        let trimmed = line.trim();
+        if let Some(name) = trimmed.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            section = name.trim();
+            return None;
+        }
+        let (key, value) = ini_key_value(trimmed)?;
+        Some((section, key, value))
+    })
+}
+
+pub fn ini_value(text: &str, section: &str, key: &str) -> Option<String> {
+    ini_entries(text)
+        .find(|(s, k, _)| s.eq_ignore_ascii_case(section) && k.eq_ignore_ascii_case(key))
+        .map(|(_, _, v)| v.to_string())
+}
+
+// ------------ Disk Space and Folder Access ------------
+// Free space on the drive under a path, a write probe that leaves nothing behind, and folders only this account can change.
+pub fn drive_root(path: &str) -> Option<String> {
+    if path.is_empty() {
+        return None;
+    }
+    let mut components = Path::new(path).components();
+    match components.next() {
+        Some(std::path::Component::Prefix(prefix)) => {
+            Some(format!("{}\\", prefix.as_os_str().to_string_lossy()))
+        }
+        _ => None,
+    }
+}
+
+pub fn nearest_existing_dir(path: &Path) -> Option<&Path> {
+    path.ancestors()
+        .find(|p| !p.as_os_str().is_empty() && p.is_dir())
+}
+
+pub fn existing_probe_dir(path: &Path) -> Option<String> {
+    let text = nearest_existing_dir(path)?.to_string_lossy();
+    Some(if text.ends_with('\\') || text.ends_with('/') {
+        text.into_owned()
+    } else {
+        format!("{text}\\")
+    })
+}
+
+pub fn disk_space_for(path: &Path) -> Option<(u64, u64)> {
+    let probe = existing_probe_dir(path)?;
+    disk_free_total(&probe).ok()
+}
+
+pub fn remove_empty_parents(path: &Path, root: &Path) {
+    let mut parent = path.parent();
+    while let Some(folder) = parent {
+        if folder == root || std::fs::remove_dir(folder).is_err() {
+            break;
+        }
+        parent = folder.parent();
+    }
+}
+
+pub fn free_bytes_for(path: &Path) -> Option<u64> {
+    disk_space_for(path).map(|(free, _)| free)
+}
+
+pub fn disk_free_total(root: &str) -> Result<(u64, u64), String> {
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide = peebify_helpers::common::wide(root);
+    let mut free_available: u64 = 0;
+    let mut total: u64 = 0;
+    let mut total_free: u64 = 0;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free_available,
+            &mut total,
+            &mut total_free,
+        )
+    };
+    if ok == 0 {
+        return Err(format!("GetDiskFreeSpaceExW failed for {root}"));
+    }
+    Ok((free_available, total))
+}
+
+pub fn preview_writable(dir: &Path) -> Result<(), String> {
+    let Some(existing) = nearest_existing_dir(dir) else {
+        return Err(format!("{} is not reachable.", dir.display()));
+    };
+    if existing == dir {
+        return if super::fs_util::dir_denies_writes(dir) {
+            Err(format!("Access is denied to {}.", dir.display()))
+        } else {
+            Ok(())
+        };
+    }
+    let probe = existing.join(format!(
+        ".peebify-folder-test-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir(&probe).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::remove_dir(&probe) {
+        log::warn!("Could not remove the write probe {}: {e}", probe.display());
+    }
+    Ok(())
+}
+
+pub fn create_restricted_dir(dir: &Path) -> Result<bool, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, HANDLE};
+    use windows_sys::Win32::Security::{
+        AddAccessAllowedAceEx, CreateWellKnownSid, GetLengthSid, GetTokenInformation,
+        InitializeAcl, InitializeSecurityDescriptor, SetSecurityDescriptorControl,
+        SetSecurityDescriptorDacl, TokenUser, WinAuthenticatedUserSid,
+        WinBuiltinAdministratorsSid, WinLocalSystemSid, ACL, ACL_REVISION,
+        CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE, PSID, SECURITY_ATTRIBUTES,
+        SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
+        WELL_KNOWN_SID_TYPE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateDirectoryW, FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+    let failed = |what: &str| format!("{what} failed: {}", std::io::Error::last_os_error());
+
+    let mut token: HANDLE = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(failed("OpenProcessToken"));
+    }
+    let mut user_buf = vec![0u64; 64];
+    let mut needed = 0u32;
+    let read = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            user_buf.as_mut_ptr().cast(),
+            (user_buf.len() * std::mem::size_of::<u64>()) as u32,
+            &mut needed,
+        )
+    };
+    let read_error = (read == 0).then(|| failed("GetTokenInformation"));
+    unsafe { CloseHandle(token) };
+    if let Some(e) = read_error {
+        return Err(e);
+    }
+    let user_sid: PSID = unsafe { (*(user_buf.as_ptr() as *const TOKEN_USER)).User.Sid };
+
+    let well_known = |kind: WELL_KNOWN_SID_TYPE| -> Result<Vec<u8>, String> {
+        let mut sid = vec![0u8; SECURITY_MAX_SID_SIZE as usize];
+        let mut size = SECURITY_MAX_SID_SIZE;
+        let ok = unsafe {
+            CreateWellKnownSid(kind, std::ptr::null_mut(), sid.as_mut_ptr().cast(), &mut size)
+        };
+        if ok == 0 {
+            return Err(failed("CreateWellKnownSid"));
+        }
+        Ok(sid)
+    };
+    let mut system = well_known(WinLocalSystemSid)?;
+    let mut admins = well_known(WinBuiltinAdministratorsSid)?;
+    let mut everyone_signed_in = well_known(WinAuthenticatedUserSid)?;
+    let entries: [(PSID, u32); 4] = [
+        (user_sid, FILE_ALL_ACCESS),
+        (system.as_mut_ptr().cast(), FILE_ALL_ACCESS),
+        (admins.as_mut_ptr().cast(), FILE_ALL_ACCESS),
+        (
+            everyone_signed_in.as_mut_ptr().cast(),
+            FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+        ),
+    ];
+
+    let acl_len = std::mem::size_of::<ACL>() as u32
+        + entries
+            .iter()
+            .map(|(sid, _)| 8 + unsafe { GetLengthSid(*sid) })
+            .sum::<u32>();
+    let mut acl_buf = vec![0u32; (acl_len as usize).div_ceil(4)];
+    let acl = acl_buf.as_mut_ptr() as *mut ACL;
+    if unsafe { InitializeAcl(acl, acl_len, ACL_REVISION) } == 0 {
+        return Err(failed("InitializeAcl"));
+    }
+    for (sid, mask) in entries {
+        let ok = unsafe {
+            AddAccessAllowedAceEx(
+                acl,
+                ACL_REVISION,
+                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+                mask,
+                sid,
+            )
+        };
+        if ok == 0 {
+            return Err(failed("AddAccessAllowedAceEx"));
+        }
+    }
+
+    let mut descriptor: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    let descriptor_ptr = (&mut descriptor as *mut SECURITY_DESCRIPTOR).cast();
+    if unsafe { InitializeSecurityDescriptor(descriptor_ptr, SECURITY_DESCRIPTOR_REVISION) } == 0 {
+        return Err(failed("InitializeSecurityDescriptor"));
+    }
+    if unsafe { SetSecurityDescriptorDacl(descriptor_ptr, 1, acl, 0) } == 0 {
+        return Err(failed("SetSecurityDescriptorDacl"));
+    }
+    if unsafe {
+        SetSecurityDescriptorControl(descriptor_ptr, SE_DACL_PROTECTED, SE_DACL_PROTECTED)
+    } == 0
+    {
+        return Err(failed("SetSecurityDescriptorControl"));
+    }
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor_ptr,
+        bInheritHandle: 0,
+    };
+    let wide: Vec<u16> = dir
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    if unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) } == 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) {
+            return Ok(false);
+        }
+        return Err(format!("CreateDirectoryW failed: {error}"));
+    }
+    Ok(true)
+}
+
+pub fn normalize_path(path: &str) -> String {
+    path.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+}
+
+pub fn same_path(a: &str, b: &str) -> bool {
+    normalize_path(a) == normalize_path(b)
+}
+
+pub fn is_same_or_inside(child: &str, parent: &str) -> bool {
+    let (child, parent) = (normalize_path(child), normalize_path(parent));
+    !parent.is_empty() && (child == parent || child.starts_with(&format!("{parent}\\")))
+}
+
+pub fn create_shared_root_for(install_path: &Path, shared_root: &Path) -> bool {
+    let root = shared_root.to_string_lossy();
+    if !install_path
+        .ancestors()
+        .any(|dir| same_path(&dir.to_string_lossy(), &root))
+    {
+        return false;
+    }
+    match create_restricted_dir(shared_root) {
+        Ok(true) => {
+            log::info!(
+                "Created {} writable by this account only.",
+                shared_root.display()
+            );
+            true
+        }
+        Ok(false) => false,
+        Err(e) => {
+            log::warn!(
+                "Could not create {} with restricted access: {e}",
+                shared_root.display()
+            );
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct TempDir(pub(crate) PathBuf);
+
+#[cfg(test)]
+impl TempDir {
+    pub(crate) fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "peebify-test-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+
+    pub(crate) fn write(&self, rel: &str, bytes: &[u8]) -> PathBuf {
+        let path = safe_join(&self.0, rel).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+}
+
+#[cfg(test)]
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 // ------------ File System Tests ------------
 // Covers the helpers above.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn folder_bytes_adds_up_nested_files() {
+        let dir = TempDir::new("bytes");
+        dir.write("a.bin", &[0u8; 7]);
+        dir.write("sub/b.bin", &[0u8; 3]);
+        let never = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(folder_bytes(dir.path(), &never), Some(10));
+        assert_eq!(folder_bytes(&dir.path().join("missing"), &never), Some(0));
+        assert_eq!(folder_bytes(dir.path(), &std::sync::atomic::AtomicBool::new(true)), None);
+    }
+
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("peebify-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    #[test]
-    fn plain_path_strips_verbatim_prefixes() {
-        assert_eq!(plain_path(Path::new(r"\\?\C:\x")), r"C:\x");
-        assert_eq!(plain_path(Path::new(r"\\?\UNC\server\share")), r"\\server\share");
-        assert_eq!(plain_path(Path::new(r"D:\Games")), r"D:\Games");
     }
 
     #[test]
@@ -769,76 +720,6 @@ mod tests {
     }
 
     #[test]
-    fn os_codes_are_read_from_both_spellings() {
-        assert_eq!(os_error_code("write error: gone (os error 1167)"), Some(1167));
-        assert_eq!(os_error_code("could not save x: denied [os:5]"), Some(5));
-        assert_eq!(os_error_code("http 503 for https://a/b"), None);
-        assert_eq!(os_error_code("(os error x)"), None);
-    }
-
-    #[test]
-    fn drive_failures_are_classified_by_code() {
-        let gone = fmt_io("Write error", &std::io::Error::from_raw_os_error(1167));
-        assert_eq!(classify(&gone), FailureKind::DeviceGone);
-        assert_eq!(classify("Write error: x (os error 21)"), FailureKind::DeviceGone);
-        assert_eq!(classify("Write error: x (os error 223)"), FailureKind::FileTooLarge);
-        assert_eq!(classify("Write error: x (os error 112)"), FailureKind::DiskFull);
-        assert_eq!(classify("Write error: x (os error 64)"), FailureKind::ShareLost);
-        assert_eq!(
-            classify("Stream error: error decoding response body (os error 64)"),
-            FailureKind::Network
-        );
-        let dir = Path::new("E:\\g");
-        let file = dir.join("a.pak");
-        assert!(drive_failure_message(FailureKind::DeviceGone, dir, &file, 1)
-            .is_some_and(|m| m.contains("E:\\g")));
-        assert!(drive_failure_message(FailureKind::Other, dir, &file, 1).is_none());
-    }
-
-    #[test]
-    fn a_failed_replace_keeps_the_destination() {
-        let dir = scratch("replace");
-        let dest = dir.join("store.json");
-        std::fs::write(&dest, b"old").unwrap();
-
-        let missing_tmp = finalize_replace(&dir.join("absent.tmp"), &dest);
-        let kept = std::fs::read(&dest).unwrap();
-
-        let tmp = dir.join("store.json.tmp");
-        std::fs::write(&tmp, b"new").unwrap();
-        let mut perms = std::fs::metadata(&dest).unwrap().permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&dest, perms).unwrap();
-        let replaced = finalize_replace(&tmp, &dest);
-        let after = std::fs::read(&dest).unwrap();
-        let tmp_left = tmp.exists();
-        let _ = std::fs::remove_dir_all(&dir);
-
-        assert!(missing_tmp.is_err());
-        assert_eq!(kept, b"old");
-        assert!(replaced.is_ok());
-        assert_eq!(after, b"new");
-        assert!(!tmp_left);
-    }
-
-    #[test]
-    fn atomic_writes_replace_and_leave_no_tmp() {
-        let dir = scratch("atomic");
-        let dest = dir.join("nested").join("state.json");
-
-        let first = write_atomic(&dest, b"{\"a\":1}");
-        let second = write_atomic(&dest, b"{\"a\":2}");
-        let body = std::fs::read_to_string(&dest).unwrap();
-        let tmp_left = tmp_sibling(&dest).exists();
-        let _ = std::fs::remove_dir_all(&dir);
-
-        assert!(first.is_ok());
-        assert!(second.is_ok());
-        assert_eq!(body, "{\"a\":2}");
-        assert!(!tmp_left);
-    }
-
-    #[test]
     fn a_store_whose_swap_never_finished_loads_from_its_tmp() {
         let dir = scratch("recover");
         let path = dir.join("profiles.json");
@@ -851,32 +732,6 @@ mod tests {
 
         assert_eq!(recovered, Ok(Some(serde_json::json!({ "a": 1 }))));
         assert_eq!(partial, Ok(None));
-    }
-
-    #[test]
-    fn only_fat_family_names_hit_the_four_gigabyte_cap() {
-        assert!(is_fat_name("FAT32"));
-        assert!(is_fat_name("fat"));
-        assert!(is_fat_name("FAT16"));
-        assert!(!is_fat_name("exFAT"));
-        assert!(!is_fat_name("NTFS"));
-        assert!(!is_fat_name("ReFS"));
-    }
-
-    #[test]
-    fn small_files_and_other_failures_skip_the_fat_hint() {
-        let dir = std::env::temp_dir();
-        assert_eq!(fat_limit_message(&dir, FAT_MAX_FILE_BYTES), None);
-        let other = "Write error: stream error".to_string();
-        assert_eq!(explain_disk_full(&dir, u64::MAX, other.clone()), other);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn the_volume_of_an_existing_or_missing_path_is_named() {
-        let missing = std::env::temp_dir().join("peebify-missing-volume-probe").join("x.pak");
-        let name = volume_fs_name(&missing).unwrap();
-        assert!(!name.is_empty());
     }
 
     #[test]
@@ -930,19 +785,6 @@ mod tests {
     }
 
     #[test]
-    fn folder_names_keep_real_game_titles_readable() {
-        assert_eq!(
-            sanitize_folder_name("Honkai: Star Rail"),
-            "Honkai_ Star Rail"
-        );
-        assert_eq!(
-            sanitize_folder_name("Girls' Frontline 2: Exilium"),
-            "Girls' Frontline 2_ Exilium"
-        );
-        assert_eq!(sanitize_folder_name("Wuthering Waves"), "Wuthering Waves");
-    }
-
-    #[test]
     fn folder_names_can_never_be_a_path() {
         for name in ["../escape", r"..\escape", "a/b", r"a\b", "C:/x"] {
             let safe = sanitize_folder_name(name);
@@ -951,75 +793,6 @@ mod tests {
                 "{name} sanitized to {safe}, which still has a separator"
             );
         }
-    }
-
-    #[test]
-    fn folder_names_windows_would_reject_are_fixed() {
-        assert_eq!(sanitize_folder_name("trailing..."), "trailing");
-        assert_eq!(sanitize_folder_name("  padded  "), "padded");
-        assert_eq!(sanitize_folder_name("NUL"), "NUL_");
-        assert_eq!(sanitize_folder_name("con"), "con_");
-        assert_eq!(sanitize_folder_name("COM1"), "COM1_");
-        assert_eq!(sanitize_folder_name("NULL"), "NULL");
-    }
-
-    #[test]
-    fn folder_names_with_nothing_usable_are_empty_for_the_caller_to_handle() {
-        assert!(sanitize_folder_name("").is_empty());
-        assert!(sanitize_folder_name("   ").is_empty());
-        assert!(sanitize_folder_name("...").is_empty());
-    }
-
-    #[test]
-    fn joined_manifest_paths_use_one_native_separator() {
-        let root = Path::new(if cfg!(windows) { r"C:\game" } else { "/game" });
-        let joined = safe_join(root, "Client/Content/Paks/pakchunk0.pak").unwrap();
-
-        let rebuilt = joined.parent().unwrap().join(joined.file_name().unwrap());
-        assert_eq!(joined, rebuilt);
-        assert_eq!(joined.to_string_lossy(), rebuilt.to_string_lossy());
-
-        if cfg!(windows) {
-            assert!(
-                !joined.to_string_lossy().contains('/'),
-                "a joined path kept a foreign separator: {}",
-                joined.display()
-            );
-        }
-    }
-
-    #[test]
-    fn backslash_and_slash_manifests_agree() {
-        let root = Path::new(if cfg!(windows) { r"C:\game" } else { "/game" });
-        assert_eq!(
-            safe_join(root, "a/b/c.pak").unwrap(),
-            safe_join(root, r"a\b\c.pak").unwrap()
-        );
-    }
-
-    #[test]
-    fn traversal_and_empty_paths_are_refused() {
-        let root = Path::new(if cfg!(windows) { r"C:\game" } else { "/game" });
-        assert!(safe_join(root, "../escape.pak").is_err());
-        assert!(safe_join(root, "a/../../escape.pak").is_err());
-        assert!(safe_join(root, "").is_err());
-        assert!(safe_join(root, "/").is_err());
-        assert!(safe_join(root, ".").is_err());
-        assert!(safe_join(root, "./").is_err());
-    }
-
-    #[test]
-    fn names_windows_would_rewrite_or_treat_as_devices_are_refused() {
-        let root = Path::new(r"C:\game");
-        assert!(safe_join(root, "a/.. /escape.pak").is_err());
-        assert!(safe_join(root, "a/.../b.pak").is_err());
-        assert!(safe_join(root, "a/ ./b.pak").is_err());
-        assert!(safe_join(root, "a/NUL").is_err());
-        assert!(safe_join(root, "a/con.txt").is_err());
-        assert!(safe_join(root, "a/b?.pak").is_err());
-        assert!(safe_join(root, "a/b\u{1}.pak").is_err());
-        assert!(safe_join(root, "Content/console.pak").is_ok());
-        assert!(safe_join(root, "Content/.hidden/nul_table.bin").is_ok());
     }
 
     #[test]
@@ -1050,23 +823,6 @@ mod tests {
     }
 
     #[test]
-    fn locked_and_denied_failures_are_told_apart() {
-        let locked = fmt_io(
-            "Could not replace C:\\g\\a.pak. Is the game running, or is a file locked by antivirus?",
-            &std::io::Error::from_raw_os_error(32),
-        );
-        assert_eq!(classify(&format!("Finalize error for a.pak: {locked}")), FailureKind::Locked);
-        let av = fmt_io("Could not replace C:\\g\\a.pak", &std::io::Error::from_raw_os_error(5));
-        assert_eq!(classify(&av), FailureKind::Locked);
-        assert_eq!(
-            classify("Write error: Access is denied. (os error 5)"),
-            FailureKind::AccessDenied
-        );
-        assert_eq!(classify("Write error: something (os error 50)"), FailureKind::Other);
-        assert_eq!(classify("Download aborted by user."), FailureKind::Cancelled);
-    }
-
-    #[test]
     fn a_writable_folder_passes_both_probes_and_leaves_nothing() {
         let dir = std::env::temp_dir().join(format!("peebify-probe-{}", uuid::Uuid::new_v4()));
         let nested = dir.join("a").join("b");
@@ -1084,113 +840,183 @@ mod tests {
     }
 
     #[test]
-    fn a_crc64_expectation_hashes_with_crc64_xz_in_decimal() {
-        let mut hasher = ContentHasher::for_expected("crc64:0");
-        hasher.update(b"1234");
-        hasher.update(b"56789");
-        assert_eq!(hasher.finish(), "crc64:11051210869376104954");
+    fn versions_compare_by_number_and_match_with_missing_parts_as_zero() {
+        assert!(is_version_newer("2.4.1", "2.4.0"));
+        assert!(is_version_newer("2.10", "2.9.9"));
+        assert!(!is_version_newer("2.4", "2.4.0"));
+        assert!(is_version_newer("1.0.5", "1.0.b"), "a part that is not a number counts as zero");
+        assert!(!is_version_newer("1.0.b", "1.0.a"));
+        assert!(!is_version_newer("", "1.0") && !is_version_newer("1.0", ""));
+
+        assert!(same_version(" 1.2 ", "1.2.0"));
+        assert!(same_version("1.2.0B", "1.2.0b"));
+        assert!(!same_version("1.2.a", "1.2.0"), "text is not zero when matching");
+        assert!(!same_version("1.2", "1.3"));
     }
 
     #[test]
-    fn an_empty_crc64_input_hashes_to_zero() {
-        assert_eq!(ContentHasher::for_expected("crc64:0").finish(), "crc64:0");
+    fn ini_values_are_found_by_section_and_key_without_case() {
+        let text = "top = 0\n[General]\n; game_version = 9\ngame_version = 5.1.0\n[ Other ]\nGame_Version=\n";
+        assert_eq!(ini_value(text, "general", "GAME_VERSION").as_deref(), Some("5.1.0"));
+        assert_eq!(ini_value(text, "other", "game_version").as_deref(), Some(""));
+        assert_eq!(ini_value(text, "", "top").as_deref(), Some("0"));
+        assert_eq!(ini_value(text, "missing", "top"), None);
+        assert_eq!(ini_entries(text).count(), 3);
     }
 
     #[test]
-    fn a_plain_expectation_still_hashes_with_md5() {
-        let mut hasher = ContentHasher::for_expected("900150983cd24fb0d6963f7d28e17f72");
-        hasher.update(b"abc");
-        let got = hasher.finish();
-        assert!(checksum_matches("900150983CD24FB0D6963F7D28E17F72", &got));
-    }
+    fn free_space_is_measured_at_the_nearest_folder_that_exists() {
+        let dir = scratch("free");
+        let missing = dir.join("not").join("yet").join("created");
 
-    #[test]
-    fn checksum_file_follows_the_expected_algorithm() {
-        let dir = scratch("checksum");
-        let path = dir.join("digits.bin");
-        std::fs::write(&path, b"123456789").unwrap();
-        let crc = checksum_file(&path, "crc64:1", &mut || false, &mut |_| {}).unwrap();
-        let md5 = checksum_file(&path, "", &mut || false, &mut |_| {}).unwrap();
+        let probe = existing_probe_dir(&missing).expect("an existing ancestor");
+        assert_eq!(
+            Path::new(probe.trim_end_matches('\\')),
+            dir.as_path(),
+            "probed {probe}"
+        );
+        assert!(probe.ends_with('\\'));
+        assert!(free_bytes_for(&missing).is_some());
+        assert!(existing_probe_dir(Path::new("")).is_none());
+
         let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        assert_eq!(crc, "crc64:11051210869376104954");
-        assert_eq!(md5, "25f9e794323b453885f5181f1b624d0b");
+    #[cfg(windows)]
+    fn dacl_is_protected(dir: &Path) -> bool {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Security::{
+            GetFileSecurityW, GetSecurityDescriptorControl, DACL_SECURITY_INFORMATION,
+            SE_DACL_PROTECTED,
+        };
+
+        let wide: Vec<u16> = dir
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut needed = 0u32;
+        unsafe {
+            GetFileSecurityW(
+                wide.as_ptr(),
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                0,
+                &mut needed,
+            )
+        };
+        let mut buf = vec![0u64; (needed as usize).div_ceil(8).max(1)];
+        let read = unsafe {
+            GetFileSecurityW(
+                wide.as_ptr(),
+                DACL_SECURITY_INFORMATION,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * 8) as u32,
+                &mut needed,
+            )
+        };
+        assert_ne!(read, 0, "could not read the DACL of {}", dir.display());
+        let (mut control, mut revision) = (0u16, 0u32);
+        let ok = unsafe {
+            GetSecurityDescriptorControl(buf.as_mut_ptr().cast(), &mut control, &mut revision)
+        };
+        assert_ne!(ok, 0);
+        control & SE_DACL_PROTECTED != 0
     }
 
     #[test]
-    fn md5_file_reuses_its_buffer_across_files_and_nested_calls() {
-        let dir = scratch("md5");
-        let small = dir.join("small.bin");
-        let large = dir.join("large.bin");
-        let large_bytes: Vec<u8> = (0..STREAM_CHUNK_SIZE * 2 + 7).map(|i| i as u8).collect();
-        std::fs::write(&small, b"abc").unwrap();
-        std::fs::write(&large, &large_bytes).unwrap();
+    fn a_restricted_root_stays_fully_usable_by_this_account() {
+        let dir = scratch("acl");
+        let root = dir.join("Peebify Games");
 
-        let large_md5 = md5_file(&large, &mut || false, &mut |_| {}).unwrap();
-        let small_md5 = md5_file(&small, &mut || false, &mut |_| {}).unwrap();
-        let mut nested = None;
-        let outer = md5_file(&large, &mut || false, &mut |_| {
-            if nested.is_none() {
-                nested = Some(md5_file(&small, &mut || false, &mut |_| {}).unwrap());
-            }
-        })
-        .unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(create_restricted_dir(&root), Ok(true));
+        #[cfg(windows)]
+        assert!(dacl_is_protected(&root), "the drive root's access was inherited");
+        let game = root.join("Some Game");
+        std::fs::create_dir_all(&game).unwrap();
+        std::fs::write(game.join("data.bin"), b"x").unwrap();
+        assert_eq!(std::fs::read(game.join("data.bin")).unwrap(), b"x");
+        assert_eq!(create_restricted_dir(&root), Ok(false));
 
-        assert_eq!(large_md5, md5_hex(&large_bytes));
-        assert_eq!(small_md5, md5_hex(b"abc"));
-        assert_eq!(outer, large_md5);
-        assert_eq!(nested.as_deref(), Some(small_md5.as_str()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_preview_probe_never_leaves_a_folder_behind() {
+        let dir = scratch("preview");
+        let target = dir.join("Peebify Games").join("Game");
+        assert_eq!(preview_writable(&target), Ok(()));
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        assert_eq!(preview_writable(&dir), Ok(()));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn a_fresh_install_creates_only_a_missing_shared_root() {
+        let dir = scratch("shared-root");
+        let root = dir.join("Peebify Games");
+
+        assert!(!create_shared_root_for(&dir.join("Elsewhere").join("Game"), &root));
+        assert!(!root.exists(), "a folder outside the shared root created it");
+
+        let install = dir.join("peebify games").join("Game");
+        assert!(create_shared_root_for(&install, &root));
+        assert!(root.is_dir());
+        assert!(!install.exists(), "the game folder is left to the install");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_shared_root_the_user_already_has_keeps_its_access() {
+        let dir = scratch("shared-root-kept");
+        let root = dir.join("Peebify Games");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("notes.txt"), b"mine").unwrap();
+
+        assert!(!create_shared_root_for(&root.join("Game"), &root));
+        #[cfg(windows)]
+        assert!(!dacl_is_protected(&root), "a folder Peebify did not create was tightened");
+        assert_eq!(std::fs::read(root.join("notes.txt")).unwrap(), b"mine");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn paths_compare_without_case_slashes_or_a_trailing_separator() {
+        assert!(same_path(r"D:\Games\WW\", "d:/games/ww"));
+        assert!(!same_path(r"D:\Games\WW", r"E:\Games\WW"));
     }
 }
 
 // ------------ Native Dialogs ------------
-// File and folder pickers, plus opening a path or a web link with Windows.
+// File and folder pickers, plus opening a folder or a web link with Windows.
 pub mod dialog {
-    use serde::Deserialize;
-    use serde_json::{json, Value};
+    use std::path::Path;
+
     use tauri::{AppHandle, Manager};
     use tauri_plugin_dialog::DialogExt;
 
-    #[derive(Debug, Deserialize)]
-    struct PathParam {
-        path: String,
+    #[derive(Default)]
+    pub struct Pick {
+        pub title: String,
+        pub default_path: Option<String>,
+        pub filters: &'static [(&'static str, &'static [&'static str])],
+        pub owner: &'static str,
     }
 
-    #[derive(Debug, Deserialize)]
-    struct UrlParam {
-        url: String,
+    #[derive(Clone, Copy)]
+    enum Kind {
+        Folder,
+        File,
+        Files,
     }
 
-    #[derive(Debug, Deserialize, Default)]
-    struct ShowOpenParams {
-        #[serde(default)]
-        title: String,
-        #[serde(default)]
-        directory: bool,
-        #[serde(default)]
-        multiple: bool,
-        #[serde(rename = "defaultPath", default)]
-        default_path: Option<String>,
-        #[serde(default)]
-        filters: Vec<FilterSpec>,
-        #[serde(default)]
-        owner: Option<String>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct FilterSpec {
-        name: String,
-        extensions: Vec<String>,
-    }
-
-    pub async fn show_open(app: &AppHandle, params: Value) -> Result<Value, String> {
-        let p: ShowOpenParams = serde_json::from_value(params).map_err(|e| e.to_string())?;
+    async fn pick(app: &AppHandle, p: Pick, kind: Kind) -> Result<Vec<String>, String> {
         let app = app.clone();
-
-        let result = tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::spawn_blocking(move || {
             let mut builder = app.dialog().file();
-            let owner = p.owner.as_deref().filter(|s| !s.is_empty()).unwrap_or("main");
+            let owner = if p.owner.is_empty() { "main" } else { p.owner };
             if let Some(win) = app.get_webview_window(owner).filter(|w| {
                 w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(true)
             }) {
@@ -1202,72 +1028,50 @@ pub mod dialog {
             if let Some(dp) = p.default_path.as_deref().filter(|s| !s.is_empty()) {
                 builder = builder.set_directory(dp);
             }
-            for f in &p.filters {
-                let exts: Vec<&str> = f.extensions.iter().map(|s| s.as_str()).collect();
-                builder = builder.add_filter(&f.name, &exts);
+            for (name, extensions) in p.filters {
+                builder = builder.add_filter(*name, extensions);
             }
-
-            if p.directory {
-                let folder = builder.blocking_pick_folder();
-                map_paths(folder.map(|f| vec![f]))
-            } else if p.multiple {
-                let files = builder.blocking_pick_files();
-                map_paths(files)
-            } else {
-                let file = builder.blocking_pick_file();
-                map_paths(file.map(|f| vec![f]))
-            }
+            let picked = match kind {
+                Kind::Folder => builder.blocking_pick_folder().map(|f| vec![f]),
+                Kind::File => builder.blocking_pick_file().map(|f| vec![f]),
+                Kind::Files => builder.blocking_pick_files(),
+            };
+            picked.unwrap_or_default().into_iter().map(|f| f.to_string()).collect()
         })
         .await
-        .map_err(|e| e.to_string())?;
-
-        Ok(result)
+        .map_err(|e| e.to_string())
     }
 
-    fn map_paths<I>(paths: Option<I>) -> Value
-    where
-        I: IntoIterator<Item = tauri_plugin_dialog::FilePath>,
-    {
-        match paths {
-            Some(iter) => {
-                let strs: Vec<String> = iter.into_iter().map(|p| p.to_string()).collect();
-                json!({"canceled": false, "filePaths": strs})
-            }
-            None => json!({"canceled": true, "filePaths": []}),
-        }
+    pub async fn pick_folder(app: &AppHandle, p: Pick) -> Result<Option<String>, String> {
+        Ok(pick(app, p, Kind::Folder).await?.pop())
     }
 
-    pub async fn open_path(params: Value) -> Result<Value, String> {
-        let p: PathParam = serde_json::from_value(params).map_err(|e| e.to_string())?;
+    pub async fn pick_file(app: &AppHandle, p: Pick) -> Result<Option<String>, String> {
+        Ok(pick(app, p, Kind::File).await?.pop())
+    }
 
-        let resolved =
-            std::fs::canonicalize(&p.path).map_err(|_| format!("Folder not found: {}", p.path))?;
+    pub async fn pick_files(app: &AppHandle, p: Pick) -> Result<Vec<String>, String> {
+        pick(app, p, Kind::Files).await
+    }
+
+    pub fn open_folder(path: &Path) -> Result<(), String> {
+        let resolved = std::fs::canonicalize(path)
+            .map_err(|_| format!("Folder not found: {}", path.display()))?;
         if !resolved.is_dir() {
             return Err("Only folders can be opened.".to_string());
         }
-
-        open::that_detached(super::plain_path(&resolved)).map_err(|e| e.to_string())?;
-        Ok(Value::Null)
+        open::that_detached(super::plain_path(&resolved)).map_err(|e| e.to_string())
     }
 
-    pub async fn open_external(params: Value) -> Result<Value, String> {
-        let p: UrlParam = serde_json::from_value(params).map_err(|e| e.to_string())?;
-        let url = validate_external_url(&p.url)?;
-
-        open::that_detached(url).map_err(|e| e.to_string())?;
-        Ok(Value::Null)
-    }
-
-    fn validate_external_url(raw: &str) -> Result<String, String> {
-        let parsed = url::Url::parse(raw.trim()).map_err(|_| "Invalid URL.".to_string())?;
-        match parsed.scheme() {
+    pub fn open_url(raw: &str) -> Result<(), String> {
+        let url = url::Url::parse(raw.trim()).map_err(|_| "Invalid URL.".to_string())?;
+        match url.scheme() {
             "http" | "https" => {}
             other => return Err(format!("Refusing to open a {other}: link.")),
         }
-
-        if parsed.host_str().is_none_or(str::is_empty) {
+        if url.host_str().is_none_or(str::is_empty) {
             return Err("Refusing to open a URL with no host.".to_string());
         }
-        Ok(parsed.to_string())
+        open::that_detached(url.to_string()).map_err(|e| e.to_string())
     }
 }

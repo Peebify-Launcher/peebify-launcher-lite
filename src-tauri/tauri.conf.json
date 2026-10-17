@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Peebify Launcher",
-  "version": "5.0.0",
+  "version": "5.1.1",
   "identifier": "com.peebify.launcher",
   "build": {
     "frontendDist": "../webui/dist",
@@ -50,7 +50,8 @@
             "$DATA/Peebify Launcher/logs/**",
             "$DATA/Peebify Launcher/mods/library.json",
             "$DATA/Peebify Launcher/mods/library.json.*",
-            "$DATA/Peebify Launcher/manifest-cache/**"
+            "$DATA/Peebify Launcher/manifest-cache/**",
+            "$LOCALDATA/com.peebify.launcher/updater/**"
           ]
         }
       }
@@ -65,9 +66,11 @@
       "resources/7z.exe": "resources/7z.exe",
       "resources/7z.dll": "resources/7z.dll",
       "resources/hpatchz.exe": "resources/hpatchz.exe",
+      "resources/7z-LICENSE.txt": "resources/7z-LICENSE.txt",
       "resources/hpatchz-LICENSE.txt": "resources/hpatchz-LICENSE.txt",
       "../webui/public/icons/app.png": "icons/app.png"
-    }
+    },
+    "createUpdaterArtifacts": false
   },
   "plugins": {}
 }
