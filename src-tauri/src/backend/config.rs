@@ -83,6 +83,9 @@ fn default_game(id: &str) -> Value {
     if game_profiles::mod_config(profile).is_some() {
         game.insert("modsEnabled".into(), json!(false));
     }
+    for (key, value) in super::mod_game_settings::defaults(profile) {
+        game.insert(key.into(), value);
+    }
     if profile.get("fpsUnlock") == Some(&Value::Bool(true)) {
         game.insert("fpsUnlock".into(), json!(false));
         game.insert("fpsUnlockTarget".into(), json!(120));

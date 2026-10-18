@@ -1,6 +1,8 @@
 pub mod errbuf;
 
 #[cfg(windows)]
+pub mod cmdline;
+#[cfg(windows)]
 pub mod process;
 #[cfg(windows)]
 pub mod section;

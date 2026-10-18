@@ -1070,7 +1070,7 @@ fn risky_job(op_type: &str, kind: &str, job: Option<&Value>) -> Option<RiskyOp> 
         "extracting" => Some(RiskyOp::Unpack),
         "moving" => Some(RiskyOp::Move),
         "repairing" => Some(RiskyOp::Repair),
-        "downloading" if kind == "update" => Some(RiskyOp::Patch),
+        "downloading" | "finalizing" if kind == "update" => Some(RiskyOp::Patch),
         _ => None,
     }
 }
@@ -1686,6 +1686,8 @@ mod tests {
         assert_eq!(risky_job("download", "install", Some(&unpacking)), Some(RiskyOp::Unpack));
         let patching = board_job("downloading", false);
         assert_eq!(risky_job("download", "update", Some(&patching)), Some(RiskyOp::Patch));
+        let finalizing = board_job("finalizing", false);
+        assert_eq!(risky_job("download", "update", Some(&finalizing)), Some(RiskyOp::Patch));
         let repairing = board_job("repairing", false);
         assert_eq!(risky_job("verify", "verify", Some(&repairing)), Some(RiskyOp::Repair));
     }

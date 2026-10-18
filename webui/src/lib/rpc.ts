@@ -100,6 +100,7 @@ export interface Events {
   "fps-unlock-status": { gameId?: string; state?: FpsUnlockState; error?: string | null } | null;
   "settings-changed": { key?: unknown } | null;
   "mods-load-failed": { gameId?: string; error?: string; message?: string } | null;
+  "mods-notice": { gameId?: string; kind?: string; message?: string } | null;
   "mods-progress": Partial<ModProgress> | null;
   "mods-status-changed": { gameId?: string } | null;
   "mods-tools-updating": { gameId?: string } | null;

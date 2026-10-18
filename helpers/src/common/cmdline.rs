@@ -1,5 +1,5 @@
 // ------------ Game Command Line ------------
-// Builds the command line the helper starts the game with, quoting each argument the way CreateProcess expects, and
+// Builds the command line a helper starts a game with, quoting each argument the way CreateProcess expects, and
 // explains the one start error people actually hit (a folder on a mapped or subst drive).
 
 pub fn quote_argument(argument: &str) -> String {

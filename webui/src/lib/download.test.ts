@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { QueueJob } from "./ipc";
 import {
+  canPauseJob,
   phaseLabel,
   verifyFoundBrokenFiles,
   overallPercent,
@@ -87,6 +88,9 @@ describe("stageIndexFor", () => {
     expect(stageIndexFor(stageJob("install", "downloading", 0, 1024), stagesFor("install"))).toBe(1);
     expect(indexOf("install", "validating")).toBe(2);
     expect(indexOf("install", "extracting")).toBe(2);
+    expect(indexOf("update", "finalizing")).toBe(2);
+    expect(phaseLabel(stageJob("update", "finalizing"))).toBe("Finalizing");
+    expect(canPauseJob(stageJob("update", "finalizing"))).toBe(false);
     expect(indexOf("move", "downloading")).toBe(0);
     expect(indexOf("move", "moving")).toBe(0);
   });

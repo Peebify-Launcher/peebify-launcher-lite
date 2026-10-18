@@ -224,13 +224,7 @@ export function StartBar({ hidePlaytime = false }: { hidePlaytime?: boolean }) {
       stats.push(`${fmtBytes(job.downloaded)} / ${fmtBytes(job.total)}`);
     }
 
-    const tone = job.parked
-      ? "text-white/45"
-      : job.paused
-        ? "text-amber-300/95"
-        : queued
-          ? "text-white/45"
-          : "text-(--accent-text)";
+    const tone = job.parked || queued ? "text-white/45" : "text-(--accent-text)";
 
     return (
       <div ref={cardRef} className="w-[414px]">
@@ -614,9 +608,7 @@ export function StagedProgress({
               <span
                 className={`h-[6px] w-[6px] shrink-0 rounded-full ${
                   current
-                    ? idle
-                      ? "bg-warning/95"
-                      : "bg-white"
+                    ? "bg-white"
                     : done
                       ? "bg-white/45"
                       : "shadow-[inset_0_0_0_1px_rgba(255,255,255,0.25)]"

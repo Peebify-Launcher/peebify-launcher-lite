@@ -1,6 +1,6 @@
 {
   "name": "peebify-launcher",
-  "version": "5.1.1",
+  "version": "5.1.2",
   "buildType": "stable",
   "private": true,
   "description": "This repository contains the source code for the Peebify Launcher, a launcher application built with Tauri and React. It serves as a launcher for multiple gacha games, to avoid the need to have multiple launchers.",

@@ -28,6 +28,7 @@ const PHASE_LABELS: Record<string, TKey> = {
   scanning: "stages.phase.checking",
   downloading: "stages.phase.downloading",
   extracting: "stages.phase.extracting",
+  finalizing: "stages.phase.finalizing",
   installing: "stages.phase.finalizing",
   validating: "stages.phase.finalizing",
   repairing: "stages.phase.repairing",
@@ -59,8 +60,9 @@ export function phaseLabel(j: QueueJob): string {
 
 const isDownloadKind = (kind: string): boolean =>
   kind === "install" || kind === "update";
+const isUnpausablePhase = (phase: string): boolean => phase === "extracting" || phase === "finalizing";
 export const canPauseJob = (j: QueueJob): boolean =>
-  (isDownloadKind(j.kind) || j.kind === "repair") && j.phase !== "extracting" && !j.parked;
+  (isDownloadKind(j.kind) || j.kind === "repair") && !isUnpausablePhase(j.phase) && !j.parked;
 export const canCancelJob = (j: QueueJob): boolean =>
   isDownloadKind(j.kind) ||
   j.kind === "repair" ||
@@ -76,7 +78,7 @@ export const currentJob = (jobs: QueueJob[]): QueueJob | undefined =>
   jobs.find((j) => isActiveJob(j) && j.phase !== "queued" && !j.parked);
 
 export const startNowPauses = (current: QueueJob | undefined, kind: string | undefined): boolean =>
-  !!current && !!kind && (isDownloadKind(kind) || kind === "repair") && current.phase !== "extracting";
+  !!current && !!kind && (isDownloadKind(kind) || kind === "repair") && !isUnpausablePhase(current.phase);
 
 export const canRetryKind = (kind: string): boolean =>
   isDownloadKind(kind) || kind === "repair" || kind === "verify";
@@ -167,6 +169,7 @@ const PHASE_STAGES: Record<string, string[]> = {
   verifying: ["verify", "finalize"],
   validating: ["verify", "finalize"],
   extracting: ["finalize", "replace"],
+  finalizing: ["finalize"],
   installing: ["finalize", "replace"],
   moving: ["transfer", "finalize"],
 };

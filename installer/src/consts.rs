@@ -23,9 +23,10 @@ pub const GAMES_DIR_NAME: &str = "games";
 
 pub const RESOURCES_DIR_NAME: &str = "resources";
 pub const HOOK_DLL_NAME: &str = "peebify_helpers.dll";
-pub const HELPER_BINARIES: [&str; 3] = [
+pub const HELPER_BINARIES: [&str; 4] = [
     "peebify-fps-helper.exe",
     "peebify-mod-loader.exe",
+    "peebify-launch-shim.exe",
     "peebify-overlay-helper.exe",
 ];
 

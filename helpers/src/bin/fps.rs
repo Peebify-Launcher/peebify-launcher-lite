@@ -26,7 +26,7 @@ mod helper {
         find_processes, is_running, visible_windows_of, PinnedLibrary,
     };
     use peebify_helpers::common::wide;
-    use peebify_helpers::fps::cmdline;
+    use peebify_helpers::common::cmdline;
     use peebify_helpers::fps::section::SectionView;
     use peebify_helpers::fps::shared::{
         Shared, STATUS_ATTACHED, STATUS_FAILED, STATUS_INJECTING, STATUS_LAUNCHING, STATUS_READY,

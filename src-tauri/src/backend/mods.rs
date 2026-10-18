@@ -793,8 +793,6 @@ fn fill_sizes_in_background(app: &AppHandle, game_id: &str, mods_dir: PathBuf, f
 // ------------ Importing Mod Archives ------------
 // Finds the real mod folders inside an archive, checks there is room to unpack, extracts it and moves the result
 // into the mods folder. Installs for the same game are queued so two imports never collide.
-const ROGUE_INI_MARKERS: [&str; 4] = ["[loader", "[system", "[stereo", "include_recursive"];
-
 fn rogue_config_in(dir: &Path) -> Option<String> {
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
@@ -813,8 +811,7 @@ fn rogue_config_in(dir: &Path) -> Option<String> {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let lower = text.to_lowercase();
-        if ROGUE_INI_MARKERS.iter().any(|m| lower.contains(m)) {
+        if super::mod_optimizer::is_rogue_config(&text) {
             return Some(name);
         }
     }
@@ -1382,6 +1379,7 @@ pub(super) async fn mods_status(app: &AppHandle, args: &[Value]) -> Result<Value
         "supportsMods": game_profiles::mod_config(profile).is_some(),
         "experimental": game_profiles::mod_is_experimental(profile),
         "forcesDx11": !game_profiles::mod_force_dx11_args(profile).is_empty(),
+        "gameSettings": super::mod_game_settings::status(profile, config, &profile_id),
         "variant": variant,
         "toolchainInstalled": installed,
         "toolchainPath": root.to_string_lossy(),

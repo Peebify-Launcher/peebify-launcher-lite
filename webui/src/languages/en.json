@@ -123,6 +123,7 @@
       "recording": "Recording",
       "dangerZone": "Danger zone",
       "modSupport": "Mod support",
+      "fpsUnlock": "Frame rate",
       "languageAndStartup": "Language and startup",
       "windowBehavior": "Window behavior",
       "sidebar": "Sidebar",
@@ -1409,6 +1410,10 @@
       "title": "Mods didn't load",
       "text": "{game} is starting without mods. {error}",
       "textUnknown": "The game is starting without mods. {error}"
+    },
+    "modsNotice": {
+      "tidiedTitle": "Mods folder tidied up",
+      "settingsTitle": "Game settings weren't changed"
     },
     "customLauncherMissing": {
       "title": "The custom launcher is missing",

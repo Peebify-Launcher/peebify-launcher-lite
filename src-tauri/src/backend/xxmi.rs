@@ -34,9 +34,9 @@ const XCMD_FILE: [&str; 2] = ["Core", "auto_update.xcmd"];
 const XCMD_ROOTS: [&str; 2] = ["Core", "ShaderFixes"];
 const ORPHAN_GRACE: Duration = Duration::from_secs(3);
 
-const SHADERFIXES_EXTRAS: [&str; 4] = ["3dvision2sbs.ini", "help.ini", "mouse.ini", "upscale.ini"];
-const ROGUE_MOD_FILES: [&str; 2] = ["d3dx.ini", "d3dx_user.ini"];
-const ROGUE_SCAN_DEPTH: usize = 6;
+pub(super) const SHADERFIXES_EXTRAS: [&str; 4] = ["3dvision2sbs.ini", "help.ini", "mouse.ini", "upscale.ini"];
+const D3DX_BACKUP: &str = "d3dx.ini.bak";
+const COPY_RETRIES: u32 = 4;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(90);
 const STOP_GRACE: Duration = Duration::from_millis(1500);
@@ -115,6 +115,14 @@ pub fn installed_versions(root: &Path) -> BTreeMap<String, String> {
 fn write_versions(root: &Path, versions: &BTreeMap<String, String>) -> Result<(), String> {
     let body: String = versions.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
     fs_util::write_atomic(&root.join(VERSION_FILE), body.as_bytes())
+}
+
+fn forget_version(root: &Path, package: &str) -> Result<(), String> {
+    let mut versions = installed_versions(root);
+    if versions.remove(package).is_some() {
+        write_versions(root, &versions)?;
+    }
+    Ok(())
 }
 
 pub fn is_toolchain_folder(dir: &Path) -> bool {
@@ -260,10 +268,36 @@ fn link_core_libs(root: &Path, variant: &str, force: bool) -> Result<(), String>
         if !force && same_contents(&source, &target) {
             continue;
         }
-        std::fs::copy(&source, &target)
-            .map_err(|e| format!("Could not place {lib} in {variant}: {e}"))?;
+        copy_file(&source, &target)?;
     }
     Ok(())
+}
+
+fn copy_file(source: &Path, target: &Path) -> Result<(), String> {
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut delay = Duration::from_millis(200);
+    let mut attempt = 0;
+    loop {
+        match std::fs::copy(source, target) {
+            Ok(_) => return Ok(()),
+            Err(e) if matches!(e.raw_os_error(), Some(225 | 226)) => {
+                return Err(format!(
+                    "Windows security software blocked {name}. Allow the mod tools folder (shown under \
+                     Mods > Setup) in it and try again."
+                ))
+            }
+            Err(e) if attempt < COPY_RETRIES && matches!(e.raw_os_error(), Some(5 | 32 | 33)) => {
+                log::debug!("xxmi: {name} is in use, retrying the copy: {e}");
+                std::thread::sleep(delay);
+                delay *= 2;
+                attempt += 1;
+            }
+            Err(e) => return Err(format!("Could not copy {name}: {e}")),
+        }
+    }
 }
 
 pub fn disable_shaderfixes_extras(variant_dir: &Path) {
@@ -278,32 +312,6 @@ pub fn disable_shaderfixes_extras(variant_dir: &Path) {
             }
         }
     }
-}
-
-fn park_rogue_config_files(dir: &Path, depth: usize) -> usize {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    let mut parked = 0;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if path.is_dir() {
-            if depth > 0 && !name.to_ascii_uppercase().starts_with("DISABLED") {
-                parked += park_rogue_config_files(&path, depth - 1);
-            }
-            continue;
-        }
-        if ROGUE_MOD_FILES.iter().any(|r| r.eq_ignore_ascii_case(&name)) {
-            let target = dir.join(format!("DISABLED {name}"));
-            let _ = std::fs::remove_file(&target);
-            if std::fs::rename(&path, &target).is_ok() {
-                log::warn!("xxmi: parked a stray {name} inside Mods at {}", dir.display());
-                parked += 1;
-            }
-        }
-    }
-    parked
 }
 
 pub fn unwrap_single_dir(dir: &Path) -> PathBuf {
@@ -339,8 +347,7 @@ pub fn merge_dir(source: &Path, destination: &Path) -> Result<(), String> {
                 .map_err(|e| format!("Could not create {target:?}: {e}"))?;
             merge_dir(&entry.path(), &target)?;
         } else {
-            std::fs::copy(entry.path(), &target)
-                .map_err(|e| format!("Could not copy {name_str}: {e}"))?;
+            copy_file(&entry.path(), &target)?;
         }
     }
     Ok(())
@@ -462,6 +469,7 @@ pub(super) enum IniEntry {
     Set(String),
     Unset,
     EnsureLine(String),
+    Default(String),
 }
 
 pub(super) fn is_reserved(section: &str, key: &str) -> bool {
@@ -485,6 +493,15 @@ pub(super) fn is_reserved(section: &str, key: &str) -> bool {
 pub const HUNTING_KEYBINDS_ONLY: u64 = 2;
 
 pub const DEFAULT_RELOAD_KEY: &str = "no_modifiers VK_F10";
+
+pub const DEFAULT_TOGGLE_INPUT: &str = "ctrl alt shift VK_END";
+
+const LOADER_DEFAULTS: [(&str, &str, &str); 4] = [
+    ("System", "clear_unknown_settings", "1"),
+    ("Input", "input", "1"),
+    ("Input", "input_disable_mode", "mods"),
+    ("Logging", "log_level", "disabled"),
+];
 
 fn write_ini_entries(path: &Path, entries: &[(String, String, IniEntry)]) -> Result<bool, String> {
     let original =
@@ -510,7 +527,16 @@ fn apply_managed_ini(
     options: &IniOptions,
     overrides: &[(String, String, String)],
 ) -> Result<(), String> {
-    let mut entries = override_entries(&options.defaults);
+    let mut entries: Vec<(String, String, IniEntry)> = LOADER_DEFAULTS
+        .iter()
+        .map(|(section, key, value)| (section.to_string(), key.to_string(), IniEntry::Set(value.to_string())))
+        .collect();
+    entries.push((
+        "Input".into(),
+        "toggle_input".into(),
+        IniEntry::Default(DEFAULT_TOGGLE_INPUT.into()),
+    ));
+    entries.append(&mut override_entries(&options.defaults));
     if let Some((width, height)) = options.screen {
         entries.push(("System".into(), "screen_width".into(), IniEntry::Set(width.to_string())));
         entries.push(("System".into(), "screen_height".into(), IniEntry::Set(height.to_string())));
@@ -612,7 +638,7 @@ fn rewrite_ini(original: &str, managed: &[(String, String, IniEntry)]) -> String
 
     for (section, key, entry) in managed {
         let value_safe = match entry {
-            IniEntry::Set(value) | IniEntry::EnsureLine(value) => {
+            IniEntry::Set(value) | IniEntry::EnsureLine(value) | IniEntry::Default(value) => {
                 ini_text_is_safe(value)
             }
             IniEntry::Unset => true,
@@ -628,11 +654,9 @@ fn rewrite_ini(original: &str, managed: &[(String, String, IniEntry)]) -> String
         let mut section_end = lines.len();
 
         for (i, line) in lines.iter().enumerate() {
-            let trimmed = line.trim();
-            if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+            let Some(name) = section_header(line) else {
                 continue;
-            }
-            let name = trimmed[1..trimmed.len() - 1].trim();
+            };
             if section_start.is_some() {
                 section_end = i;
                 break;
@@ -644,7 +668,7 @@ fn rewrite_ini(original: &str, managed: &[(String, String, IniEntry)]) -> String
 
         let Some(start) = section_start else {
             let value = match entry {
-                IniEntry::Set(value) | IniEntry::EnsureLine(value) => value,
+                IniEntry::Set(value) | IniEntry::EnsureLine(value) | IniEntry::Default(value) => value,
                 IniEntry::Unset => continue,
             };
             if !lines.last().map(|l| l.trim().is_empty()).unwrap_or(true) {
@@ -672,8 +696,10 @@ fn rewrite_ini(original: &str, managed: &[(String, String, IniEntry)]) -> String
         match (existing, entry) {
             (Some(i), IniEntry::Set(value)) => lines[i] = format!("{key} = {value}"),
             (Some(i), IniEntry::Unset) => lines[i] = format!(";{}", lines[i]),
-            (None, IniEntry::Set(value)) => insert_line(&mut lines, format!("{key} = {value}")),
-            (None, IniEntry::Unset) => {}
+            (None, IniEntry::Set(value) | IniEntry::Default(value)) => {
+                insert_line(&mut lines, format!("{key} = {value}"))
+            }
+            (None, IniEntry::Unset) | (Some(_), IniEntry::Default(_)) => {}
             (_, IniEntry::EnsureLine(value)) => {
                 let present = (start + 1..section_end).any(|i| {
                     fs_util::ini_key_value(&lines[i])
@@ -692,6 +718,11 @@ fn rewrite_ini(original: &str, managed: &[(String, String, IniEntry)]) -> String
         out.push_str(newline);
     }
     out
+}
+
+fn section_header(line: &str) -> Option<&str> {
+    let rest = line.trim().strip_prefix('[')?;
+    Some(rest[..rest.find(']')?].trim())
 }
 
 fn screen_size() -> Option<(i32, i32)> {
@@ -825,14 +856,18 @@ pub async fn prepare_and_spawn(
                 UPDATE_LOCK.lock().await
             }
         };
-        ensure_variant(app, root, &variant, |package, percent| {
-            log::debug!("xxmi: {package} {percent:.0}%");
-        })
-        .await?;
-        let verify_root = root.to_path_buf();
-        tauri::async_runtime::spawn_blocking(move || verify_integrity(&verify_root))
-            .await
-            .map_err(|e| format!("Could not check the mod tools: {e}"))??
+        let progress = |package: &str, percent: f64| log::debug!("xxmi: {package} {percent:.0}%");
+        ensure_variant(app, root, &variant, progress).await?;
+        match verify_off_thread(root).await? {
+            Ok(integrity) => integrity,
+            Err(IntegrityError::Mismatch(name)) => {
+                log::warn!("xxmi: {name} does not match its recorded checksum, so the mod tools are reinstalled");
+                forget_version(root, CORE_KEY)?;
+                ensure_variant(app, root, &variant, progress).await?;
+                verify_off_thread(root).await?.map_err(IntegrityError::message)?
+            }
+            Err(error) => return Err(error.message()),
+        }
     };
 
     let state = app.try_state::<super::BackendState>();
@@ -848,6 +883,7 @@ pub async fn prepare_and_spawn(
         .unwrap_or_else(|| DEFAULT_RELOAD_KEY.to_string());
 
     let dir = variant_dir(root, &variant);
+    run_update_commands(&xcmd_path(&dir), "PreLaunch", &dir);
     apply_managed_ini(
         &dir,
         &IniOptions {
@@ -860,7 +896,20 @@ pub async fn prepare_and_spawn(
         &overrides,
     )?;
 
-    park_rogue_config_files(&mods_dir(root, &variant), ROGUE_SCAN_DEPTH);
+    let tidied = {
+        let (mods, rules) = (
+            mods_dir(root, &variant),
+            super::mod_optimizer::Rules::of(profile, &dir),
+        );
+        tauri::async_runtime::spawn_blocking(move || super::mod_optimizer::tidy(&mods, &rules))
+            .await
+            .unwrap_or_default()
+    };
+    if !tidied.is_empty() {
+        let message = tidied.summary(&variant);
+        log::info!("xxmi: {message}");
+        let _ = app.emit("mods-notice", json!({ "gameId": profile_id, "kind": "tidied", "message": message }));
+    }
 
     let host = fs_util::resource(app, EXE_NAME).ok_or_else(|| {
         "The mod loader is missing from this Peebify install. Reinstall Peebify to restore it."
@@ -1091,6 +1140,7 @@ pub enum Kind {
     Bool,
     Millis { min: u32, max: u32 },
     Key,
+    Choice(&'static [(&'static str, &'static str)]),
 }
 
 pub struct IniSetting {
@@ -1138,6 +1188,61 @@ pub const SETTINGS: &[IniSetting] = &[
         shipped: "0",
         mirrors: &[],
     },
+    IniSetting {
+        id: "toggleInput",
+        section: "Input",
+        key: "toggle_input",
+        label: "Turn mod hotkeys on or off",
+        description:
+            "The mod loader's own shortcut for switching mod hotkeys off when they clash with the game's keys, and back on.",
+        kind: Kind::Key,
+        shipped: DEFAULT_TOGGLE_INPUT,
+        mirrors: &[],
+    },
+    IniSetting {
+        id: "inputOnStart",
+        section: "Input",
+        key: "input",
+        label: "Mod hotkeys on at start",
+        description:
+            "Whether mod hotkeys work as soon as the game starts. Turn this off if they clash with the game's keys, then use the toggle shortcut to switch them on.",
+        kind: Kind::Bool,
+        shipped: "1",
+        mirrors: &[],
+    },
+    IniSetting {
+        id: "inputDisableMode",
+        section: "Input",
+        key: "input_disable_mode",
+        label: "When mod hotkeys are off",
+        description:
+            "What the toggle shortcut switches off: only the keys mods define, or every mod loader key except the toggle itself.",
+        kind: Kind::Choice(&[("mods", "Mod keys"), ("all", "All loader keys")]),
+        shipped: "mods",
+        mirrors: &[],
+    },
+    IniSetting {
+        id: "clearUnknown",
+        section: "System",
+        key: "clear_unknown_settings",
+        label: "Forget settings of removed mods",
+        description:
+            "Lets the mod loader drop the saved toggles of mods you removed, on the second reload after they are gone, so d3dx_user.ini stops growing.",
+        kind: Kind::Bool,
+        shipped: "1",
+        mirrors: &[],
+    },
+    IniSetting {
+        id: "logLevel",
+        section: "Logging",
+        key: "log_level",
+        label: "Mod loader log",
+        description:
+            "How much the mod loader writes to its own log in the mod tools folder. Leave it off unless you are tracking down a problem.",
+        kind: Kind::Choice(&[("disabled", "Off"), ("warning", "Warnings"), ("info", "Info"), ("debug", "Debug")]),
+        shipped: "disabled",
+        mirrors: &[],
+    },
 ];
 
 fn setting(id: &str) -> Option<&'static IniSetting> {
@@ -1157,8 +1262,16 @@ pub fn validate(spec: &IniSetting, raw: &str) -> Result<String, &'static str> {
             .map(|n| n.clamp(min, max).to_string())
             .map_err(|_| "That setting is a whole number of milliseconds."),
         Kind::Key => accelerator_to_ini(raw).ok_or(
-            "The mod loader only takes Ctrl, Alt and Shift with a function key or a single letter.",
+            "The mod loader only takes Ctrl, Alt and Shift with a function key, a letter, a digit or a key like End.",
         ),
+        Kind::Choice(options) => {
+            let wanted = raw.trim().to_ascii_lowercase();
+            options
+                .iter()
+                .find(|(value, _)| *value == wanted)
+                .map(|(value, _)| value.to_string())
+                .ok_or("That is not one of this setting's choices.")
+        }
     }
 }
 
@@ -1196,6 +1309,23 @@ pub fn sanitize_stored(
 
 const KEY_MODIFIERS: [(&str, &str); 3] = [("ctrl", "Ctrl"), ("alt", "Alt"), ("shift", "Shift")];
 
+const NAMED_KEYS: [(&str, &str); 14] = [
+    ("Space", "VK_SPACE"),
+    ("Tab", "VK_TAB"),
+    ("Insert", "VK_INSERT"),
+    ("Delete", "VK_DELETE"),
+    ("Home", "VK_HOME"),
+    ("End", "VK_END"),
+    ("PageUp", "VK_PRIOR"),
+    ("PageDown", "VK_NEXT"),
+    ("ArrowUp", "VK_UP"),
+    ("ArrowDown", "VK_DOWN"),
+    ("ArrowLeft", "VK_LEFT"),
+    ("ArrowRight", "VK_RIGHT"),
+    ("Enter", "VK_RETURN"),
+    ("Backspace", "VK_BACK"),
+];
+
 pub fn accelerator_to_ini(text: &str) -> Option<String> {
     let parts: Vec<&str> = text
         .split('+')
@@ -1223,6 +1353,8 @@ pub fn accelerator_to_ini(text: &str) -> Option<String> {
         format!("VK_{named}")
     } else if named.len() == 1 && named.chars().all(|c| c.is_ascii_alphanumeric()) {
         named
+    } else if let Some((_, code)) = NAMED_KEYS.iter().find(|(name, _)| name.eq_ignore_ascii_case(key)) {
+        code.to_string()
     } else {
         return None;
     };
@@ -1239,10 +1371,13 @@ pub fn ini_to_accelerator(text: &str) -> String {
             Some((_, label)) => mods.push(label),
             None if lower == "no_modifiers" => {}
             None => {
-                key = token
-                    .trim_start_matches("VK_")
-                    .trim_start_matches("vk_")
-                    .to_string()
+                key = match NAMED_KEYS.iter().find(|(_, code)| code.eq_ignore_ascii_case(token)) {
+                    Some((name, _)) => name.to_string(),
+                    None => token
+                        .trim_start_matches("VK_")
+                        .trim_start_matches("vk_")
+                        .to_string(),
+                }
             }
         }
     }
@@ -1302,6 +1437,16 @@ pub(super) async fn mod_ini_settings(app: &AppHandle, args: &[Value]) -> Result<
                     Kind::Bool => "bool",
                     Kind::Millis { .. } => "millis",
                     Kind::Key => "key",
+                    Kind::Choice(_) => "choice",
+                },
+                "options": match s.kind {
+                    Kind::Choice(options) => Some(
+                        options
+                            .iter()
+                            .map(|(value, label)| json!({ "value": value, "label": label }))
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
                 },
                 "accelerator": matches!(s.kind, Kind::Key).then(|| ini_to_accelerator(&value)),
                 "defaultAccelerator": matches!(s.kind, Kind::Key)
@@ -1722,29 +1867,52 @@ fn record_integrity_locked(
     Ok(state.integrity.clone())
 }
 
-pub fn verify_integrity(root: &Path) -> Result<BTreeMap<String, String>, String> {
+#[derive(Debug)]
+pub enum IntegrityError {
+    Mismatch(String),
+    Unreadable(String),
+}
+
+impl IntegrityError {
+    pub fn message(self) -> String {
+        match self {
+            IntegrityError::Mismatch(name) => format!(
+                "{name} on disk still does not match the copy Peebify installed after a fresh install, so \
+                 mods will not be loaded. Security software may be changing it. Allow the mod tools folder \
+                 (shown under Mods > Setup) in it and launch again."
+            ),
+            IntegrityError::Unreadable(message) => message,
+        }
+    }
+}
+
+async fn verify_off_thread(root: &Path) -> Result<Result<BTreeMap<String, String>, IntegrityError>, String> {
+    let root = root.to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || verify_integrity(&root))
+        .await
+        .map_err(|e| format!("Could not check the mod tools: {e}"))
+}
+
+pub fn verify_integrity(root: &Path) -> Result<BTreeMap<String, String>, IntegrityError> {
     let _guard = STATE_LOCK.lock();
-    let mut state = load_state(root)?;
+    let mut state = load_state(root).map_err(IntegrityError::Unreadable)?;
     if state.integrity.is_empty() {
-        let recorded = record_integrity_locked(root, &mut state)?;
+        let recorded = record_integrity_locked(root, &mut state).map_err(IntegrityError::Unreadable)?;
         log::warn!("xxmi: no checksums were on record, so the mod tools on disk were recorded as trusted");
         return Ok(recorded);
     }
     let mut verified = BTreeMap::new();
     let mut added = false;
     for name in CORE_FILES {
-        let digest = file_sha256(&root.join(name))
-            .map_err(|e| format!("Could not read {name} before starting the mod loader: {e}"))?;
+        let digest = file_sha256(&root.join(name)).map_err(|e| {
+            IntegrityError::Unreadable(format!("Could not read {name} before starting the mod loader: {e}"))
+        })?;
         verified.insert(name.to_string(), digest.clone());
         match state.integrity.get(name) {
             Some(recorded) if *recorded == digest => {}
             Some(recorded) => {
                 log::error!("xxmi: {name} checksum mismatch, recorded {recorded}, found {digest}");
-                return Err(format!(
-                    "{name} on disk does not match the copy Peebify installed. Something else \
-                     changed it, so mods will not be loaded. Delete it from the mod tools folder \
-                     (shown under Mods > Setup) and launch again to get a fresh copy."
-                ));
+                return Err(IntegrityError::Mismatch(name.to_string()));
             }
             None => {
                 log::warn!("xxmi: {name} had no recorded checksum, so the copy on disk was recorded");
@@ -1754,7 +1922,7 @@ pub fn verify_integrity(root: &Path) -> Result<BTreeMap<String, String>, String>
         }
     }
     if added {
-        write_state(root, &state)?;
+        write_state(root, &state).map_err(IntegrityError::Unreadable)?;
     }
     Ok(verified)
 }
@@ -1833,13 +2001,27 @@ pub async fn install_package(
         .map_err(|e| format!("Could not create {}: {e}", destination.display()))?;
     let is_core = package == CORE_KEY;
     if !is_core {
+        let ini = destination.join("d3dx.ini");
+        if ini.is_file() {
+            if let Err(e) = std::fs::copy(&ini, destination.join(D3DX_BACKUP)) {
+                log::warn!("xxmi: could not back up {package}'s d3dx.ini before updating: {e}");
+            }
+        }
         run_update_commands(&xcmd_path(&source), "PreInstall", &destination);
     }
     {
         let (source, destination) = (source.clone(), destination.clone());
-        tauri::async_runtime::spawn_blocking(move || merge_dir(&source, &destination))
+        let merged = tauri::async_runtime::spawn_blocking(move || merge_dir(&source, &destination))
             .await
-            .map_err(|e| format!("Could not install the {package} package: {e}"))??;
+            .map_err(|e| format!("Could not install the {package} package: {e}"))
+            .and_then(|merged| merged);
+        if let Err(e) = merged {
+            if let Err(forget) = forget_version(root, package) {
+                log::warn!("xxmi: could not mark {package} for a reinstall: {forget}");
+            }
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
     }
     if !is_core {
         run_update_commands(&xcmd_path(&destination), "PostInstall", &destination);
@@ -1997,6 +2179,7 @@ async fn run_once(app: &AppHandle) -> Result<bool, String> {
             Ok(tag) => tag,
             Err(e) => {
                 log::warn!("xxmi: background install of {package} failed: {e}");
+                complete = false;
                 continue;
             }
         };
@@ -2185,22 +2368,6 @@ mod tests {
         assert!(variant.join("Core").join("keep.ini").exists());
         assert!(variant.join("d3dx.ini").exists());
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn stray_configs_inside_mods_are_parked() {
-        let dir = scratch("rogue");
-        let mods = dir.join("zzmi").join("Mods");
-        std::fs::create_dir_all(mods.join("Cool Mod").join("sub")).unwrap();
-        std::fs::write(mods.join("Cool Mod").join("mod.ini"), "[TextureOverride]").unwrap();
-        std::fs::write(mods.join("Cool Mod").join("sub").join("d3dx.ini"), "[Loader]").unwrap();
-        std::fs::create_dir_all(mods.join("DISABLED Old")).unwrap();
-        std::fs::write(mods.join("DISABLED Old").join("d3dx.ini"), "[Loader]").unwrap();
-        assert_eq!(park_rogue_config_files(&mods, ROGUE_SCAN_DEPTH), 1);
-        assert!(mods.join("Cool Mod").join("sub").join("DISABLED d3dx.ini").exists());
-        assert!(mods.join("Cool Mod").join("mod.ini").exists());
-        assert!(mods.join("DISABLED Old").join("d3dx.ini").exists());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2469,5 +2636,96 @@ mod tests {
         let sig = "MGYCMQDDJeBNaUthhNxgQeHTZNF4sG7Su4LXw0kifkTE8koTy6FVoxfhqaoM/6hBb3w8WKkCMQCnUcUcckgCdy2g8pz2+l4e/7TxTgleQHEVReI660bVqm80AnqFfR5WXQwikLYG03Y=";
         assert!(verify_with_key("xxmi", key, b"peebify-xxmi-kat", sig).is_ok());
         assert!(verify_with_key("xxmi", key, b"peebify-xxmi-kaT", sig).is_err());
+    }
+
+    #[test]
+    fn named_keys_round_trip_through_the_loader_format() {
+        assert_eq!(
+            accelerator_to_ini("Ctrl+Alt+Shift+End").as_deref(),
+            Some("ctrl alt shift VK_END")
+        );
+        assert_eq!(accelerator_to_ini("Ctrl+PageUp").as_deref(), Some("ctrl VK_PRIOR"));
+        assert_eq!(ini_to_accelerator(DEFAULT_TOGGLE_INPUT), "Ctrl+Alt+Shift+End");
+        assert_eq!(ini_to_accelerator("no_modifiers VK_F10"), "F10");
+        assert_eq!(accelerator_to_ini("Win+End"), None);
+        assert_eq!(accelerator_to_ini("Ctrl+NumLock"), None);
+    }
+
+    #[test]
+    fn choice_settings_only_take_their_options() {
+        let spec = setting("logLevel").unwrap();
+        assert_eq!(validate(spec, " Debug ").unwrap(), "debug");
+        assert!(validate(spec, "loud").is_err());
+        let stored = sanitize_stored("Input/input_disable_mode", &Value::String("ALL".into()));
+        assert_eq!(stored, Some(("Input", "input_disable_mode", "all".to_string())));
+    }
+
+    #[test]
+    fn default_entries_never_replace_an_existing_value() {
+        let original = "[Input] ; keys\ntoggle_input = no_modifiers VK_F9\n";
+        let managed = vec![
+            ("Input".to_string(), "toggle_input".to_string(), IniEntry::Default(DEFAULT_TOGGLE_INPUT.into())),
+            ("Input".to_string(), "input".to_string(), IniEntry::Set("1".into())),
+        ];
+        assert_eq!(
+            rewrite_ini(original, &managed),
+            "[Input] ; keys\ntoggle_input = no_modifiers VK_F9\ninput = 1\n"
+        );
+        let added = rewrite_ini("[Loader]\n", &managed[..1]);
+        assert_eq!(added, format!("[Loader]\n\n[Input]\ntoggle_input = {DEFAULT_TOGGLE_INPUT}\n"));
+    }
+
+    #[test]
+    fn new_loader_defaults_are_written_and_user_choices_win() {
+        let dir = scratch("loader-defaults");
+        let variant = dir.join("zzmi");
+        apply_managed_ini(
+            &variant,
+            &IniOptions {
+                target: "Game.exe".into(),
+                hunting_mode: HUNTING_KEYBINDS_ONLY,
+                reload_key: DEFAULT_RELOAD_KEY.into(),
+                defaults: Vec::new(),
+                screen: None,
+            },
+            &[("Logging".into(), "log_level".into(), "debug".into())],
+        )
+        .unwrap();
+        let out = std::fs::read_to_string(variant.join("d3dx.ini")).unwrap();
+        assert!(out.contains("clear_unknown_settings = 1"), "{out}");
+        assert!(out.contains("input_disable_mode = mods"), "{out}");
+        assert!(out.contains(&format!("toggle_input = {DEFAULT_TOGGLE_INPUT}")), "{out}");
+        assert!(out.contains("log_level = debug"), "{out}");
+        assert!(!out.contains("log_level = disabled"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prelaunch_commands_clear_stale_shader_files() {
+        let dir = scratch("prelaunch");
+        let variant = dir.join("zzmi");
+        std::fs::create_dir_all(variant.join("Core")).unwrap();
+        std::fs::create_dir_all(variant.join("ShaderFixes")).unwrap();
+        std::fs::write(variant.join("ShaderFixes").join("old-vs_replace.bin"), b"x").unwrap();
+        std::fs::write(
+            xcmd_path(&variant),
+            "[PreInstall]\n[PreLaunch]\ndelete = ShaderFixes\\old-vs_replace.bin\n",
+        )
+        .unwrap();
+        assert_eq!(run_update_commands(&xcmd_path(&variant), "PreLaunch", &variant), 1);
+        assert!(!variant.join("ShaderFixes").join("old-vs_replace.bin").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_install_drops_the_version_so_it_is_reinstalled() {
+        let dir = scratch("forget");
+        record_version(&dir, CORE_KEY, "v1.2.2").unwrap();
+        record_version(&dir, "zzmi", "v2.0").unwrap();
+        forget_version(&dir, CORE_KEY).unwrap();
+        let versions = installed_versions(&dir);
+        assert!(!versions.contains_key(CORE_KEY));
+        assert_eq!(versions.get("zzmi").map(String::as_str), Some("v2.0"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

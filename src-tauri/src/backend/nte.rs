@@ -29,9 +29,12 @@ const BASE_TAG: &str = "baseTag";
 const LAUNCHER_DIR: &str = "NTEGlobal";
 const MAX_LIST_BYTES: u64 = 64 * 1024 * 1024;
 
+const MAX_BRANCH_HOPS: usize = 3;
+
 pub struct Config {
     pub res_version: String,
     pub list_hash: String,
+    pub bases: Vec<String>,
 }
 
 pub fn tag_language(tag: &str) -> Option<&'static str> {
@@ -44,7 +47,7 @@ pub fn tag_language(tag: &str) -> Option<&'static str> {
     }
 }
 
-pub fn res_bases(profile: &Value) -> Vec<String> {
+fn res_roots(profile: &Value) -> Vec<String> {
     profile
         .get("nteResUrls")
         .and_then(Value::as_array)
@@ -52,10 +55,14 @@ pub fn res_bases(profile: &Value) -> Vec<String> {
             urls.iter()
                 .filter_map(|u| u.as_str())
                 .filter(|u| !u.is_empty())
-                .map(|u| format!("{}/{}", u.trim_end_matches('/'), branch(profile)))
+                .map(|u| u.trim_end_matches('/').to_string())
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn bases_of(roots: &[String], branch: &str) -> Vec<String> {
+    roots.iter().map(|root| format!("{root}/{branch}")).collect()
 }
 
 fn branch(profile: &Value) -> &str {
@@ -133,21 +140,56 @@ fn md5_bytes(text: &str, owner: &str) -> Result<[u8; 16], String> {
     Ok(md5)
 }
 
+#[derive(Debug, PartialEq)]
+struct Redirect {
+    branch: String,
+    roots: Vec<String>,
+}
+
+#[derive(Debug, PartialEq)]
+struct Feed {
+    res_version: Option<String>,
+    list_hash: Option<String>,
+    redirect: Option<Redirect>,
+}
+
 pub async fn fetch_config(profile: &Value) -> Result<Config, String> {
-    let bases = res_bases(profile);
-    if bases.is_empty() {
+    let mut roots = res_roots(profile);
+    if roots.is_empty() {
         return Err("no nteResUrls for profile".to_string());
     }
+    let mut branch = branch(profile).to_string();
+    let mut visited = vec![branch.clone()];
+    for _ in 0..=MAX_BRANCH_HOPS {
+        let bases = bases_of(&roots, &branch);
+        let feed = read_feed(&bases).await?;
+        match feed.redirect.filter(|r| !visited.contains(&r.branch)) {
+            Some(next) => {
+                log::info!("nte: the {branch} feed points at branch {}", next.branch);
+                branch = next.branch;
+                visited.push(branch.clone());
+                if !next.roots.is_empty() {
+                    roots = next.roots;
+                }
+            }
+            None => {
+                return Ok(Config {
+                    res_version: feed.res_version.ok_or("NTE config.xml has no ResVersion")?,
+                    list_hash: feed.list_hash.ok_or("NTE config.xml has no listHash")?,
+                    bases,
+                })
+            }
+        }
+    }
+    Err("The NTE version feed points from branch to branch without end".to_string())
+}
 
+async fn read_feed(bases: &[String]) -> Result<Feed, String> {
     let mut last = String::new();
-    for base in &bases {
+    for base in bases {
         let url = format!("{base}/Version/Windows/config.xml");
-        let outcome = match http::get_text(&url).await {
-            Ok(xml) => parse_config(&xml),
-            Err(e) => Err(e),
-        };
-        match outcome {
-            Ok(config) => return Ok(config),
+        match http::get_text(&url).await {
+            Ok(xml) => return Ok(parse_config(&xml)),
             Err(e) => {
                 log::warn!("nte: version feed {url} failed: {e}");
                 last = e;
@@ -157,19 +199,33 @@ pub async fn fetch_config(profile: &Value) -> Result<Config, String> {
     Err(format!("Could not read the NTE version feed: {last}"))
 }
 
-fn parse_config(xml: &str) -> Result<Config, String> {
-    let res_version = xml_value(xml, "ResVersion")
-        .filter(|v| !v.is_empty())
-        .ok_or("NTE config.xml has no ResVersion")?
+fn parse_config(xml: &str) -> Feed {
+    Feed {
+        res_version: xml_value(xml, "ResVersion").filter(|v| !v.is_empty()).map(str::to_string),
+        list_hash: xml_value(xml, "listHash").filter(|v| v.len() == 32).map(str::to_lowercase),
+        redirect: xml_value(xml, "ResConfig").and_then(parse_redirect),
+    }
+}
+
+fn parse_redirect(encoded: &str) -> Option<Redirect> {
+    use base64::Engine;
+    let raw = base64::engine::general_purpose::STANDARD.decode(encoded.trim()).ok()?;
+    let config: Value = serde_json::from_slice(&raw).ok()?;
+    let branch = config["branchName"]
+        .as_str()
+        .filter(|b| !b.is_empty() && b.len() <= 64 && b.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'))?
         .to_string();
-    let list_hash = xml_value(xml, "listHash")
-        .filter(|v| v.len() == 32)
-        .ok_or("NTE config.xml has no listHash")?
-        .to_lowercase();
-    Ok(Config {
-        res_version,
-        list_hash,
-    })
+    let roots = config["gameResUrl"]
+        .as_array()
+        .map(|urls| {
+            urls.iter()
+                .filter_map(Value::as_str)
+                .filter(|u| u.starts_with("https://"))
+                .map(|u| u.trim_end_matches('/').to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Redirect { branch, roots })
 }
 
 // ------------ Resource List ------------
@@ -236,7 +292,7 @@ fn cached_reslist(key: &str) -> Option<Arc<ResList>> {
 }
 
 pub async fn fetch_reslist(profile: &Value, config: &Config) -> Result<Arc<ResList>, String> {
-    let bases = res_bases(profile);
+    let bases = &config.bases;
     let first = bases.first().ok_or("no nteResUrls for profile")?;
     let key = format!("{}@{first}", config.list_hash);
     if let Some(list) = cached_reslist(&key) {
@@ -246,7 +302,7 @@ pub async fn fetch_reslist(profile: &Value, config: &Config) -> Result<Arc<ResLi
     if let Some(list) = cached_reslist(&key) {
         return Ok(list);
     }
-    let list = Arc::new(download_reslist(profile, config, &bases).await?);
+    let list = Arc::new(download_reslist(profile, config, bases).await?);
     *RESLIST_CACHE.lock() = Some((key, Arc::clone(&list)));
     Ok(list)
 }
@@ -503,7 +559,7 @@ pub fn parse_launcher_manifest(xml: &str) -> Result<Vec<Entry>, String> {
         .map(|(path, size, md5, zip_size, zip_md5)| Entry {
             path: format!("{LAUNCHER_DIR}/{path}").into(),
             size,
-            hash: Hash::Md5(md5),
+            hash: if size == 0 { Hash::None } else { Hash::Md5(md5) },
             source: Source::Zip { url: format!("{base}/{version}/{path}.zip").into(), size: zip_size, hash: Hash::Md5(zip_md5) },
             live: true,
         })
@@ -585,7 +641,7 @@ impl Publisher for Nte {
                 JobKind::Install => selected,
                 JobKind::Repair | JobKind::Verify => installed_groups(cx.dir).await.or(selected),
             };
-            Ok(manifest_of(config.res_version, res_bases(cx.profile), &list, launcher, picked.as_deref()))
+            Ok(manifest_of(config.res_version, config.bases, &list, launcher, picked.as_deref()))
         })
     }
 
@@ -795,12 +851,15 @@ mod tests {
     fn the_launcher_feed_lists_one_zip_per_runtime_file() {
         let xml = format!(
             r#"<Manifest><Url BaseUrl="https://dl.example/launcher/"/><ProductVersion Version="2.1"/>
-            <File Path="bin\cef.dll" Size="9" Checksum="{MD5_A}" ZipSize="4" ZipChecksum="{MD5_B}"/></Manifest>"#
+            <File Path="bin\cef.dll" Size="9" Checksum="{MD5_A}" ZipSize="4" ZipChecksum="{MD5_B}"/>
+            <File Path="qml/Flat/plugins.qmltypes" Size="0" Checksum="{MD5_A}" ZipSize="158" ZipChecksum="{MD5_B}"/></Manifest>"#
         );
         let files = parse_launcher_manifest(&xml).unwrap();
         assert_eq!(&*files[0].path, "NTEGlobal/bin/cef.dll");
         assert_eq!(files[0].url(), "https://dl.example/launcher/2.1/bin/cef.dll.zip");
         assert_eq!((files[0].size, files[0].fetch_size()), (9, 4));
+        assert_eq!(files[0].hash, Hash::Md5(md5_bytes(MD5_A, "test").unwrap()));
+        assert_eq!(files[1].hash, Hash::None, "an empty runtime file is checked by size, its listed checksum is wrong");
         assert!(parse_launcher_manifest("<Manifest/>").is_err());
     }
 
@@ -812,5 +871,60 @@ mod tests {
         .unwrap();
         assert_eq!(decode_container(&raw, &[0x11; 16]).unwrap(), b"<ResourceList kat='1'/>".to_vec());
         assert!(decode_container(&raw, &[0x12; 16]).is_err());
+    }
+
+    fn encoded(json: &str) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(json)
+    }
+
+    #[test]
+    fn an_old_branch_points_at_the_one_now_published() {
+        let config = encoded(
+            r#"{"appVersion":"0.0","gameResUrl":["https://ntecdn1.perfectworld.com/clientRes","https://ntecdn2.perfectworld.com/clientRes/"],"branchName":"PC_140","appId":"3000001"}"#,
+        );
+        let xml = format!(
+            "<config><ResVersion>1.3.10</ResVersion><ResConfig>{config}</ResConfig><Extra><listHash>{MD5_A}</listHash></Extra></config>"
+        );
+        let feed = parse_config(&xml);
+        assert_eq!(feed.res_version.as_deref(), Some("1.3.10"));
+        assert_eq!(feed.list_hash.as_deref(), Some(MD5_A));
+        assert_eq!(
+            feed.redirect,
+            Some(Redirect {
+                branch: "PC_140".into(),
+                roots: vec![
+                    "https://ntecdn1.perfectworld.com/clientRes".into(),
+                    "https://ntecdn2.perfectworld.com/clientRes".into()
+                ],
+            })
+        );
+        assert_eq!(
+            bases_of(&feed.redirect.unwrap().roots, "PC_140"),
+            vec![
+                "https://ntecdn1.perfectworld.com/clientRes/PC_140".to_string(),
+                "https://ntecdn2.perfectworld.com/clientRes/PC_140".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn the_published_branch_has_no_redirect_and_bad_ones_are_ignored() {
+        let feed = parse_config(&format!("<config><ResVersion>1.4.5</ResVersion><listHash>{MD5_B}</listHash></config>"));
+        assert_eq!(
+            feed,
+            Feed { res_version: Some("1.4.5".into()), list_hash: Some(MD5_B.into()), redirect: None }
+        );
+        for json in [
+            r#"{"branchName":"../../etc"}"#,
+            r#"{"branchName":""}"#,
+            r#"{"gameResUrl":["https://x.example"]}"#,
+        ] {
+            assert_eq!(parse_redirect(&encoded(json)), None, "{json}");
+        }
+        assert_eq!(parse_redirect("not base64!"), None);
+        let insecure = parse_redirect(&encoded(r#"{"branchName":"PC_150","gameResUrl":["http://x.example/clientRes"]}"#)).unwrap();
+        assert!(insecure.roots.is_empty(), "only https roots are taken");
+        assert_eq!(parse_config("<config/>"), Feed { res_version: None, list_hash: None, redirect: None });
     }
 }

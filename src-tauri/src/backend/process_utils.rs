@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use peebify_helpers::common::{process::list_processes, wide};
-use peebify_helpers::fps::cmdline::quote_always;
+use peebify_helpers::common::cmdline::quote_always;
 use tokio::process::{Child, Command};
 
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -141,15 +141,7 @@ pub async fn launch_game_via_shell(
     args: &[String],
     cwd: Option<&Path>,
 ) -> Result<(), SpawnError> {
-    shell_start(executable_path, args, cwd, false).await
-}
-
-pub async fn launch_game_minimized(
-    executable_path: &Path,
-    args: &[String],
-    cwd: Option<&Path>,
-) -> Result<(), SpawnError> {
-    shell_start(executable_path, args, cwd, true).await
+    shell_start(executable_path, args, cwd).await
 }
 
 const ERROR_CANCELLED: u32 = 1223;
@@ -158,7 +150,6 @@ async fn shell_start(
     executable_path: &Path,
     args: &[String],
     cwd: Option<&Path>,
-    minimized: bool,
 ) -> Result<(), SpawnError> {
     let failed = |message: String| SpawnError {
         declined: false,
@@ -176,7 +167,7 @@ async fn shell_start(
         .join(" ");
     let file = executable_path.to_path_buf();
     let started = tauri::async_runtime::spawn_blocking(move || {
-        shell_execute(&file, &parameters, &working_dir, minimized)
+        shell_execute(&file, &parameters, &working_dir)
     })
     .await
     .map_err(|e| failed(e.to_string()))?;
@@ -195,14 +186,13 @@ fn shell_execute(
     executable_path: &Path,
     parameters: &str,
     working_dir: &Path,
-    minimized: bool,
 ) -> Result<(), u32> {
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::UI::Shell::{
         ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOZONECHECKS,
         SHELLEXECUTEINFOW,
     };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_SHOWMINNOACTIVE, SW_SHOWNORMAL};
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
     let file = wide_path(executable_path);
     let params = wide(parameters);
@@ -214,11 +204,7 @@ fn shell_execute(
     info.lpFile = file.as_ptr();
     info.lpParameters = params.as_ptr();
     info.lpDirectory = dir.as_ptr();
-    info.nShow = if minimized {
-        SW_SHOWMINNOACTIVE
-    } else {
-        SW_SHOWNORMAL
-    };
+    info.nShow = SW_SHOWNORMAL;
 
     if unsafe { ShellExecuteExW(&mut info) } == 0 {
         return Err(unsafe { GetLastError() });
@@ -466,7 +452,7 @@ pub fn spawn_tool_elevated_handle(
 
     let line = args
         .iter()
-        .map(|arg| peebify_helpers::fps::cmdline::quote_argument(arg))
+        .map(|arg| peebify_helpers::common::cmdline::quote_argument(arg))
         .collect::<Vec<_>>()
         .join(" ");
 
@@ -489,7 +475,7 @@ pub fn spawn_tool_elevated_handle(
         let code = unsafe { GetLastError() };
         return Err(SpawnError {
             declined: code == ERROR_CANCELLED,
-            message: peebify_helpers::fps::cmdline::describe_start_error(code)
+            message: peebify_helpers::common::cmdline::describe_start_error(code)
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("ShellExecuteExW failed with error {code}")),
         });
@@ -500,7 +486,7 @@ pub fn spawn_tool_elevated_handle(
 #[cfg(test)]
 mod tests {
     use super::{image_is_under, rewrite_subst};
-    use peebify_helpers::fps::cmdline::quote_always;
+    use peebify_helpers::common::cmdline::quote_always;
 
     #[cfg(windows)]
     #[test]
@@ -577,156 +563,3 @@ mod tests {
     }
 }
 
-pub mod front_end {
-    use std::collections::HashSet;
-    use std::time::{Duration, Instant};
-
-    use peebify_helpers::common::process::visible_windows_of;
-    use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IsWindow, IsWindowVisible, ShowWindow, SW_HIDE, SW_RESTORE,
-    };
-
-    const SWEEP_INTERVAL: Duration = Duration::from_millis(100);
-    const SWEEP_LIMIT: Duration = Duration::from_secs(60);
-    const CLIENT_TAIL: Duration = Duration::from_secs(5);
-
-    #[derive(Debug, PartialEq, Eq)]
-    enum Step {
-        Continue,
-        Finish,
-        Reveal,
-    }
-
-    fn next_step(elapsed: Duration, client_seen_for: Option<Duration>) -> Step {
-        match client_seen_for {
-            Some(seen) if seen >= CLIENT_TAIL => Step::Finish,
-            Some(_) => Step::Continue,
-            None if elapsed >= SWEEP_LIMIT => Step::Reveal,
-            None => Step::Continue,
-        }
-    }
-
-    fn front_end_pids(
-        processes: &[(String, u32, u32)],
-        front_end: &HashSet<String>,
-    ) -> HashSet<u32> {
-        processes
-            .iter()
-            .filter(|(name, _, _)| front_end.contains(name))
-            .map(|(_, pid, _)| *pid)
-            .collect()
-    }
-
-    fn hide_windows(pids: &HashSet<u32>, hidden: &mut Vec<HWND>) {
-        for hwnd in pids.iter().flat_map(|&pid| visible_windows_of(pid)) {
-            unsafe { ShowWindow(hwnd, SW_HIDE) };
-            if !hidden.contains(&hwnd) {
-                hidden.push(hwnd);
-            }
-        }
-    }
-
-    fn reveal_windows(hidden: &[HWND]) -> usize {
-        let mut revealed = 0;
-        for &hwnd in hidden {
-            unsafe {
-                if IsWindow(hwnd) != 0 && IsWindowVisible(hwnd) == 0 {
-                    ShowWindow(hwnd, SW_RESTORE);
-                    revealed += 1;
-                }
-            }
-        }
-        revealed
-    }
-
-    pub fn conceal_until_client(front_end: Vec<String>, client: String) {
-        if front_end.is_empty() {
-            return;
-        }
-        let front_end: HashSet<String> = front_end.iter().map(|n| n.to_lowercase()).collect();
-        let client = client.to_lowercase();
-        tauri::async_runtime::spawn_blocking(move || {
-            let started = Instant::now();
-            let mut client_seen: Option<Instant> = None;
-            let mut hidden: Vec<HWND> = Vec::new();
-            loop {
-                let processes = super::snapshot_with_parents();
-                if client_seen.is_none() && processes.iter().any(|(name, _, _)| *name == client) {
-                    client_seen = Some(Instant::now());
-                }
-                hide_windows(&front_end_pids(&processes, &front_end), &mut hidden);
-                match next_step(started.elapsed(), client_seen.map(|at| at.elapsed())) {
-                    Step::Continue => std::thread::sleep(SWEEP_INTERVAL),
-                    Step::Finish => {
-                        log::info!(
-                            "front end: kept {} official launcher window(s) hidden until {client} started",
-                            hidden.len()
-                        );
-                        break;
-                    }
-                    Step::Reveal => {
-                        let revealed = reveal_windows(&hidden);
-                        log::warn!(
-                            "front end: {client} did not start within {}s, so {revealed} hidden official launcher window(s) were shown again",
-                            SWEEP_LIMIT.as_secs()
-                        );
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn sweep_continues_until_the_client_has_run_for_the_tail() {
-            assert_eq!(next_step(Duration::ZERO, None), Step::Continue);
-            assert_eq!(
-                next_step(Duration::from_secs(20), Some(Duration::from_secs(1))),
-                Step::Continue
-            );
-            assert_eq!(
-                next_step(Duration::from_secs(20), Some(CLIENT_TAIL)),
-                Step::Finish
-            );
-        }
-
-        #[test]
-        fn sweep_reveals_when_the_client_never_starts() {
-            assert_eq!(
-                next_step(SWEEP_LIMIT - Duration::from_millis(1), None),
-                Step::Continue
-            );
-            assert_eq!(next_step(SWEEP_LIMIT, None), Step::Reveal);
-        }
-
-        #[test]
-        fn late_client_still_gets_its_tail_past_the_limit() {
-            assert_eq!(
-                next_step(SWEEP_LIMIT + Duration::from_secs(1), Some(Duration::from_secs(2))),
-                Step::Continue
-            );
-        }
-
-        #[test]
-        fn front_end_pids_match_every_instance_by_name() {
-            let front_end: HashSet<String> = ["NTEGlobalGame.exe", "NTEGlobalBrowser.exe"]
-                .iter()
-                .map(|n| n.to_lowercase())
-                .collect();
-            let processes = vec![
-                ("nteglobalgame.exe".to_string(), 10, 1),
-                ("nteglobalupdate.exe".to_string(), 11, 10),
-                ("nteglobalbrowser.exe".to_string(), 12, 10),
-                ("nteglobalbrowser.exe".to_string(), 13, 10),
-                ("htgame.exe".to_string(), 14, 10),
-            ];
-            let pids = front_end_pids(&processes, &front_end);
-            assert_eq!(pids, HashSet::from([10, 12, 13]));
-        }
-    }
-}

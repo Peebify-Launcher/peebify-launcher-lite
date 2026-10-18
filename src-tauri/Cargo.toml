@@ -1,6 +1,6 @@
 [package]
 name = "peebify-launcher"
-version = "5.1.1"
+version = "5.1.2"
 description = "Peebify Launcher (Tauri 2, Rust-native backend)"
 authors = ["Peebify"]
 license = "GPL-3.0-only"
@@ -111,6 +111,7 @@ windows = { version = "0.62", features = [
 ] }
 tauri-winrt-notification = "0.8"
 winreg = "0.56"
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 
 [dev-dependencies]
 crc32fast = "1"

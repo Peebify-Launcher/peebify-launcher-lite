@@ -30,6 +30,7 @@ import {
   onGameLaunchFailed,
   getRunningGameIds,
   onModsLoadFailed,
+  onModsNotice,
   onModProgress,
   downloadState,
   onQueueState,
@@ -373,6 +374,13 @@ export default function App() {
             ? t("app.modsLoadFailed.text", { game: game.name, error })
             : t("app.modsLoadFailed.textUnknown", { error })
           ).trim(),
+      });
+    }).then(keep);
+    void onModsNotice((kind, message) => {
+      useNotificationStore.getState().push({
+        type: kind === "settings" ? "warning" : "info",
+        title: t(kind === "settings" ? "app.modsNotice.settingsTitle" : "app.modsNotice.tidiedTitle"),
+        text: message,
       });
     }).then(keep);
     void onEvent("custom-launcher-missing", (p) => {

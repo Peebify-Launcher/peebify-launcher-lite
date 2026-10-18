@@ -276,11 +276,7 @@ const JobCard = memo(
     ]
       .filter(Boolean)
       .join(" · ");
-    const tone = job.parked
-      ? "text-white/55"
-      : idle
-        ? "text-warning/95"
-        : "text-(--accent-text)";
+    const tone = job.parked ? "text-white/55" : "text-(--accent-text)";
     const label =
       job.parked && waitingFor ? t("downloads.job.waitingFor", { game: waitingFor }) : phaseLabel(job);
 

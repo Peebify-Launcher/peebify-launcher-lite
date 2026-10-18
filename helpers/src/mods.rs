@@ -14,6 +14,8 @@ pub const EXIT_DLL_EXPORTS: i32 = 4;
 pub const EXIT_MODULE_CHECK: i32 = 5;
 pub const EXIT_ALREADY_RUNNING: i32 = 10;
 pub const EXIT_HOOK_FAILED: i32 = 11;
+pub const EXIT_HOOK_MODULE_LOAD: i32 = 12;
+pub const EXIT_HOOK_FOREIGN_MODULE: i32 = 13;
 pub const EXIT_TARGET_TIMEOUT: i32 = 20;
 pub const EXIT_STOPPED: i32 = 21;
 pub const EXIT_NOT_MAPPED: i32 = 22;
@@ -56,12 +58,35 @@ pub fn describe_exit(code: i32) -> String {
         EXIT_MODULE_CHECK => "the mod library is missing or was changed after Peebify checked it. Security software may be interfering. Launch the game again and Peebify puts a fresh copy back.".to_string(),
         EXIT_ALREADY_RUNNING => "another mod loader is already running. Close the other game or loader first.".to_string(),
         EXIT_HOOK_FAILED => "Windows refused to install the mod hook. The loader log has the detail.".to_string(),
+        EXIT_HOOK_MODULE_LOAD => "the mod library (d3d11.dll) could not be loaded to set up the hook. Security software may have blocked it. Delete it from the mod tools folder (shown under Mods > Setup) and launch again to get a fresh copy.".to_string(),
+        EXIT_HOOK_FOREIGN_MODULE => "the d3d11.dll in the mod tools folder is not a 3DMigoto build, so it cannot be hooked. Delete it from the mod tools folder (shown under Mods > Setup) and launch again to get a fresh copy.".to_string(),
         EXIT_TARGET_TIMEOUT => "the game never started, so there was nothing to load mods into.".to_string(),
         EXIT_STOPPED => "the mod loader was stopped before the game started.".to_string(),
         EXIT_NOT_MAPPED => "the game started but never picked up the mod library.".to_string(),
         EXIT_TARGET_EXITED => "the game closed before the mod library was loaded.".to_string(),
         EXIT_INJECT_FAILED => "the mod library could not be written into the game. The loader log has the detail.".to_string(),
         other => format!("the mod loader exited with code {other}"),
+    }
+}
+
+pub fn hook_exit_code(result: i32, hooked: bool) -> i32 {
+    match result {
+        0 if hooked => EXIT_OK,
+        100 => EXIT_ALREADY_RUNNING,
+        200 => EXIT_HOOK_MODULE_LOAD,
+        300 => EXIT_HOOK_FOREIGN_MODULE,
+        _ => EXIT_HOOK_FAILED,
+    }
+}
+
+pub fn describe_hook_result(result: i32) -> &'static str {
+    match result {
+        0 => "the hook handle came back empty",
+        100 => "another 3DMigoto loader holds Local\\3DMigotoLoader",
+        200 => "the mod library could not be loaded",
+        300 => "the mod library has no 3DMigoto entry point",
+        400 => "the Windows hook could not be set up",
+        _ => "an unknown hook error occurred",
     }
 }
 
@@ -295,6 +320,17 @@ mod tests {
         assert_eq!(tick.exited, vec![1]);
         assert_eq!(tick.presence, Presence::Present);
         assert_eq!(watch.seen_for(1, start + Duration::from_secs(1)), Duration::ZERO);
+    }
+
+    #[test]
+    fn hook_results_map_to_their_own_exit_codes() {
+        assert_eq!(hook_exit_code(0, true), EXIT_OK);
+        assert_eq!(hook_exit_code(0, false), EXIT_HOOK_FAILED);
+        assert_eq!(hook_exit_code(100, true), EXIT_ALREADY_RUNNING);
+        assert_eq!(hook_exit_code(200, false), EXIT_HOOK_MODULE_LOAD);
+        assert_eq!(hook_exit_code(300, false), EXIT_HOOK_FOREIGN_MODULE);
+        assert_eq!(hook_exit_code(400, false), EXIT_HOOK_FAILED);
+        assert_eq!(hook_exit_code(7, false), EXIT_HOOK_FAILED);
     }
 
     #[test]

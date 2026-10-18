@@ -290,6 +290,7 @@ const HELPER_ARTIFACTS = [
     { file: 'peebify-fps-helper.exe', export: null },
     { file: 'peebify_helpers.dll', export: 'WndProc' },
     { file: 'peebify-mod-loader.exe', export: null },
+    { file: 'peebify-launch-shim.exe', export: null },
     { file: 'peebify-overlay-helper.exe', export: null },
 ];
 

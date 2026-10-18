@@ -38,6 +38,9 @@ mod host {
     const MAPPED_TIMEOUT: Duration = Duration::from_secs(180);
     const UNREADABLE_GRACE: Duration = Duration::from_secs(15);
     const RELAUNCH_GRACE: Duration = Duration::from_secs(20);
+    const WINDOW_TIMEOUT: Duration = Duration::from_secs(120);
+    const HOOK_LINGER: Duration = Duration::from_secs(3);
+    const HOOK_FOLLOWS: usize = 3;
     const INJECT_LOAD_TIMEOUT_SECS: i32 = 30;
 
     type HookLibraryFn = unsafe extern "C" fn(*const u16, *mut HHOOK, *mut HANDLE) -> i32;
@@ -188,7 +191,7 @@ mod host {
         first: u32,
         stop: &Stop,
         log: &mut Log,
-    ) -> i32 {
+    ) -> Result<u32, i32> {
         let started = Instant::now();
         let deadline = started + MAPPED_TIMEOUT;
         let mut watch = TargetWatch::new(RELAUNCH_GRACE, first, started);
@@ -214,13 +217,13 @@ mod host {
                     "the target exited before the module was mapped and did not come back within {} s",
                     RELAUNCH_GRACE.as_secs()
                 ));
-                return EXIT_TARGET_EXITED;
+                return Err(EXIT_TARGET_EXITED);
             }
             for &pid in &pids {
                 match module_mapped(pid, module) {
                     Mapped::Yes => {
                         log.line(&format!("{} is mapped into pid {pid}", module.display()));
-                        return EXIT_OK;
+                        return Ok(pid);
                     }
                     Mapped::Unreadable(error)
                         if watch.seen_for(pid, now) >= UNREADABLE_GRACE
@@ -229,24 +232,95 @@ mod host {
                         log.line(&format!(
                             "the module list of pid {pid} cannot be read (error {error}) but its window is up, so the hook is assumed to have landed"
                         ));
-                        return EXIT_OK;
+                        return Ok(pid);
                     }
                     Mapped::No | Mapped::Starting | Mapped::Unreadable(_) => {}
                 }
             }
             if stop.requested() {
                 log.line("stopped by the launcher while waiting for the module to map");
-                return EXIT_STOPPED;
+                return Err(EXIT_STOPPED);
             }
             if Instant::now() >= deadline {
                 log.line(&format!(
                     "the module was not mapped within {} s",
                     MAPPED_TIMEOUT.as_secs()
                 ));
-                return EXIT_NOT_MAPPED;
+                return Err(EXIT_NOT_MAPPED);
             }
             unsafe { Sleep(POLL.as_millis() as u32) };
         }
+    }
+
+    enum WindowWait {
+        Shown,
+        Exited,
+        Stopped,
+        TimedOut,
+    }
+
+    fn wait_for_window(pid: u32, stop: &Stop) -> WindowWait {
+        let deadline = Instant::now() + WINDOW_TIMEOUT;
+        loop {
+            if !process_alive(pid) {
+                return WindowWait::Exited;
+            }
+            if !visible_windows_of(pid).is_empty() {
+                return WindowWait::Shown;
+            }
+            if stop.requested() {
+                return WindowWait::Stopped;
+            }
+            if Instant::now() >= deadline {
+                return WindowWait::TimedOut;
+            }
+            unsafe { Sleep(POLL.as_millis() as u32) };
+        }
+    }
+
+    fn hold_hook(options: &Options, module: &Path, first: u32, stop: &Stop, log: &mut Log) -> i32 {
+        let mut next = first;
+        for _ in 0..HOOK_FOLLOWS {
+            let pid = match wait_until_mapped(options, module, next, stop, log) {
+                Ok(pid) => pid,
+                Err(code) => return code,
+            };
+            match wait_for_window(pid, stop) {
+                WindowWait::Shown => {
+                    log.line(&format!(
+                        "the window of pid {pid} is up, keeping the hook {} s longer",
+                        HOOK_LINGER.as_secs()
+                    ));
+                    unsafe { Sleep(HOOK_LINGER.as_millis() as u32) };
+                    return EXIT_OK;
+                }
+                WindowWait::Stopped | WindowWait::TimedOut => return EXIT_OK,
+                WindowWait::Exited => {
+                    log.line(&format!(
+                        "pid {pid} exited after the module was mapped, waiting up to {} s for the game to restart",
+                        RELAUNCH_GRACE.as_secs()
+                    ));
+                    let deadline = Instant::now() + RELAUNCH_GRACE;
+                    let restarted = loop {
+                        if let Some(&pid) = live_targets(&options.target).first() {
+                            break Some(pid);
+                        }
+                        if stop.requested() || Instant::now() >= deadline {
+                            break None;
+                        }
+                        unsafe { Sleep(POLL.as_millis() as u32) };
+                    };
+                    match restarted {
+                        Some(pid) => {
+                            log.line(&format!("target {} restarted as pid {pid}", options.target));
+                            next = pid;
+                        }
+                        None => return EXIT_OK,
+                    }
+                }
+            }
+        }
+        EXIT_OK
     }
 
     struct Library {
@@ -343,25 +417,24 @@ mod host {
         let path = wide_path(module);
         let mut hook: HHOOK = std::ptr::null_mut();
         let mut mutex: HANDLE = std::ptr::null_mut();
-        let code = unsafe { (library.hook)(path.as_ptr(), &mut hook, &mut mutex) };
-        match code {
-            0 => log.line("hook installed"),
-            100 => {
-                log.line("another 3DMigoto loader holds Local\\3DMigotoLoader");
-                return EXIT_ALREADY_RUNNING;
+        let result = unsafe { (library.hook)(path.as_ptr(), &mut hook, &mut mutex) };
+        let code = hook_exit_code(result, !hook.is_null());
+        if code != EXIT_OK {
+            log.line(&format!(
+                "HookLibrary failed with {result}: {} ({})",
+                describe_hook_result(result),
+                std::io::Error::last_os_error()
+            ));
+            if result == 0 {
+                unsafe { (library.unhook)(&mut hook, &mut mutex) };
             }
-            other => {
-                log.line(&format!(
-                    "HookLibrary failed with {other} ({})",
-                    std::io::Error::last_os_error()
-                ));
-                return EXIT_HOOK_FAILED;
-            }
+            return code;
         }
+        log.line("hook installed");
         unsafe { SetEvent(ready) };
 
         let outcome = match wait_for_target(options, stop, log) {
-            Ok(pid) => wait_until_mapped(options, module, pid, stop, log),
+            Ok(pid) => hold_hook(options, module, pid, stop, log),
             Err(code) => code,
         };
 

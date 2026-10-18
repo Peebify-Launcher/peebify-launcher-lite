@@ -4,9 +4,6 @@
 
 pub mod shared;
 
-#[cfg(windows)]
-pub mod cmdline;
-
 #[cfg(all(windows, feature = "stub"))]
 mod pe;
 #[cfg(all(windows, feature = "stub"))]

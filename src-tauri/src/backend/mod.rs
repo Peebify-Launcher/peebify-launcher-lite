@@ -25,6 +25,8 @@ pub(crate) mod kuro;
 pub mod logger;
 pub(crate) mod manifest;
 pub(crate) mod members;
+pub(crate) mod mod_game_settings;
+pub(crate) mod mod_optimizer;
 pub(crate) mod mod_profiles;
 pub(crate) mod mods;
 mod news;

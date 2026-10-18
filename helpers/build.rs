@@ -1,6 +1,6 @@
 // ------------ Helpers Build Script ------------
-// Stamps each helper exe (FPS unlocker, mod loader, overlay) with the Peebify icon and version info.
-// The FPS unlocker and mod loader ask for administrator rights, the overlay helper runs as a normal user.
+// Stamps each helper exe (FPS unlocker, mod loader, launch shim, overlay) with the Peebify icon and version info.
+// The FPS unlocker, mod loader and launch shim ask for administrator rights, the overlay helper runs as a normal user.
 
 const ADMIN_MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
@@ -48,6 +48,7 @@ const OVERLAY_MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalon
 const BINARIES: &[(&str, &str, &str)] = &[
     ("peebify-fps-helper", "Peebify FPS Unlocker", ADMIN_MANIFEST),
     ("peebify-mod-loader", "Peebify Mod Loader", ADMIN_MANIFEST),
+    ("peebify-launch-shim", "Peebify Launch Shim", ADMIN_MANIFEST),
     ("peebify-overlay-helper", "Peebify Overlay", OVERLAY_MANIFEST),
 ];
 

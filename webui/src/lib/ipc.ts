@@ -105,6 +105,11 @@ export const onModsLoadFailed = (cb: (gameId: string, error: string, message: st
     cb(String(p?.gameId || ""), String(p?.error || ""), String(p?.message || "")),
   );
 
+export const onModsNotice = (cb: (kind: "tidied" | "settings", message: string) => void) =>
+  onEvent("mods-notice", (p) => {
+    if (p?.message) cb(p.kind === "settings" ? "settings" : "tidied", p.message);
+  });
+
 export interface GameUpdateVersions {
   currentVersion: string | null;
   latestVersion: string | null;
@@ -354,13 +359,26 @@ export interface ModsStatus {
   versions: Record<string, string>;
   toolsInstalling: boolean;
   supportedGames: ModSupportedGame[];
+  gameSettings: ModGameSetting[];
+}
+
+export interface ModGameSetting {
+  key: string;
+  label: string;
+  description: string;
+  value: boolean;
+}
+
+export async function setModGameSetting(gameId: string, key: string, value: boolean): Promise<void> {
+  await setConfigValue(`games.${gameId}.${key}`, value);
 }
 
 export interface LoaderSetting {
   id: string;
   label: string;
   description: string;
-  kind: "bool" | "millis" | "key";
+  kind: "bool" | "millis" | "key" | "choice";
+  options?: { value: string; label: string }[] | null;
   value: string;
   accelerator?: string | null;
   defaultAccelerator?: string | null;
@@ -423,6 +441,7 @@ const NO_MODS: ModsStatus = {
   versions: {},
   toolsInstalling: false,
   supportedGames: [],
+  gameSettings: [],
 };
 
 export async function getModsStatus(gameId: string): Promise<ModsStatus> {

@@ -2,8 +2,9 @@
 // Everything Hypergryph: the Gryphline launcher API that names the latest Endfield version, its download packs and
 // the launcher news, the manifest of the game those split zip packs hold, and the install preview. A first install
 // downloads the packs and unpacks them; an update, repair and verify read just the files they need out of the packs.
+// Launching needs GRYPHLINK's signed launcher exe as the game's parent, which is fetched here too.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -406,6 +407,100 @@ pub(super) async fn preview(profile: &Value) -> Result<Preview, String> {
         parts: Vec::new(),
     })
 }
+
+// ------------ Launch Parent ------------
+// Endfield only starts as the child of GRYPHLINK's signed launcher exe. That one file is read out of the official
+// GRYPHLINK package the first time and kept in Peebify's data folder; the launch shim starts it suspended as the parent.
+
+const LAUNCH_PARENT_DIR: &str = "gryphlink";
+const LAUNCH_PARENT_RECHECK: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+fn launcher_package_from_response(response: &Value) -> Result<Pack, String> {
+    let rsp = find_rsp(response, "get_latest_launcher")
+        .and_then(|r| r.get("get_latest_launcher_rsp"))
+        .ok_or_else(|| format!("batch_proxy response has no get_latest_launcher_rsp (response: {})", response_snippet(response)))?;
+    let url = pack_str(rsp, "zip_package_url").trim();
+    let size = pack_size(rsp);
+    if url.is_empty() || size == 0 {
+        return Err(format!("get_latest_launcher_rsp names no package (response: {})", response_snippet(response)));
+    }
+    Ok(Pack { url: url.into(), size })
+}
+
+async fn latest_launcher_package(profile: &Value) -> Result<Pack, String> {
+    let cfg = api_config(profile)?;
+    let body = json!({
+        "seq": cfg.seq,
+        "proxy_reqs": [{
+            "kind": "get_latest_launcher",
+            "get_latest_launcher_req": {
+                "appcode": required_str(profile, "hgLauncherAppCode")?,
+                "channel": cfg.channel,
+                "sub_channel": cfg.sub_channel,
+                "version": "",
+                "language": cfg.language,
+                "platform": "Windows",
+            },
+        }],
+    });
+    let response = post_batch_proxy(&cfg.api_url, &body).await?;
+    launcher_package_from_response(&response)
+}
+
+fn checked_recently(source: &Path) -> bool {
+    std::fs::metadata(source)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age < LAUNCH_PARENT_RECHECK)
+}
+
+pub(super) async fn launch_parent(user_data: &Path, profile: &Value, name: &str) -> Result<PathBuf, String> {
+    let dir = user_data.join(LAUNCH_PARENT_DIR);
+    let path = dir.join(name);
+    let source = dir.join(format!("{name}.source"));
+    let kept = path.is_file();
+    if kept && checked_recently(&source) {
+        return Ok(path);
+    }
+    let pack = match latest_launcher_package(profile).await {
+        Ok(pack) => pack,
+        Err(e) if kept => {
+            log::warn!("Could not check for a newer {name}, so the copy on disk is used: {e}");
+            return Ok(path);
+        }
+        Err(e) => return Err(e),
+    };
+    let url = pack.url.to_string();
+    if kept && std::fs::read_to_string(&source).is_ok_and(|known| known.trim() == url) {
+        let _ = std::fs::write(&source, &url);
+        return Ok(path);
+    }
+    let packs: Arc<[Pack]> = vec![pack].into();
+    log::info!("Fetching {name} from the GRYPHLINK package {url}");
+    let staging = dir.join(".download");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| format!("Could not create {}: {e}", staging.display()))?;
+    let wanted = Entry::new(name, 0, Hash::None, "").member_of(&packs);
+    let fetched = members::fetch_members(&staging, &[wanted], members::Detached::job(), None)
+        .await
+        .and_then(|_| {
+            std::fs::rename(staging.join(name), &path).map_err(|e| format!("Could not keep {name}: {e}"))
+        });
+    let _ = std::fs::remove_dir_all(&staging);
+    match fetched {
+        Ok(()) => {
+            let _ = std::fs::write(&source, &url);
+            Ok(path)
+        }
+        Err(e) if kept => {
+            log::warn!("Could not refresh {name}, so the copy on disk is used: {e}");
+            Ok(path)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,5 +646,20 @@ mod tests {
         let file = &same.entries[0];
         assert_eq!((&*file.path, file.size, file.hash), ("Data/a.bin", 5, Hash::Crc32(crc32fast::hash(b"alpha"))));
         assert!(matches!(file.source, Source::Member { at: None, .. }), "a record does not know where a member sits");
+    }
+
+    #[test]
+    fn the_launcher_package_is_read_from_get_latest_launcher() {
+        let url = "https://launcher.hg-cdn.com/TiaytKBUIEdoEwRT/launcher/6/6/official/GRYPHLINK_v1.6.0.zip";
+        let response = json!({ "proxy_rsps": [{ "kind": "get_latest_launcher", "get_latest_launcher_rsp": {
+            "action": 1, "version": "1.6.0", "zip_package_url": url, "package_size": "117679901"
+        } }] });
+        assert_eq!(launcher_package_from_response(&response).unwrap(), Pack { url: url.into(), size: 117_679_901 });
+
+        let unchanged = json!({ "proxy_rsps": [{ "kind": "get_latest_launcher", "get_latest_launcher_rsp": {
+            "action": 0, "version": "1.6.0", "zip_package_url": "", "package_size": "0"
+        } }] });
+        assert!(launcher_package_from_response(&unchanged).is_err());
+        assert!(launcher_package_from_response(&json!({ "proxy_rsps": [] })).is_err());
     }
 }

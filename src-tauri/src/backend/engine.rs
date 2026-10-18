@@ -35,6 +35,7 @@ pub mod status {
     pub const VALIDATING: &str = "Validating";
     pub const REPAIRING: &str = "Repairing";
     pub const UNPACKING: &str = "Unpacking the client package";
+    pub const FINALIZING: &str = "Finalizing...";
     pub const PAUSED: &str = "Paused";
     pub const CANCELLED: &str = "Cancelled";
     pub const COMPLETED: &str = "Completed";
@@ -422,6 +423,21 @@ impl JobCore {
 
     pub(crate) fn report_transfer(&self) {
         self.send_progress(self.transfer_phase(), &self.transfer_status(), json!({}));
+    }
+
+    pub(super) fn report_finalizing(&self, percent: f64) {
+        self.tracker.set_phase("finalizing");
+        self.publish(
+            Phase::Finalizing,
+            json!({
+                "status": status::FINALIZING,
+                "percentage": percent,
+                "speed": 0,
+                "networkSpeed": 0,
+                "diskSpeed": 0,
+                "eta": 0,
+            }),
+        );
     }
 
     pub(super) fn report_scan(&self, status_text: &str) {
@@ -894,6 +910,10 @@ impl GameDownloadManager {
             log::info!("Pause ignored because unpacking cannot be paused.");
             return;
         }
+        if self.tracker.phase() == "finalizing" {
+            log::info!("Pause ignored because the install is finalizing.");
+            return;
+        }
         if self.is_running() && self.gate.pause() {
             self.set_paused_power(true);
             self.send_progress(Phase::Downloading, status::PAUSED, json!({}));
@@ -1099,6 +1119,7 @@ impl GameDownloadManager {
                 .collect();
             let mut invalid: Vec<Entry> = if needs_hash.is_empty() {
                 log::info!("Every downloaded file was checksummed while streaming, so no full re-read is needed.");
+                self.report_finalizing(0.0);
                 Vec::new()
             } else {
                 log::info!("Verifying {} file(s) that could not be hashed while streaming...", needs_hash.len());
@@ -1221,6 +1242,7 @@ impl GameDownloadManager {
             );
         }
 
+        self.report_finalizing(30.0);
         let path = dir.to_path_buf();
         let dests: Vec<String> = files.iter().filter(|f| !f.in_place()).map(|f| f.path.to_string()).collect();
         if let Err(e) =
@@ -1232,6 +1254,7 @@ impl GameDownloadManager {
             return Err("Download aborted by user.".to_string());
         }
 
+        self.report_finalizing(50.0);
         let installed = manifest.installed();
         if !installed.is_empty() {
             validator::prune_dropped(dir, installed).await;
@@ -1239,7 +1262,9 @@ impl GameDownloadManager {
             validator::forget_record(dir);
         }
         manifest::make_dirs(dir, &manifest.dirs);
+        self.report_finalizing(65.0);
         let packages_done = publisher.after_seal(&self.core, dir, &manifest, &sealed).await?;
+        self.report_finalizing(85.0);
         log::info!(
             "Game config for {} updated to version {}",
             self.profile_id(),
@@ -1262,6 +1287,7 @@ impl GameDownloadManager {
         ) {
             validator::write_local_index(dir, files);
         }
+        self.report_finalizing(95.0);
         self.finish_completion(dir).await;
         Ok(ok_with(json!({
             "installPath": dir.to_string_lossy(),

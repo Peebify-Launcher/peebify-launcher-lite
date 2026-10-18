@@ -28,6 +28,7 @@ const PID_RECONFIRM_INTERVAL: Duration = Duration::from_secs(4);
 const LAUNCH_CONFIRM_TIMEOUT: Duration = Duration::from_secs(90);
 const STEAM_LAUNCH_CONFIRM_TIMEOUT: Duration = Duration::from_secs(6 * 60);
 const CUSTOM_LAUNCH_CONFIRM_TIMEOUT: Duration = Duration::from_secs(6 * 60);
+const LAUNCH_SHIM: &str = "peebify-launch-shim.exe";
 const STEAM_UPDATE_WATCH_TIMEOUT: Duration = Duration::from_secs(3 * 60 * 60);
 const PASSIVE_WATCH_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 const LAUNCH_FAILED_GRACE: Duration = Duration::from_secs(3);
@@ -416,6 +417,18 @@ impl GameManager {
             );
             if self.adopt_running(&profile_id, proc_name, pid) {
                 self.handle_game_started(&profile_id).await;
+                if mods::active_for(&self.app, &profile_id, profile) {
+                    let message = format!(
+                        "{display_name} was already running, so mods were not loaded. Close it and start it from Peebify to play with mods."
+                    );
+                    log::warn!("mods: {message}");
+                    super::platform::notify_if_backgrounded(&self.app, "Mods didn't load", &message);
+                    self.emit_game_event(
+                        "mods-load-failed",
+                        json!({ "gameId": profile_id, "error": "The game was already running.", "message": message }),
+                    )
+                    .await;
+                }
             }
             return ok_with(json!({ "viaSteam": false }));
         }
@@ -452,12 +465,59 @@ impl GameManager {
         } else {
             LAUNCH_CONFIRM_TIMEOUT
         };
+        let steam_copy = steam::detect(&install_root, profile).is_some();
+        let parent_launch = match game_profiles::launch_parent(profile) {
+            Some(name) if custom_launcher.is_none() && via_steam.is_none() && !steam_copy => {
+                match through_launch_parent(&self.app, profile, name, &executable_path, &launch_args).await {
+                    Ok(launch) => Some(launch),
+                    Err(e) => {
+                        log::error!("Could not prepare the launch parent for {profile_id}: {e}");
+                        return err_response(format!("{display_name} couldn't be started: {e}"));
+                    }
+                }
+            }
+            _ => None,
+        };
+        let front_end_launch = match game_profiles::front_end(profile, &executable_path) {
+            Some(front_end)
+                if custom_launcher.is_none() && via_steam.is_none() && !steam_copy && parent_launch.is_none() =>
+            {
+                match through_front_end(&self.app, profile, &front_end, &install_root, &executable_path, &launch_args) {
+                    Ok(launch) => Some(launch),
+                    Err(e) => {
+                        log::error!("Could not prepare the official launcher for {profile_id}: {e}");
+                        return err_response(format!("{display_name} couldn't be started: {e}"));
+                    }
+                }
+            }
+            _ => None,
+        };
 
         let mut mods_armed = false;
         if mods::active_for(&self.app, &profile_id, profile) {
             let state = self.app.state::<BackendState>();
             let root = xxmi::root(&state.config, &state.user_data);
             mods::log_launch_state(&self.app, &profile_id, profile);
+
+            let adjusted = {
+                let (config, game_id) = (state.config.clone(), profile_id.clone());
+                let (root_dir, exe) = (install_root.clone(), executable_path.clone());
+                tauri::async_runtime::spawn_blocking(move || {
+                    super::mod_game_settings::apply(profile, &config, &game_id, &root_dir, &exe)
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+            };
+            if let Err(e) = adjusted {
+                log::warn!("mods: could not adjust {profile_id}'s game settings: {e}");
+                let message = format!("{display_name} is starting with its own settings, so some mods may not look right. {e}");
+                super::platform::notify_if_backgrounded(&self.app, "Game settings weren't changed", &message);
+                self.emit_game_event(
+                    "mods-notice",
+                    json!({ "gameId": profile_id, "kind": "settings", "message": message }),
+                )
+                .await;
+            }
 
             match xxmi::prepare_and_spawn(&self.app, &root, profile, loader_wait).await {
                 Ok(()) => mods_armed = true,
@@ -548,8 +608,8 @@ impl GameManager {
                             message,
                         })
                 }
-                None => match unlock {
-                    Some(unlock) => {
+                None => match (unlock, parent_launch, front_end_launch) {
+                    (Some(unlock), _, _) => {
                         log::info!(
                             "Launching game through the FPS unlocker: {}{args_suffix}",
                             executable_path.display()
@@ -562,40 +622,41 @@ impl GameManager {
                         .await
                         .map(|()| None)
                     }
-                    None => {
-                        let hide_front_end =
-                            game_profiles::launches_hidden_front_end(profile, &executable_path);
+                    (None, Some(parent_launch), _) => {
                         log::info!(
-                            "Launching game from: {}{args_suffix}{}",
-                            executable_path.display(),
-                            if hide_front_end {
-                                " (official front end kept hidden)"
-                            } else {
-                                ""
-                            }
+                            "Launching game under its publisher's launcher: {}{args_suffix}",
+                            executable_path.display()
                         );
-                        let launched = if hide_front_end {
-                            process_utils::launch_game_minimized(
-                                &executable_path,
-                                &launch_args,
-                                executable_path.parent(),
-                            )
-                            .await
-                        } else {
-                            process_utils::launch_game_via_shell(
-                                &executable_path,
-                                &launch_args,
-                                executable_path.parent(),
-                            )
-                            .await
-                        };
-                        if hide_front_end && launched.is_ok() {
-                            super::process_utils::front_end::conceal_until_client(
-                                game_profiles::hidden_front_end(profile),
-                                game_profiles::client_process_name(profile).to_string(),
-                            );
-                        }
-                        launched.map(|()| None)
+                        process_utils::launch_game_via_shell(
+                            &parent_launch.helper,
+                            &parent_launch.arguments,
+                            executable_path.parent(),
+                        )
+                        .await
+                        .map(|()| None)
+                    }
+                    (None, None, Some(front_end_launch)) => {
+                        log::info!(
+                            "Launching game through its official launcher, kept out of sight: {}{args_suffix}",
+                            executable_path.display()
+                        );
+                        process_utils::launch_game_via_shell(
+                            &front_end_launch.helper,
+                            &front_end_launch.arguments,
+                            executable_path.parent(),
+                        )
+                        .await
+                        .map(|()| None)
+                    }
+                    (None, None, None) => {
+                        log::info!("Launching game from: {}{args_suffix}", executable_path.display());
+                        process_utils::launch_game_via_shell(
+                            &executable_path,
+                            &launch_args,
+                            executable_path.parent(),
+                        )
+                        .await
+                        .map(|()| None)
                     }
                 },
             },
@@ -1352,6 +1413,64 @@ fn fold_probe(
         }
         _ => Transition::None,
     }
+}
+
+async fn through_launch_parent(
+    app: &AppHandle,
+    profile: &Value,
+    parent_name: &str,
+    executable: &Path,
+    game_arguments: &[String],
+) -> Result<fps_unlock::Launch, String> {
+    let shim = fs_util::resource(app, LAUNCH_SHIM).ok_or("The launch shim is missing from this install.")?;
+    let (user_data, log_path) = {
+        let state = app.state::<BackendState>();
+        (state.user_data.clone(), state.logs_dir.join("launch-shim.log"))
+    };
+    let parent = super::hypergryph::launch_parent(&user_data, profile, parent_name).await?;
+    let elevated = |path: &Path| process_utils::resolve_subst(path).to_string_lossy().to_string();
+    let mut arguments = vec![
+        "--parent".to_string(),
+        elevated(&parent),
+        "--game".to_string(),
+        elevated(executable),
+        "--log".to_string(),
+        elevated(&log_path),
+        "--".to_string(),
+    ];
+    arguments.extend(game_arguments.iter().cloned());
+    Ok(fps_unlock::Launch { helper: process_utils::resolve_subst(&shim), arguments })
+}
+
+fn through_front_end(
+    app: &AppHandle,
+    profile: &Value,
+    front_end: &game_profiles::FrontEnd,
+    install_root: &Path,
+    executable: &Path,
+    game_arguments: &[String],
+) -> Result<fps_unlock::Launch, String> {
+    let shim = fs_util::resource(app, LAUNCH_SHIM).ok_or("The launch shim is missing from this install.")?;
+    let log_path = app.state::<BackendState>().logs_dir.join("launch-shim.log");
+    let ready_log = front_end.ready_log.iter().fold(install_root.to_path_buf(), |path, part| path.join(part));
+    let elevated = |path: &Path| process_utils::resolve_subst(path).to_string_lossy().to_string();
+    let mut arguments = vec![
+        "--front-end".to_string(),
+        elevated(executable),
+        "--client".to_string(),
+        game_profiles::client_process_name(profile).to_string(),
+        "--ready-log".to_string(),
+        elevated(&ready_log),
+        "--ready-line".to_string(),
+        front_end.ready_line.clone(),
+        "--button".to_string(),
+        front_end.button.clone(),
+        "--log".to_string(),
+        elevated(&log_path),
+        "--".to_string(),
+    ];
+    arguments.extend(game_arguments.iter().cloned());
+    Ok(fps_unlock::Launch { helper: process_utils::resolve_subst(&shim), arguments })
 }
 
 fn launch_error(display_name: &str, error: &process_utils::SpawnError, via_helper: bool) -> String {

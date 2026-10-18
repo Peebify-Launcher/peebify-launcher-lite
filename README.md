@@ -9,7 +9,7 @@ Install, update, repair, and mod
 
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white)
 ![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri-FFC131?style=for-the-badge&logo=tauri&logoColor=white)
-![Games](https://img.shields.io/badge/games-13-ff69b4?style=for-the-badge)
+![Games](https://img.shields.io/badge/games-15-ff69b4?style=for-the-badge)
 
 [Website](https://peebify.net/) · [Discord](https://discord.gg/5kfpJTv2Xc) · [Lite vs. full](#lite-vs-full-peebify) · [Features](#features) · [Supported Games](#supported-games) · [Building](#building-from-source) · [Credits](#credits)
 

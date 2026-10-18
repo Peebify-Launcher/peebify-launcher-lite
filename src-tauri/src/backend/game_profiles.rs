@@ -206,6 +206,9 @@ fn profiles() -> &'static Value {
                     "loaderMode": "inject",
                     "forceDx11Args": ["-dx11"],
                     "gameBananaId": 20357,
+                    "gameSettings": "wuwa",
+                    "unwantedTriggers": ["ib", "vb0"],
+                    "ibTriggerReplacement": "$\\WWMIv1\\enable_ib_callbacks = 1",
                     "modIniDefaults": {
                         "Rendering": { "texture_hash": 1, "track_texture_updates": 1, "track_region_hashes": 0, "allow_buffer_resize": 1 },
                         "System": { "dll_initialization_delay": 500 },
@@ -262,6 +265,8 @@ fn profiles() -> &'static Value {
                     "loaderMode": "hook",
                     "forceDx11Args": ["-use-d3d11"],
                     "gameBananaId": 19567,
+                    "gameSettings": "zzz",
+                    "bundledLibraries": ["Core", "ZZMI", "Libraries"],
                     "modIniDefaults": {
                         "Rendering": { "texture_hash": 0, "track_texture_updates": 0, "track_region_hashes": 0, "allow_buffer_resize": 1 },
                         "System": { "dll_initialization_delay": 0 },
@@ -361,13 +366,17 @@ fn profiles() -> &'static Value {
 
                 "installRootMarker": ["Client", "WindowsNoEditor", "HT", "Binaries", "Win64", "HTGame.exe"],
                 "launchCandidates": [
-                    { "path": ["NTEGlobal", "NTEGlobalGame.exe"], "args": ["/launcher", "/directly"] },
+                    { "path": ["NTEGlobal", "NTEGlobalGame.exe"], "args": ["/launcher"] },
                     { "path": ["Client", "WindowsNoEditor", "HT", "Binaries", "Win64", "HTGame.exe"] }
                 ],
                 "executableName": "NTEGlobalGame.exe",
                 "clientProcessName": "HTGame.exe",
                 "exitCompanions": ["NTEGlobalGame.exe", "NTEGlobalBrowser.exe", "NTEGlobalWebBooster.exe"],
-                "hiddenFrontEnd": ["NTEGlobalGame.exe", "NTEGlobalBrowser.exe", "NTEGlobalWebBooster.exe"],
+                "frontEnd": {
+                    "readyLog": ["NTEGlobal", "UserData", "Log", "NTEGlobalGame.log"],
+                    "readyLine": "all ready, wait for start game",
+                    "button": "TextButton_"
+                },
 
                 "communityTools": {
                     "official": [
@@ -402,15 +411,21 @@ fn profiles() -> &'static Value {
                 "hgSubChannel": "6",
                 "hgSeq": "3",
                 "hgLanguage": "en-us",
+                "hgLauncherAppCode": "TiaytKBUIEdoEwRT",
 
                 "executableName": "Endfield.exe",
                 "clientProcessName": "Endfield.exe",
+                "launchParent": "Games.exe",
+
+                "steamAppId": "4732690",
 
                 "mods": {
                     "variant": "efmi",
                     "loaderMode": "inject",
                     "forceDx11Args": ["-force-d3d11"],
                     "gameBananaId": 21842,
+                    "unwantedTriggers": ["ib"],
+                    "unwantedModFiles": ["VSCheck.ini"],
                     "modIniDefaults": {
                         "Rendering": { "texture_hash": 0, "track_texture_updates": 0, "track_region_hashes": 1, "track_implicit_index_buffers": 1, "allow_buffer_resize": 0 },
                         "System": { "dll_initialization_delay": 0 },
@@ -457,6 +472,8 @@ fn profiles() -> &'static Value {
                     "variant": "gimi",
                     "loaderMode": "hook",
                     "gameBananaId": 8552,
+                    "gameSettings": "genshin",
+                    "bundledLibraries": ["Core", "GIMI", "Libraries"],
                     "modIniDefaults": {
                         "Rendering": { "texture_hash": 0, "track_texture_updates": 0, "track_region_hashes": 0, "allow_buffer_resize": 1 },
                         "System": { "dll_initialization_delay": 0 },
@@ -1017,20 +1034,33 @@ pub fn exit_companions(profile: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub fn hidden_front_end(profile: &Value) -> Vec<String> {
-    profile
-        .get("hiddenFrontEnd")
-        .and_then(string_array)
-        .unwrap_or_default()
+pub fn launch_parent(profile: &Value) -> Option<&str> {
+    profile.get("launchParent")?.as_str().filter(|name| !name.is_empty())
 }
 
-pub fn launches_hidden_front_end(profile: &Value, executable: &std::path::Path) -> bool {
-    let Some(file_name) = executable.file_name().and_then(|n| n.to_str()) else {
-        return false;
+pub struct FrontEnd {
+    pub ready_log: Vec<String>,
+    pub ready_line: String,
+    pub button: String,
+}
+
+pub fn front_end(profile: &Value, executable: &std::path::Path) -> Option<FrontEnd> {
+    let spec = profile.get("frontEnd")?;
+    let file_name = executable.file_name()?.to_str()?;
+    if !file_name.eq_ignore_ascii_case(executable_name(profile)) {
+        return None;
+    }
+    let text = |key: &str| {
+        spec.get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
     };
-    hidden_front_end(profile)
-        .iter()
-        .any(|name| name.eq_ignore_ascii_case(file_name))
+    Some(FrontEnd {
+        ready_log: spec.get("readyLog").and_then(string_array)?,
+        ready_line: text("readyLine")?,
+        button: text("button")?,
+    })
 }
 
 pub struct LaunchCandidate {
@@ -1621,25 +1651,18 @@ mod tests {
     }
 
     #[test]
-    fn only_the_nte_front_end_launches_hidden() {
+    fn only_the_nte_launcher_is_driven_out_of_sight() {
         let nte = profile("nte");
-        assert!(launches_hidden_front_end(
-            nte,
-            std::path::Path::new(r"D:\Games\NTE\NTEGlobal\NTEGlobalGame.exe")
-        ));
-        assert!(launches_hidden_front_end(
-            nte,
-            std::path::Path::new(r"D:\Games\NTE\NTEGlobal\ntegloBALgame.EXE")
-        ));
-        assert!(!launches_hidden_front_end(
+        let driven = front_end(nte, std::path::Path::new(r"D:\Games\NTE\NTEGlobal\ntegloBALgame.EXE"))
+            .expect("NTE's launcher is driven");
+        assert_eq!(driven.ready_log.last().map(String::as_str), Some("NTEGlobalGame.log"));
+        assert!(!driven.ready_line.is_empty() && !driven.button.is_empty());
+        assert!(front_end(
             nte,
             std::path::Path::new(r"D:\Games\NTE\Client\WindowsNoEditor\HT\Binaries\Win64\HTGame.exe")
-        ));
-        assert!(!launches_hidden_front_end(
-            profile("wuwa"),
-            std::path::Path::new(r"D:\Games\NTEGlobalGame.exe")
-        ));
-        assert!(hidden_front_end(profile("hsr")).is_empty());
+        )
+        .is_none());
+        assert!(front_end(profile("wuwa"), std::path::Path::new(r"D:\Games\NTEGlobalGame.exe")).is_none());
     }
 
     fn dir_for<'a>(dirs: &'a [(&'static str, PathBuf)], kind: &str) -> Option<&'a std::path::Path> {

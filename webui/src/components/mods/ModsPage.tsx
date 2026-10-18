@@ -11,7 +11,9 @@ import {
   Puzzle,
   RefreshCw,
   Settings2,
+  SlidersHorizontal,
   Timer,
+  Wand2,
 } from "lucide-react";
 import { fadeVariants } from "../../lib/motion";
 import { useModsStore, useModProfilesStore } from "../../store/mods";
@@ -31,6 +33,7 @@ import {
   setConfigValue,
   setGameModsEnabled,
   setLoaderSetting,
+  setModGameSetting,
   type LoaderSetting,
 } from "../../lib/ipc";
 import { NumberField, SettingRow, SettingsExpander } from "../settings/SettingRow";
@@ -41,10 +44,11 @@ import { ActionButton, SegmentedControl, Toggle } from "../ui/controls";
 import { ModsHub, type BrowseSeed } from "./ModsHub";
 import { BrowseMods } from "./BrowseMods";
 import { ModsOptIn } from "./ModsOptIn";
+import { FpsUnlockSection } from "./FpsUnlockSection";
 
 // ------------ Page ------------
 // The Mods tab. Shows the mod support switch, the game picker and setup for the mod tools (XXMI, the loader
-// Peebify uses), then switches between the Library and Browse views. The mod support switch and the NSFW toggle
+// Peebify uses), the frame rate unlock for games that have one, then switches between the Library and Browse views. The mod support switch and the NSFW toggle
 // live here too, since Settings has no Mods tab.
 export function ModsPage() {
   const t = useT();
@@ -167,6 +171,11 @@ export function ModsPage() {
     void refreshIfCurrent(shownId);
   };
 
+  const changeGameSetting = async (key: string, on: boolean) => {
+    await setModGameSetting(shownId, key, on);
+    void refreshIfCurrent(shownId);
+  };
+
   const rescanMods = async () => {
     if (rescanning) return;
     const gameId = shownId;
@@ -217,6 +226,7 @@ export function ModsPage() {
             games={status.supportedGames.map((g) => ({ id: g.id as GameId, variant: g.variant }))}
             onTurnOn={enableMaster}
           />
+          {game.fpsUnlock && <FpsUnlockSection gameId={shownId} gameName={game.name} />}
         </m.div>
       ) : (
         <m.div key="mods" custom={0.2} variants={fadeVariants} initial="initial" animate="animate" exit="exit">
@@ -283,6 +293,22 @@ export function ModsPage() {
                       description={t("mods.page.setup.dx11Description", { game: game.name })}
                     />
                   )}
+                  {status.gameSettings.map((setting) => (
+                    <SettingCard
+                      key={setting.key}
+                      icon={<Wand2 size={18} />}
+                      title={setting.label}
+                      description={setting.description}
+                      control={
+                        <Toggle
+                          checked={setting.value}
+                          disabled={!current}
+                          ariaLabel={setting.label}
+                          onChange={(v) => void changeGameSetting(setting.key, v)}
+                        />
+                      }
+                    />
+                  ))}
                   <SettingCard
                     icon={<RefreshCw size={18} />}
                     title={t("mods.page.setup.rescanTitle")}
@@ -298,11 +324,19 @@ export function ModsPage() {
                     }
                   />
                   {loaderSettings
-                    .filter((row) => row.kind === "bool" || row.kind === "millis")
+                    .filter((row) => row.kind === "bool" || row.kind === "millis" || row.kind === "choice")
                     .map((row) => (
                       <SettingCard
                         key={row.id}
-                        icon={row.kind === "bool" ? <Eye size={18} /> : <Timer size={18} />}
+                        icon={
+                          row.kind === "bool" ? (
+                            <Eye size={18} />
+                          ) : row.kind === "choice" ? (
+                            <SlidersHorizontal size={18} />
+                          ) : (
+                            <Timer size={18} />
+                          )
+                        }
                         title={row.label}
                         description={t("mods.page.setup.loaderSettingDescription", { description: row.description })}
                         control={
@@ -312,6 +346,16 @@ export function ModsPage() {
                               disabled={!current}
                               ariaLabel={row.label}
                               onChange={(v) => void changeLoaderSetting(row.id, v ? "1" : "0")}
+                            />
+                          ) : row.kind === "choice" ? (
+                            <SegmentedControl
+                              ariaLabel={row.label}
+                              options={(row.options ?? []).map((option) => ({
+                                value: option.value,
+                                label: option.label,
+                              }))}
+                              value={row.value}
+                              onChange={(v) => void changeLoaderSetting(row.id, v)}
                             />
                           ) : (
                             <NumberField
@@ -359,6 +403,8 @@ export function ModsPage() {
               )}
             </GroupBox>
           </section>
+
+          {game.fpsUnlock && <FpsUnlockSection gameId={shownId} gameName={game.name} />}
 
           {supported && (
             <>
