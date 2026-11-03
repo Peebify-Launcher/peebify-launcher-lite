@@ -17,7 +17,7 @@ tokio = { version = "1", features = ["rt", "sync", "time", "macros", "fs", "io-u
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "system-proxy", "stream", "http2"] }
 futures-util = "0.3"
 bytes = "1"
-parking_lot = "0.12"
+parking_lot = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 md-5 = "0.11"

@@ -19,7 +19,8 @@ export type GameId =
   | "bd2"
   | "arknights"
   | "bluearchive"
-  | "dna";
+  | "dna"
+  | "taimanin";
 
 export type GraphicsApi = "dx11" | "dx12";
 
@@ -58,7 +59,7 @@ export const GAMES: Game[] = [
     short: "WW",
     name: "Wuthering Waves",
     icon: "/icons/wuwa.webp",
-    wallpaperStatic: "/icons/wallpaper_wuwa_noneanimated.webp",
+    wallpaperStatic: "/icons/wallpaper_wuwa_noneanimated.avif",
     wallpaperFallback:
       "radial-gradient(120% 95% at 80% 12%, rgba(45,212,191,.45), rgba(45,212,191,0) 55%), linear-gradient(160deg,#0c2a2b 0%,#0a0e14 70%)",
     graphicsApiChoice: true,
@@ -70,7 +71,7 @@ export const GAMES: Game[] = [
     short: "ZZ",
     name: "Zenless Zone Zero",
     icon: "/icons/zzz.webp",
-    wallpaperStatic: "/icons/wallpaper_zzz_noneanimated.webp",
+    wallpaperStatic: "/icons/wallpaper_zzz_noneanimated.avif",
     wallpaperFallback:
       "radial-gradient(120% 95% at 80% 10%, rgba(255,212,0,.4), transparent 55%), linear-gradient(160deg,#241f08 0%,#0c0a08 70%)",
     graphicsApiChoice: true,
@@ -81,7 +82,7 @@ export const GAMES: Game[] = [
     short: "HSR",
     name: "Honkai: Star Rail",
     icon: "/icons/honkaistarrail.webp",
-    wallpaperStatic: "/icons/wallpaper_honkaistarrail_noneanimated.webp",
+    wallpaperStatic: "/icons/wallpaper_honkaistarrail_noneanimated.avif",
     wallpaperFallback:
       "radial-gradient(120% 95% at 80% 10%, rgba(150,130,255,.45), transparent 55%), linear-gradient(160deg,#181433 0%,#0a0a14 70%)",
     voicePackChoice: true,
@@ -91,7 +92,7 @@ export const GAMES: Game[] = [
     short: "NtE",
     name: "Neverness to Everness",
     icon: "/icons/nte.webp",
-    wallpaperStatic: "/icons/wallpaper_nte_noneanimated.webp",
+    wallpaperStatic: "/icons/wallpaper_nte_noneanimated.avif",
     wallpaperFallback:
       "radial-gradient(120% 95% at 80% 10%, rgba(255,93,158,.42), transparent 55%), linear-gradient(160deg,#2a1020 0%,#0d0810 70%)",
     contentPackChoice: true,
@@ -101,7 +102,7 @@ export const GAMES: Game[] = [
     short: "AE",
     name: "Arknights: Endfield",
     icon: "/icons/endfield.webp",
-    wallpaperStatic: "/icons/wallpaper_endfield_noneanimated.webp",
+    wallpaperStatic: "/icons/wallpaper_endfield_noneanimated.avif",
     wallpaperFallback:
       "radial-gradient(120% 95% at 80% 10%, rgba(255,196,0,.38), transparent 55%), linear-gradient(160deg,#26200a 0%,#0d0c08 70%)",
     supportsQuickRepair: false,
@@ -122,7 +123,7 @@ export const GAMES: Game[] = [
     short: "HI3",
     name: "Honkai Impact 3rd",
     icon: "/icons/honkai3d.webp",
-    wallpaperStatic: "/icons/wallpaper_hi3_noneanimated.webp",
+    wallpaperStatic: "/icons/wallpaper_hi3_noneanimated.avif",
     wallpaperFallback:
       "radial-gradient(120% 95% at 80% 10%, rgba(192,132,252,.42), transparent 55%), linear-gradient(160deg,#1d1233 0%,#0b0912 70%)",
     voicePackChoice: true,
@@ -132,7 +133,7 @@ export const GAMES: Game[] = [
     short: "PGR",
     name: "Punishing: Gray Raven",
     icon: "/icons/punishing.webp",
-    wallpaperStatic: "/icons/wallpaper_pgr_noneanimated.webp",
+    wallpaperStatic: "/icons/wallpaper_pgr_noneanimated.avif",
     wallpaperFallback:
       "radial-gradient(120% 95% at 80% 10%, rgba(255,107,87,.4), transparent 55%), linear-gradient(160deg,#2a1410 0%,#0f0a09 70%)",
     graphicsApiChoice: true,
@@ -142,7 +143,7 @@ export const GAMES: Game[] = [
     short: "GF2",
     name: "Girls' Frontline 2: Exilium",
     icon: "/icons/gfl2.webp",
-    wallpaperStatic: "/icons/wallpaper_gfl2_noneanimated.webp",
+    wallpaperStatic: "/icons/wallpaper_gfl2_noneanimated.avif",
     wallpaperFallback:
       "radial-gradient(120% 95% at 80% 10%, rgba(214,92,72,.36), transparent 55%), linear-gradient(160deg,#241312 0%,#0c0a0a 70%)",
   },
@@ -151,7 +152,7 @@ export const GAMES: Game[] = [
     short: "GF",
     name: "Girls' Frontline",
     icon: "/icons/gf1.webp",
-    wallpaperStatic: "/icons/wallpaper_gf1_noneanimated.webp",
+    wallpaperStatic: "/icons/wallpaper_gf1_noneanimated.avif",
     wallpaperFallback:
       "radial-gradient(120% 95% at 80% 10%, rgba(198,64,78,.34), transparent 55%), linear-gradient(160deg,#1f171a 0%,#0b0a0b 70%)",
     installHelpUrl: "https://store.steampowered.com/app/3887700/Girls_Frontline/",
@@ -178,7 +179,7 @@ export const GAMES: Game[] = [
     short: "BD2",
     name: "Brown Dust II",
     icon: "/icons/bd2.webp",
-    wallpaperStatic: "/icons/wallpaper_bd2_noneanimated.webp",
+    wallpaperStatic: "/icons/wallpaper_bd2_noneanimated.avif",
     wallpaperFallback:
       "radial-gradient(120% 95% at 80% 10%, rgba(133,121,201,.42), transparent 55%), linear-gradient(160deg,#1d1930 0%,#0b0a12 70%)",
     supportsQuickRepair: false,
@@ -191,7 +192,7 @@ export const GAMES: Game[] = [
     short: "AK",
     name: "Arknights",
     icon: "/icons/arknights.webp",
-    wallpaperStatic: "/icons/wallpaper_arknights_noneanimated.webp",
+    wallpaperStatic: "/icons/wallpaper_arknights_noneanimated.avif",
     wallpaperFallback:
       "radial-gradient(120% 95% at 80% 10%, rgba(59,130,246,.36), transparent 55%), linear-gradient(160deg,#111827 0%,#0a0b0e 70%)",
     graphicsApiChoice: true,
@@ -201,7 +202,7 @@ export const GAMES: Game[] = [
     short: "BA",
     name: "Blue Archive",
     icon: "/icons/bluearchive.webp",
-    wallpaperStatic: "/icons/wallpaper_bluearchive_noneanimated.webp",
+    wallpaperStatic: "/icons/wallpaper_bluearchive_noneanimated.avif",
     wallpaperFallback:
       "radial-gradient(120% 95% at 80% 10%, rgba(56,189,248,.36), transparent 55%), linear-gradient(160deg,#10243a 0%,#080d14 70%)",
     installHelpUrl: "https://store.steampowered.com/app/3557620/Blue_Archive/",
@@ -223,6 +224,20 @@ export const GAMES: Game[] = [
     supportsQuickRepair: false,
     get betaNote() {
       return t("games.notes.dna");
+    },
+  },
+  {
+    id: "taimanin",
+    short: "AT",
+    name: "Action Taimanin",
+    icon: "/icons/taimanin.webp",
+    wallpaperStatic: "/icons/wallpaper_taimanin_noneanimated.avif",
+    wallpaperFallback:
+      "radial-gradient(120% 95% at 80% 10%, rgba(124,58,237,.4), transparent 55%), linear-gradient(160deg,#1a1233 0%,#0a0912 70%)",
+    installHelpUrl: "https://store.steampowered.com/app/1335200/Action_Taimanin/",
+    managed: false,
+    get betaNote() {
+      return t("games.notes.steamOnly", { game: "Action Taimanin" });
     },
   },
 ];
@@ -258,6 +273,7 @@ const GAME_COLORS: Record<GameId, string> = {
   arknights: "#3b82f6",
   bluearchive: "#38bdf8",
   dna: "#c9a96e",
+  taimanin: "#7c3aed",
 };
 
 const HEX = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;

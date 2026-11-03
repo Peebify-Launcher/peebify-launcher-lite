@@ -85,7 +85,7 @@ export function useResourceQuality(
   { sizes: withSizes = false, initial = null }: { sizes?: boolean; initial?: ResourceQualityInfo | null } = {},
 ) {
   const game = gameById(gameId);
-  const quality =
+  const chosen =
     useCustomizationStore((s) => s.resourceQuality[gameId]) ?? DEFAULT_RESOURCE_QUALITY;
   const setResourceQuality = useCustomizationStore((s) => s.setResourceQuality);
   const push = useNotificationStore((s) => s.push);
@@ -108,6 +108,8 @@ export function useResourceQuality(
 
   const data = info?.gameId === gameId ? info.data : recall(reads.resourceQuality(gameId, withSizes));
   const onDisk = data?.installed ?? [];
+  const steamQuality = data?.steamQuality ?? null;
+  const quality = steamQuality ?? chosen;
   const pending = installed && isManaged(gameId) && onDisk.length > 0 && !onDisk.includes(quality);
 
   const check = useCallback(async () => {
@@ -148,7 +150,9 @@ export function useResourceQuality(
 
   return {
     quality,
-    setQuality: (q: ResourceQuality) => setResourceQuality(gameId, q),
+    setQuality: (q: ResourceQuality) => (steamQuality ? Promise.resolve() : setResourceQuality(gameId, q)),
+    steamLocked: steamQuality !== null,
+    refresh: () => setReload((n) => n + 1),
     installedLabel: onDisk.map(qualityLabel).join(" + "),
     loaded: data !== null,
     sizes: data?.sizes ?? null,

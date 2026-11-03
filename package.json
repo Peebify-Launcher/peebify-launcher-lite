@@ -8,6 +8,7 @@
   "license": "GPL-3.0-only",
   "scripts": {
     "deps": "npm install --prefer-offline --no-audit --no-fund && npm --prefix webui install --prefer-offline --no-audit --no-fund",
+    "update": "npm update --save --no-fund && npm --prefix webui update --save --no-fund && cargo update --verbose && (npm outdated || node -e 0 ) && (npm --prefix webui outdated || node -e 0 )",
     "predev": "npm run deps",
     "dev": "tauri dev",
     "tauri": "tauri",
@@ -15,6 +16,6 @@
     "build": "node scripts/build-installer.js"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.12.1"
+    "@tauri-apps/cli": "^2.12.4"
   }
 }

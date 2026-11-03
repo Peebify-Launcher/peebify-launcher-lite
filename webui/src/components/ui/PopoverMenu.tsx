@@ -17,12 +17,12 @@ import { useClickOutside, useDismissOnViewportChange, useEscapeKey } from "../..
 
 // ------------ Menu Look ------------
 // Every dropdown and pop-out looks like the Home page's Quick settings and Community tools (BottomRightActions): the
-// same glass panel, rows with a soft highlight and an icon tile, and a hairline under the button they open from.
-export const MENU_PANEL = "glass overflow-hidden rounded-ui shadow-2xl";
-export const MENU_DIVIDER = "mx-[12px] h-px bg-white/[0.08]";
+// same glass panel, and rows with a soft highlight and an icon tile.
+export const MENU_SURFACE = "glass overflow-hidden rounded-ui";
+export const MENU_PANEL = `${MENU_SURFACE} shadow-2xl`;
 
 export const menuRow = (danger = false) =>
-  `group flex w-full items-center gap-[10px] px-[12px] py-[7px] text-left text-[13px] transition-colors hover:bg-white/[0.06] ${
+  `menu-row group flex w-full items-center gap-[10px] px-[12px] py-[7px] text-left text-[13px] transition-colors ${
     danger ? "text-red-300" : "text-white/85"
   }`;
 

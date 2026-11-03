@@ -69,7 +69,7 @@ export function FirstRunSetup() {
       />
 
       <div className="relative flex h-full w-full">
-        <aside className="flex w-[264px] shrink-0 flex-col border-r border-white/[0.07] bg-black/25 px-7 py-8 xl:w-[328px] xl:px-9 xl:py-10">
+        <aside className="flex w-[264px] shrink-0 flex-col bg-black/25 px-7 py-8 xl:w-[328px] xl:px-9 xl:py-10">
           <div className="flex shrink-0 items-center gap-[10px]">
             <img
               src="/icons/app.png"
@@ -150,7 +150,7 @@ export function FirstRunSetup() {
             </div>
           </div>
 
-          <div className="flex shrink-0 items-center justify-end gap-4 border-t border-white/[0.06] pt-5">
+          <div className="flex shrink-0 items-center justify-end gap-4 pt-5">
             <button
               onClick={() => finishSetup(picked)}
               className="accent-grad flex items-center gap-[8px] rounded-ui px-[18px] py-[9px] text-[13px] font-semibold text-(--on-accent) transition duration-150 hover:opacity-90 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40"

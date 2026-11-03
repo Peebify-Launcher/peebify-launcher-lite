@@ -581,18 +581,17 @@ struct JobTarget {
 }
 
 struct ChunkJob {
-    url: String,
-    name: Box<str>,
+    name: Arc<str>,
     compressed: bool,
     md5: [u8; 16],
     size: u64,
-    fetch_size: u64,
     targets: Vec<JobTarget>,
 }
 
-fn build_chunk_jobs(files: &[Entry]) -> (Vec<Target>, Vec<ChunkJob>) {
+fn build_chunk_jobs(files: &[Entry]) -> (Vec<Target>, Vec<ChunkJob>, Vec<peebify_transfer::ChunkSpec>) {
     let mut targets: Vec<Target> = Vec::new();
     let mut jobs: Vec<ChunkJob> = Vec::new();
+    let mut specs: Vec<peebify_transfer::ChunkSpec> = Vec::new();
     let mut by_content: HashMap<([u8; 16], u64), usize> = HashMap::new();
 
     for file in files {
@@ -612,13 +611,17 @@ fn build_chunk_jobs(files: &[Entry]) -> (Vec<Target>, Vec<ChunkJob>) {
                 }
                 std::collections::hash_map::Entry::Vacant(slot) => {
                     slot.insert(jobs.len());
-                    jobs.push(ChunkJob {
+                    let name: Arc<str> = Arc::from(&*chunk.name);
+                    specs.push(peebify_transfer::ChunkSpec {
+                        id: Arc::clone(&name),
                         url: store.url(chunk),
-                        name: chunk.name.clone(),
+                        size_hint: chunk.compressed_size,
+                    });
+                    jobs.push(ChunkJob {
+                        name,
                         compressed: store.compressed,
                         md5: chunk.md5,
                         size: chunk.size,
-                        fetch_size: chunk.compressed_size,
                         targets: vec![target],
                     });
                 }
@@ -630,7 +633,7 @@ fn build_chunk_jobs(files: &[Entry]) -> (Vec<Target>, Vec<ChunkJob>) {
             missing: chunks.len(),
         });
     }
-    (targets, jobs)
+    (targets, jobs, specs)
 }
 
 fn decode_chunk<'a>(job: &ChunkJob, raw: &'a [u8]) -> Result<std::borrow::Cow<'a, [u8]>, String> {
@@ -734,7 +737,7 @@ pub(super) async fn fetch_chunked(
         .map_err(|e| format!("file setup task failed: {e}"))??;
     }
 
-    let (targets, jobs) = build_chunk_jobs(files);
+    let (targets, jobs, specs) = build_chunk_jobs(files);
     if jobs.is_empty() {
         return Ok(Sealed::nothing_written());
     }
@@ -747,14 +750,6 @@ pub(super) async fn fetch_chunked(
         );
     }
 
-    let specs: Vec<peebify_transfer::ChunkSpec> = jobs
-        .iter()
-        .map(|j| peebify_transfer::ChunkSpec {
-            id: j.name.to_string(),
-            url: j.url.clone(),
-            size_hint: j.fetch_size,
-        })
-        .collect();
     let ledger = peebify_transfer::Ledger::new(None);
     let writer = Arc::new(ChunkWriter {
         install_dir: install_dir.to_path_buf(),
@@ -1090,7 +1085,7 @@ mod tests {
     }
 
     fn writer_for(dir: &TempDir, files: &[Entry]) -> (ChunkWriter, Arc<peebify_transfer::Ledger>) {
-        let (targets, jobs) = build_chunk_jobs(files);
+        let (targets, jobs, _) = build_chunk_jobs(files);
         let ledger = peebify_transfer::Ledger::new(None);
         let writer = ChunkWriter {
             install_dir: dir.0.clone(),

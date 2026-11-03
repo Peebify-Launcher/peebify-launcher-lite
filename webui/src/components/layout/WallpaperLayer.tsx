@@ -1,15 +1,16 @@
 // ------------ Wallpaper Layer ------------
 // The full-window background for the selected game. Uses the user's custom wallpaper if set, otherwise the
-// game's own, and falls back to a still image if a video fails to load. Videos pause when the launcher is hidden
-// or a game is running. Also the boot gate, which keeps the window hidden until the first wallpaper has painted.
-import { useState } from "react";
+// game's own, and falls back to a still image if a video fails to load. Videos pause when the launcher is hidden,
+// covered by other windows or a game is running, and after a minute hidden the server's video gives way to its still
+// so its decoder is let go. Also the boot gate, which keeps the window hidden until the first wallpaper has painted.
+import { useEffect, useState } from "react";
 import { useUiStore } from "../../store/uiStore";
 import { useSettingsStore } from "../../store/settingsStore";
 import { useCustomizationStore } from "../../store/customizationStore";
 import { useRemoteMediaStore } from "../../store/remoteContentStore";
 import { gameById } from "../../data/games";
 import { wallpaperFor } from "../../lib/customMedia";
-import { useRendererSuspended, useWindowFocused } from "../../lib/launcherHooks";
+import { useRendererSuspended, useWindowCovered, useWindowFocused } from "../../lib/launcherHooks";
 import { useGamesStore } from "../../store/gamesStore";
 import { CrossfadeMedia, type Wave } from "../ui/CrossfadeMedia";
 import { log } from "../../lib/log";
@@ -37,9 +38,12 @@ export function gameSwitchWave(el?: Element | null): Wave | null {
   return { x: x - (box?.left ?? 0), y: y - (box?.top ?? 0), r, at };
 }
 
+const PARK_AFTER_MS = 60_000;
+
 export function WallpaperLayer() {
   const game = gameById(useUiStore((s) => s.activeGameId));
   const suspended = useRendererSuspended();
+  const covered = useWindowCovered();
   const onHome = useUiStore((s) => s.activeView === "home");
   const focused = useWindowFocused();
   const gameRunning = useGamesStore((s) => s.runningGames.length > 0);
@@ -55,8 +59,15 @@ export function WallpaperLayer() {
   const [failedSources, setFailedSources] = useState<ReadonlySet<string>>(() => new Set());
   const reduce = useReducedMotionSafe();
 
+  const [parked, setParked] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setParked(suspended), suspended ? PARK_AFTER_MS : 0);
+    return () => window.clearTimeout(timer);
+  }, [suspended]);
+  const park = suspended && parked;
+
   const candidates = [
-    wallpaperFor(game.id, slice, remote, animated),
+    wallpaperFor(game.id, slice, remote, animated && !park),
     wallpaperFor(game.id, undefined, remote, false),
     { src: game.wallpaperStatic, video: false },
   ];
@@ -76,7 +87,8 @@ export function WallpaperLayer() {
           src={mediaSrc}
           video={useVideo}
           autoPlay={animated}
-          playing={!suspended && onHome && (focused || !gameRunning)}
+          playing={!suspended && onHome && (focused || (!covered && !gameRunning))}
+          instant={suspended}
           onReady={markWallpaperPainted}
           onError={onMediaError}
           wave={reduce ? undefined : gameSwitchWave}

@@ -475,7 +475,7 @@ export function InstallModalBody({ gameId, onClose }: { gameId: GameId; onClose:
       {identity}
       {managed && (
         <div
-          className={`relative flex flex-col gap-[9px] border-t border-white/[0.12] pt-[14px] text-[12.5px] tabular-nums transition-opacity duration-150 ${refreshing ? "opacity-60" : ""}`}
+          className={`relative flex flex-col gap-[9px] pt-[14px] text-[12.5px] tabular-nums transition-opacity duration-150 ${refreshing ? "opacity-60" : ""}`}
         >
           <SummaryLine
             label={t("install.summary.download")}

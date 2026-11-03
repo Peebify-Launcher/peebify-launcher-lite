@@ -193,7 +193,7 @@ function News({ banner }: { banner: string }) {
           ))}
         </div>
       </div>
-      <div className="flex items-center gap-[8px] border-b border-white/[0.07] px-[15px] py-[10px]">
+      <div className="flex items-center gap-[8px] px-[15px] py-[10px]">
         <Newspaper size={14} className="shrink-0 text-white/45" />
         <h3 className="text-[12.5px] font-semibold text-white/85">{t("home.news.title")}</h3>
       </div>
@@ -202,7 +202,7 @@ function News({ banner }: { banner: string }) {
           {titleWidths.map((w, i) => (
             <div
               key={i}
-              className="flex h-[33px] w-full items-center justify-between gap-3 rounded-[7px] border-b border-white/[0.06] px-[7px] last:border-b-0"
+              className="flex h-[33px] w-full items-center justify-between gap-3 rounded-[7px] px-[7px]"
             >
               <span className="h-[10px] rounded-[3px] bg-white/[0.55]" style={{ width: w }} />
               <span className="h-[8px] w-[34px] shrink-0 rounded-[3px] bg-white/[0.3]" />

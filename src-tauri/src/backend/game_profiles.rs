@@ -8,9 +8,9 @@ use std::sync::OnceLock;
 
 use serde_json::{json, Value};
 
-pub const GAME_IDS: [&str; 15] = [
+pub const GAME_IDS: [&str; 16] = [
     "wuwa", "zzz", "hsr", "nte", "endfield", "genshin", "hi3", "pgr", "gf2", "gf1", "re1999", "bd2",
-    "arknights", "bluearchive", "dna",
+    "arknights", "bluearchive", "dna", "taimanin",
 ];
 pub const DEFAULT_GAME_ID: &str = "wuwa";
 pub const VOICE_LANGUAGES: [&str; 4] = ["en-us", "ja-jp", "ko-kr", "zh-cn"];
@@ -193,6 +193,7 @@ fn profiles() -> &'static Value {
 
                 "steamAppId": "3513350",
                 "steamAppIdFiles": [["Client", "Binaries", "Win64", "steam_appid.txt"]],
+                "steamLaunchArgs": ["-krqlv=hd"],
 
                 "graphicsApiArgs": { "dx11": [], "dx12": ["-dx12"] },
                 "graphicsApiDefault": "dx12",
@@ -639,7 +640,7 @@ fn profiles() -> &'static Value {
                 "wallpaperSlug": "girls-frontline",
                 "displayName": "Girls' Frontline",
                 "supportsManagedInstall": false,
-                "newsSource": "gf1",
+                "newsSource": "steam",
 
                 "executableName": "GirlsFrontLine.exe",
                 "clientProcessName": "GirlsFrontLine.exe",
@@ -888,6 +889,36 @@ fn profiles() -> &'static Value {
                     "discord": "https://discord.com/invite/CuYCcPhKfA",
                     "youtube": "https://www.youtube.com/@DuetNightAbyss_Official",
                     "x": "https://x.com/DNAbyss_EN"
+                }
+            },
+            "taimanin": {
+                "wallpaperSlug": "action-taimanin",
+                "displayName": "Action Taimanin",
+                "supportsManagedInstall": false,
+                "newsSource": "steam",
+
+                "executableName": "ActionTaimanin.exe",
+                "clientProcessName": "ActionTaimanin.exe",
+
+                "steamAppId": "1335200",
+
+                "communityTools": {
+                    "official": [
+                        {
+                            "name": "Action Taimanin Official",
+                            "url": "https://www.actiontaimanin.net/"
+                        },
+                        {
+                            "name": "Action Taimanin News",
+                            "url": "https://www.actiontaimanin.net/news"
+                        }
+                    ],
+                    "community": []
+                },
+
+                "socialUrls": {
+                    "youtube": "https://www.youtube.com/c/officialactiontaimanin",
+                    "x": "https://x.com/Action_Taimanin"
                 }
             }
         });

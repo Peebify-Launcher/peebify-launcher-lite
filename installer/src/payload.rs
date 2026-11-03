@@ -1,16 +1,20 @@
 // ------------ Installer Payload ------------
-// The launcher files travel inside setup.exe: tar + zstd glued to the end, then a manifest and a footer with a
-// SHA-256. `pack` builds that during the build, and install checks and unpacks it into the install folder.
+// The launcher files travel inside setup.exe: tar + xz (x86 filter) glued to the end, then a manifest and a footer
+// with a SHA-256. scripts/build-installer.js packs it, and install checks and unpacks it into the install folder.
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+type Decoder = lzma_rust2::XzReader<BufReader<CountingReader<SectionReader>>>;
+
 pub const FOOTER_MAGIC: &[u8; 8] = b"PBFYINST";
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 pub const FOOTER_LEN: usize = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,18 +28,6 @@ pub struct Footer {
 }
 
 impl Footer {
-    pub fn to_bytes(self) -> [u8; FOOTER_LEN] {
-        let mut out = [0u8; FOOTER_LEN];
-        out[0..8].copy_from_slice(FOOTER_MAGIC);
-        out[8..12].copy_from_slice(&self.format_version.to_le_bytes());
-        out[16..24].copy_from_slice(&self.payload_offset.to_le_bytes());
-        out[24..32].copy_from_slice(&self.payload_len.to_le_bytes());
-        out[32..40].copy_from_slice(&self.manifest_offset.to_le_bytes());
-        out[40..48].copy_from_slice(&self.manifest_len.to_le_bytes());
-        out[48..80].copy_from_slice(&self.sha256);
-        out
-    }
-
     pub fn from_bytes(buf: &[u8; FOOTER_LEN]) -> Option<Self> {
         if &buf[0..8] != FOOTER_MAGIC {
             return None;
@@ -160,21 +152,46 @@ impl Payload {
         Ok(())
     }
 
+    fn decoder(&self) -> Result<(Decoder, Arc<AtomicU64>), String> {
+        let f = File::open(&self.exe_path).map_err(|e| format!("open: {e}"))?;
+        let region = SectionReader::new(f, self.footer.payload_offset, self.footer.payload_len)
+            .map_err(|e| format!("seek payload: {e}"))?;
+        let counted = CountingReader::new(region);
+        let counter = counted.counter();
+        let reader = lzma_rust2::XzReader::new(BufReader::with_capacity(1 << 16, counted), false);
+        Ok((reader, counter))
+    }
+
+    pub fn list(&self) -> Result<Vec<String>, String> {
+        let (reader, _) = self.decoder()?;
+        let mut archive = tar::Archive::new(reader);
+        let mut files = Vec::new();
+        for entry in archive.entries().map_err(|e| format!("tar entries: {e}"))? {
+            let mut entry = entry.map_err(|e| format!("tar entry: {e}"))?;
+            let rel = entry
+                .path()
+                .map_err(|e| format!("tar path: {e}"))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            std::io::copy(&mut entry, &mut std::io::sink()).map_err(|e| format!("read {rel}: {e}"))?;
+            if entry.header().entry_type().is_file() {
+                files.push(rel);
+            }
+        }
+        std::io::copy(&mut archive.into_inner(), &mut std::io::sink())
+            .map_err(|e| format!("payload end: {e}"))?;
+        Ok(files)
+    }
+
     pub fn extract_to(
         &self,
         dest: &Path,
         cancel: &crate::msg::Cancel,
         mut progress: impl FnMut(f32),
     ) -> Result<Vec<String>, crate::msg::EngineError> {
-        let f = File::open(&self.exe_path).map_err(|e| format!("open: {e}"))?;
-        let region = SectionReader::new(f, self.footer.payload_offset, self.footer.payload_len)
-            .map_err(|e| format!("seek payload: {e}"))?;
         let payload_len = self.footer.payload_len.max(1);
-        let counted = CountingReader::new(region);
-        let counter = counted.counter();
-        let zstd =
-            zstd::stream::read::Decoder::new(counted).map_err(|e| format!("zstd init: {e}"))?;
-        let mut archive = tar::Archive::new(zstd);
+        let (reader, counter) = self.decoder()?;
+        let mut archive = tar::Archive::new(reader);
 
         std::fs::create_dir_all(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
         let mut written = Vec::new();
@@ -225,143 +242,11 @@ impl Payload {
     }
 }
 
-pub fn pack(
-    stub: &Path,
-    payload_dir: &Path,
-    out: &Path,
-    version: &str,
-    main_binary: &str,
-) -> Result<PayloadManifest, String> {
-    let mut files = Vec::new();
-    collect_files(payload_dir, payload_dir, &mut files)?;
-    if files.is_empty() {
-        return Err(format!("payload dir {} is empty", payload_dir.display()));
-    }
-    if !files.iter().any(|(rel, _)| rel == main_binary) {
-        return Err(format!(
-            "main binary '{main_binary}' not found in payload root"
-        ));
-    }
-
-    let stub_bytes =
-        std::fs::read(stub).map_err(|e| format!("read stub {}: {e}", stub.display()))?;
-    if Footer::from_bytes_at_end(&stub_bytes).is_some() {
-        return Err("stub already has a payload appended".into());
-    }
-
-    let total_bytes: u64 =
-        files.iter().map(|(_, size)| size).sum::<u64>() + stub_bytes.len() as u64;
-    let manifest = PayloadManifest {
-        format_version: FORMAT_VERSION,
-        version: version.into(),
-        main_binary: main_binary.into(),
-        estimated_size_kb: total_bytes / 1024,
-        file_count: files.len() as u64,
-        created_at: chrono::Utc::now().to_rfc3339(),
-    };
-    let manifest_bytes =
-        serde_json::to_vec(&manifest).map_err(|e| format!("serialize manifest: {e}"))?;
-
-    let mut out_file = File::create(out).map_err(|e| format!("create {}: {e}", out.display()))?;
-    out_file
-        .write_all(&stub_bytes)
-        .map_err(|e| format!("write stub: {e}"))?;
-    let payload_offset = stub_bytes.len() as u64;
-
-    {
-        let mut encoder = zstd::stream::write::Encoder::new(&mut out_file, 19)
-            .map_err(|e| format!("zstd init: {e}"))?;
-        let mut tar = tar::Builder::new(&mut encoder);
-        for (rel, _) in &files {
-            let full = payload_dir.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-            let mut f = File::open(&full).map_err(|e| format!("open {}: {e}", full.display()))?;
-            tar.append_file(rel, &mut f)
-                .map_err(|e| format!("tar {}: {e}", rel))?;
-        }
-        tar.finish().map_err(|e| format!("tar finish: {e}"))?;
-        drop(tar);
-        encoder.finish().map_err(|e| format!("zstd finish: {e}"))?;
-    }
-
-    let manifest_offset = out_file
-        .seek(SeekFrom::End(0))
-        .map_err(|e| format!("seek: {e}"))?;
-    let payload_len = manifest_offset - payload_offset;
-    out_file
-        .write_all(&manifest_bytes)
-        .map_err(|e| format!("write manifest: {e}"))?;
-
-    let mut hasher = Sha256::new();
-    {
-        let mut f = File::open(out).map_err(|e| format!("reopen out: {e}"))?;
-        f.seek(SeekFrom::Start(payload_offset))
-            .map_err(|e| format!("seek: {e}"))?;
-        let mut remaining = payload_len + manifest_bytes.len() as u64;
-        let mut buf = vec![0u8; 1 << 20];
-        while remaining > 0 {
-            let want = remaining.min(buf.len() as u64) as usize;
-            f.read_exact(&mut buf[..want])
-                .map_err(|e| format!("hash pass: {e}"))?;
-            hasher.update(&buf[..want]);
-            remaining -= want as u64;
-        }
-    }
-    let mut sha256 = [0u8; 32];
-    sha256.copy_from_slice(&hasher.finalize());
-
-    let footer = Footer {
-        format_version: FORMAT_VERSION,
-        payload_offset,
-        payload_len,
-        manifest_offset,
-        manifest_len: manifest_bytes.len() as u64,
-        sha256,
-    };
-    out_file
-        .write_all(&footer.to_bytes())
-        .map_err(|e| format!("write footer: {e}"))?;
-    out_file.flush().map_err(|e| format!("flush: {e}"))?;
-    Ok(manifest)
-}
-
 fn is_plain_file_name(name: &str) -> bool {
     let mut components = Path::new(name).components();
     matches!(components.next(), Some(std::path::Component::Normal(_)))
         && components.next().is_none()
         && !name.contains([':', '/', '\\'])
-}
-
-impl Footer {
-    fn from_bytes_at_end(bytes: &[u8]) -> Option<Footer> {
-        if bytes.len() < FOOTER_LEN {
-            return None;
-        }
-        let tail: &[u8; FOOTER_LEN] = bytes[bytes.len() - FOOTER_LEN..].try_into().ok()?;
-        Footer::from_bytes(tail)
-    }
-}
-
-fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, u64)>) -> Result<(), String> {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .map_err(|e| format!("read_dir {}: {e}", dir.display()))?
-        .collect::<Result<_, _>>()
-        .map_err(|e| format!("read_dir entry: {e}"))?;
-    entries.sort_by_key(|e| e.file_name());
-    for entry in entries {
-        let path = entry.path();
-        let meta = entry.metadata().map_err(|e| format!("stat: {e}"))?;
-        if meta.is_dir() {
-            collect_files(root, &path, out)?;
-        } else if meta.is_file() {
-            let rel = path
-                .strip_prefix(root)
-                .map_err(|e| format!("strip_prefix: {e}"))?
-                .to_string_lossy()
-                .replace('\\', "/");
-            out.push((rel, meta.len()));
-        }
-    }
-    Ok(())
 }
 
 struct SectionReader {

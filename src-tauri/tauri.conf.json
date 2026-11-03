@@ -7,7 +7,8 @@
     "frontendDist": "../webui/dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "npm --prefix webui run dev",
-    "beforeBuildCommand": "npm --prefix webui run build"
+    "beforeBuildCommand": "npm --prefix webui run build",
+    "removeUnusedCommands": true
   },
   "app": {
     "windows": [

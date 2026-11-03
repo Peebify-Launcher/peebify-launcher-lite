@@ -180,12 +180,12 @@ pub async fn get_pgr_news() -> Result<Value, String> {
     Ok(pgr_to_peebify_news(&main))
 }
 
-// ------------ Girls' Frontline News ------------
-// Girls' Frontline has no news site of its own, so this reads its Steam news and treats posts with words like
-// maintenance or compensation in the title as notices.
-const API_URL: &str = "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/";
-const GF1_ARTICLE_URL: &str = "https://store.steampowered.com/news/app";
-const APP_ID: &str = "3887700";
+// ------------ Steam News ------------
+// For games whose news only lives on Steam (Girls' Frontline, Action Taimanin): reads the app's events, the feed behind
+// Steam's News Hub, so posts open on their own hub page and capsule images become slides. Maintenance-style titles are notices.
+const STEAM_EVENTS_API: &str = "https://store.steampowered.com/events/ajaxgetpartnereventspageable/";
+const STEAM_ARTICLE_URL: &str = "https://store.steampowered.com/news/app";
+const STEAM_CLAN_IMAGES: &str = "https://clan.akamai.steamstatic.com/images";
 
 const FETCH_COUNT: usize = 40;
 
@@ -218,53 +218,158 @@ pub(crate) fn local_month_day(timestamp: i64) -> String {
     }
 }
 
-fn gf1_collect_articles(items: &[&Value], notice: bool) -> Vec<Value> {
-    let mut matching: Vec<&Value> = items
+fn steam_event_url(event: &Value, app_id: &str) -> String {
+    format!("{STEAM_ARTICLE_URL}/{app_id}/view/{}", as_str(event.get("gid")))
+}
+
+fn steam_collect_articles(events: &[&Value], app_id: &str, notice: bool) -> Vec<Value> {
+    let matching: Vec<&Value> = events
         .iter()
         .copied()
-        .filter(|item| is_notice(as_str(item.get("title"))) == notice)
+        .filter(|event| is_notice(as_str(event.get("event_name"))) == notice)
         .collect();
 
-    matching.sort_by_key(|item| std::cmp::Reverse(as_i64(item.get("date"))));
-
-    dedupe_take(matching, |item| as_i64(item.get("gid")))
+    dedupe_take(matching, |event| as_i64(event.get("gid")))
         .into_iter()
-        .map(|item| {
+        .map(|event| {
             article(
-                as_str(item.get("title")),
-                format!(
-                    "{GF1_ARTICLE_URL}/{APP_ID}/view/{}",
-                    as_str(item.get("gid"))
-                ),
-                local_month_day(as_i64(item.get("date"))),
+                as_str(event.get("event_name")).trim(),
+                steam_event_url(event, app_id),
+                local_month_day(as_i64(event.get("rtime32_start_time"))),
             )
         })
         .collect()
 }
 
-fn gf1_to_peebify_news(appnews: &Value) -> Value {
+fn steam_capsule_url(event: &Value) -> Option<String> {
+    let clan = as_str(event.get("clan_steamid")).parse::<u64>().ok()? & 0xFFFF_FFFF;
+    let data: Value = serde_json::from_str(as_str(event.get("jsondata"))).ok()?;
+    let file = data
+        .get("localized_capsule_image")?
+        .as_array()?
+        .iter()
+        .map(|image| as_str(Some(image)))
+        .find(|image| !image.is_empty())?;
+    let plain = file
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    plain.then(|| format!("{STEAM_CLAN_IMAGES}/{clan}/{file}"))
+}
+
+fn steam_collect_slideshow(events: &[&Value], app_id: &str) -> Vec<Value> {
+    let mut seen: Vec<String> = Vec::with_capacity(MAX_SLIDES);
+    let mut slides = Vec::with_capacity(MAX_SLIDES);
+    for event in events {
+        let Some(url) = steam_capsule_url(event) else {
+            continue;
+        };
+        if seen.contains(&url) {
+            continue;
+        }
+        slides.push(slide(&url, &steam_event_url(event, app_id)));
+        seen.push(url);
+        if slides.len() == MAX_SLIDES {
+            break;
+        }
+    }
+    slides
+}
+
+fn steam_to_peebify_news(feed: &Value, app_id: &str) -> Value {
     let empty = Vec::new();
-    let items: Vec<&Value> = appnews
-        .get("newsitems")
-        .and_then(|v| v.as_array())
+    let mut events: Vec<&Value> = feed
+        .get("events")
+        .and_then(Value::as_array)
         .unwrap_or(&empty)
         .iter()
-        .filter(|item| !as_str(item.get("title")).is_empty())
+        .filter(|event| as_i64(event.get("hidden")) == 0)
+        .filter(|event| !as_str(event.get("event_name")).trim().is_empty())
         .collect();
 
+    events.sort_by_key(|event| std::cmp::Reverse(as_i64(event.get("rtime32_start_time"))));
+
     envelope(
-        gf1_collect_articles(&items, true),
-        gf1_collect_articles(&items, false),
-        Vec::new(),
+        steam_collect_articles(&events, app_id, true),
+        steam_collect_articles(&events, app_id, false),
+        steam_collect_slideshow(&events, app_id),
     )
 }
 
-pub async fn get_gf1_news() -> Result<Value, String> {
-    let url = format!("{API_URL}?appid={APP_ID}&count={FETCH_COUNT}&maxlength=1");
-    let response = http::get_json(&url).await?;
-    Ok(gf1_to_peebify_news(
-        response.get("appnews").unwrap_or(&Value::Null),
-    ))
+pub async fn get_steam_news(profile: &Value) -> Result<Value, String> {
+    let app_id = super::game_profiles::required_str(profile, "steamAppId")?;
+    let url = format!(
+        "{STEAM_EVENTS_API}?clan_accountid=0&appid={app_id}&offset=0&count={FETCH_COUNT}&l=english"
+    );
+    let feed = http::get_json(&url).await?;
+    if as_i64(feed.get("success")) != 1 {
+        return Err(format!("Steam events for app {app_id} answered without success"));
+    }
+    Ok(steam_to_peebify_news(&feed, app_id))
+}
+
+#[cfg(test)]
+mod steam_tests {
+    use super::*;
+
+    const CLAN: &str = "103582791468217258";
+
+    fn event(gid: &str, name: &str, at: i64, capsule: Option<&str>) -> Value {
+        let images = capsule.map_or_else(Vec::new, |file| vec![json!(file)]);
+        json!({
+            "gid": gid,
+            "clan_steamid": CLAN,
+            "event_name": name,
+            "rtime32_start_time": at,
+            "hidden": 0,
+            "jsondata": json!({ "localized_capsule_image": images }).to_string(),
+        })
+    }
+
+    #[test]
+    fn posts_split_into_notices_and_news_that_open_on_their_own_hub_page() {
+        let mut hidden = event("15", "Hidden draft", 1_761_700_000, None);
+        hidden["hidden"] = json!(1);
+        let feed = json!({ "success": 1, "events": [
+            event("704408827984878090", "October 27th Update Complete", 1_761_552_000, None),
+            event("760703279879422723", "[IMPORTANT] Upcoming Maintenance", 1_761_465_600, None),
+            event("704409462168879435", "[EVENT] Website Event Live!", 1_761_638_400, None),
+            event("14", "  ", 1_761_638_400, None),
+            hidden,
+        ]});
+        let news = steam_to_peebify_news(&feed, "1335200");
+        let notices = news["guidance"]["notice"]["contents"].as_array().unwrap();
+        let posts = news["guidance"]["news"]["contents"].as_array().unwrap();
+
+        assert_eq!(notices.len(), 1);
+        assert_eq!(
+            notices[0]["jumpUrl"],
+            "https://store.steampowered.com/news/app/1335200/view/760703279879422723"
+        );
+        assert_eq!(posts.len(), 2);
+        assert_eq!(posts[0]["content"], "[EVENT] Website Event Live!");
+        assert_eq!(
+            posts[1]["jumpUrl"],
+            "https://store.steampowered.com/news/app/1335200/view/704408827984878090"
+        );
+    }
+
+    #[test]
+    fn capsule_images_become_slides_newest_first_without_repeats() {
+        let feed = json!({ "success": 1, "events": [
+            event("1", "Older patch", 100, Some("aaa.jpg")),
+            event("2", "Newest", 300, Some("logo.png")),
+            event("3", "No image", 250, None),
+            event("4", "Same logo", 200, Some("logo.png")),
+            event("5", "Odd file", 150, Some("../x.png")),
+        ]});
+        let slides = steam_to_peebify_news(&feed, "1335200")["slideshow"].clone();
+        let slides = slides.as_array().unwrap();
+
+        assert_eq!(slides.len(), 2);
+        assert_eq!(slides[0]["url"], "https://clan.akamai.steamstatic.com/images/38695850/logo.png");
+        assert_eq!(slides[0]["jumpUrl"], "https://store.steampowered.com/news/app/1335200/view/2");
+        assert_eq!(slides[1]["url"], "https://clan.akamai.steamstatic.com/images/38695850/aaa.jpg");
+    }
 }
 
 // ------------ Girls' Frontline 2 News ------------
@@ -1107,6 +1212,7 @@ mod channels {
     use super::{hoyoplay, nexon_forum};
 
     const NEWS_CACHE_TTL: Duration = Duration::from_secs(60 * 10);
+    const CONFIG_WAIT: Duration = Duration::from_secs(6);
 
     static NEWS_CACHE: http::TtlCache<Value> =
         http::TtlCache::new(NEWS_CACHE_TTL, game_profiles::GAME_IDS.len());
@@ -1229,7 +1335,7 @@ mod channels {
             (Some("yostar"), _) => ("Yostar", yostar::get_news(profile).await),
             (_, Some("nexon")) => ("Nexon forum", nexon_forum::get_news(profile).await),
             (_, Some("pgr")) => ("PGR", super::get_pgr_news().await),
-            (_, Some("gf1")) => ("GF1", super::get_gf1_news().await),
+            (_, Some("steam")) => ("Steam", super::get_steam_news(profile).await),
             (Some("netease"), _) => ("NTE", super::nte_site::get_nte_news().await),
             _ => return None,
         };
@@ -1281,9 +1387,11 @@ mod channels {
         }
 
         let api_config = app.state::<BackendState>().api_config.clone();
-        if !api_config.is_loaded() && http::is_online().await {
-            if let Err(e) = api_config.initialize().await {
-                log::warn!("news: API config still empty after lazy init attempt: {e}");
+        if !api_config.is_loaded() {
+            match tokio::time::timeout(CONFIG_WAIT, api_config.initialize()).await {
+                Ok(Err(e)) => log::warn!("news: API config still empty after lazy init attempt: {e}"),
+                Err(_) => log::warn!("news: API config not ready after {} s", CONFIG_WAIT.as_secs()),
+                Ok(Ok(())) => {}
             }
         }
 
@@ -1352,7 +1460,7 @@ mod nte_site {
     use std::sync::OnceLock;
     use std::time::Duration;
 
-    use regex::Regex;
+    use regex_lite::Regex;
     use serde_json::{json, Value};
 
     use super::super::http;
@@ -1415,7 +1523,7 @@ mod nte_site {
 
     fn decode_html_entities(text: &str) -> String {
         entity_re()
-            .replace_all(text, |caps: &regex::Captures<'_>| {
+            .replace_all(text, |caps: &regex_lite::Captures<'_>| {
                 let body = &caps[1];
                 if let Some(numeric) = body.strip_prefix('#') {
                     let code = if let Some(hex) = numeric

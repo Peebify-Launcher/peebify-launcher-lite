@@ -2,7 +2,7 @@
 // The Settings tab with its tab strip and the game banner at the top of the Games tab.
 import { useEffect, useMemo, useRef, type KeyboardEvent, type ReactNode, useState } from "react";
 import { AnimatePresence, m } from "framer-motion";
-import { fadeVariants, pageVariants, springThumb } from "../../lib/motion";
+import { fadeVariants, springThumb } from "../../lib/motion";
 import {
   SETTINGS_SECTIONS,
   type Setting,
@@ -117,7 +117,7 @@ export function SettingsPage() {
   };
 
   return (
-    <m.div variants={pageVariants} className="absolute inset-0 flex flex-col">
+    <div className="absolute inset-0 flex flex-col">
       <div className="shrink-0 px-10 pt-6">
         <h1 className="mb-4 text-[24px] font-semibold leading-tight">{t("common.settings")}</h1>
         <SettingsTabStrip
@@ -137,13 +137,6 @@ export function SettingsPage() {
         <AnimatePresence mode="wait" initial={false}>
           <m.div key={cat} variants={fadeVariants} initial="initial" animate="animate" exit="exit">
             <div className="mx-auto max-w-[1260px]">
-              {cat !== "games" && (
-                <div className="mb-6 border-b border-white/10 pb-4">
-                  <h2 className="text-[18px] font-semibold">{t(section.title)}</h2>
-                  <p className="mt-1 text-[14px] text-white/55">{t(section.subtitle)}</p>
-                </div>
-              )}
-
               {cat === "games" ? (
                 <div className="flex flex-col gap-7 pb-4">
                   <GameBanner gameId={settingsGameId} />
@@ -164,7 +157,7 @@ export function SettingsPage() {
           </m.div>
         </AnimatePresence>
       </div>
-    </m.div>
+    </div>
   );
 }
 

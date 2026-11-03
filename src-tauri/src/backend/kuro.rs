@@ -346,8 +346,34 @@ pub(super) fn bundle_bytes(game_config: &Value, bundle: &str) -> Option<(u64, u6
     Some((download, install))
 }
 
+fn steam_pinned_quality(profile: &Value) -> Option<String> {
+    let fixed: Vec<&str> = profile.get("steamLaunchArgs")?.as_array()?.iter().filter_map(Value::as_str).collect();
+    profile["resourceQualityArgs"].as_object()?.iter().find_map(|(quality, args)| {
+        let args = args.as_array()?;
+        (!args.is_empty() && args.iter().all(|arg| arg.as_str().is_some_and(|arg| fixed.contains(&arg))))
+            .then(|| quality.clone())
+    })
+}
+
+pub(super) fn steam_quality(app: &AppHandle, profile: &Value) -> Option<String> {
+    let pinned = steam_pinned_quality(profile)?;
+    let config = &app.state::<BackendState>().config;
+    let profile_id = game_profiles::profile_id(profile);
+    if config.get(&format!("games.{profile_id}.launchViaSteam")) == Value::Bool(false) {
+        return None;
+    }
+    let game_path = config.get(&format!("games.{profile_id}.gamePath"));
+    let root = Path::new(game_path.as_str().filter(|p| !p.is_empty())?);
+    super::steam::detect(root, profile)?;
+    super::steam::steam_exe()?;
+    Some(pinned)
+}
+
 pub(super) fn selected_quality(app: &AppHandle, profile: &Value) -> Option<String> {
     let default = game_profiles::resource_quality_default(profile)?;
+    if let Some(quality) = steam_quality(app, profile) {
+        return Some(quality);
+    }
     let key = format!("games.{}.resourceQuality", game_profiles::profile_id(profile));
     let chosen = app.state::<BackendState>().config.get(&key);
     Some(match chosen.as_str() {
@@ -624,7 +650,7 @@ pub(super) async fn get_resource_quality(app: &AppHandle, args: &[Value]) -> Res
     };
     let profile = game_profiles::profile(&game_id);
     let Some(qualities) = profile["resourceQualityArgs"].as_object() else {
-        return Ok(ok_with(json!({ "installed": [], "sizes": null })));
+        return Ok(ok_with(json!({ "installed": [], "sizes": null, "steamQuality": null })));
     };
     let key = format!("games.{}.gamePath", game_profiles::profile_id(profile));
     let game_path = app.state::<BackendState>().config.get(&key);
@@ -632,10 +658,11 @@ pub(super) async fn get_resource_quality(app: &AppHandle, args: &[Value]) -> Res
         Some(path) => qualities_on_disk(profile, std::path::Path::new(path)),
         None => Vec::new(),
     };
+    let steam = steam_quality(app, profile);
 
     let with_sizes = args.get(1).and_then(Value::as_bool).unwrap_or(false);
     if !with_sizes {
-        return Ok(ok_with(json!({ "installed": installed, "sizes": Value::Null })));
+        return Ok(ok_with(json!({ "installed": installed, "sizes": Value::Null, "steamQuality": steam })));
     }
 
     let config_url = profile["gameConfigUrl"].as_str().unwrap_or_default();
@@ -659,7 +686,7 @@ pub(super) async fn get_resource_quality(app: &AppHandle, args: &[Value]) -> Res
             Value::Null
         }
     };
-    Ok(ok_with(json!({ "installed": installed, "sizes": sizes })))
+    Ok(ok_with(json!({ "installed": installed, "sizes": sizes, "steamQuality": steam })))
 }
 
 // ------------ Quality Check ------------
@@ -933,6 +960,14 @@ mod tests {
         assert_eq!(installed_quality(wuwa, dir.path(), Some("uhd")).as_deref(), Some("uhd"));
         assert_eq!(installed_quality(wuwa, dir.path(), Some("sd")).as_deref(), Some("hd"));
         assert!(qualities_on_disk(game_profiles::profile("pgr"), dir.path()).is_empty());
+    }
+
+    #[test]
+    fn steam_pins_the_quality_its_launch_entry_passes() {
+        assert_eq!(steam_pinned_quality(game_profiles::profile("wuwa")).as_deref(), Some("hd"));
+        assert_eq!(steam_pinned_quality(game_profiles::profile("pgr")), None);
+        let unpinned = json!({ "steamLaunchArgs": ["-dx12"], "resourceQualityArgs": { "hd": ["-krqlv=hd"] } });
+        assert_eq!(steam_pinned_quality(&unpinned), None);
     }
 
     fn quality_folder(root: &Path, quality: &str, files: &[&str]) {

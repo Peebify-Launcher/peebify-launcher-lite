@@ -2,7 +2,8 @@
 // Shows a wallpaper or news banner (image or looping video) and fades smoothly to the next one when the source
 // changes, so nothing flashes or pops. Used by the wallpaper layer, the news slideshow and the wallpaper picker
 // preview. During a game switch the next one spreads out as a wave from the rail icon you clicked instead, and a
-// video starts playing before it is revealed, so it is already moving while the wave uncovers it.
+// video starts playing before it is revealed, so it is already moving while the wave uncovers it. A change made
+// while `instant` is set, such as one while the window is hidden, shows at once.
 import { useEffect, useRef, useState } from "react";
 import { m } from "framer-motion";
 import { log } from "../../lib/log";
@@ -26,6 +27,7 @@ interface Layer {
   video: boolean;
   ready: boolean;
   wave: Wave | null;
+  instant: boolean;
 }
 
 interface CrossfadeMediaProps {
@@ -33,6 +35,7 @@ interface CrossfadeMediaProps {
   video: boolean;
   autoPlay?: boolean;
   playing?: boolean;
+  instant?: boolean;
   onReady?: () => void;
   onError?: (src: string) => void;
   wave?: () => Wave | null;
@@ -47,6 +50,7 @@ export function CrossfadeMedia({
   video,
   autoPlay = true,
   playing = true,
+  instant = false,
   onReady,
   onError,
   wave,
@@ -97,18 +101,21 @@ export function CrossfadeMedia({
 
   const waveRef = useRef(wave);
   const playingRef = useRef(playing && autoPlay);
+  const instantRef = useRef(instant);
   const usedWaveRef = useRef(0);
   const readyIdsRef = useRef<Set<number>>(new Set());
   useEffect(() => {
     waveRef.current = wave;
     playingRef.current = playing && autoPlay;
+    instantRef.current = instant;
   });
 
   const waveBusyRef = useRef<{ id: number; since: number; until: number } | null>(null);
   const [waveDone, setWaveDone] = useState(0);
 
   useEffect(() => {
-    let next = waveRef.current?.() ?? null;
+    const atOnce = instantRef.current;
+    let next = atOnce ? null : (waveRef.current?.() ?? null);
     if (next && next.at === usedWaveRef.current) next = null;
     const busy = waveBusyRef.current;
     if (busy && !next) {
@@ -129,7 +136,7 @@ export function CrossfadeMedia({
       const base = prev.filter((layer) => layer.ready).slice(next ? -2 : -1);
       const layerWave = base.length ? next : null;
       waveBusyRef.current = layerWave ? { id: nextIdRef.current, since: Date.now(), until: Infinity } : null;
-      return [...base, { id: nextIdRef.current, src, video, ready: false, wave: layerWave }];
+      return [...base, { id: nextIdRef.current, src, video, ready: false, wave: layerWave, instant: atOnce }];
     });
   }, [src, video, waveDone]);
 
@@ -200,7 +207,10 @@ export function CrossfadeMedia({
           transition={
             layer.wave
               ? { duration: WAVE_SECONDS, ease: [0.3, 0.6, 0.25, 1] }
-              : { duration: layer.id === 1 && layers.length === 1 ? 0 : FADE_SECONDS, ease: "easeInOut" }
+              : {
+                  duration: layer.instant || (layer.id === 1 && layers.length === 1) ? 0 : FADE_SECONDS,
+                  ease: "easeInOut",
+                }
           }
           className="absolute inset-0"
         >

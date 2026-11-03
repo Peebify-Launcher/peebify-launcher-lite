@@ -3,7 +3,7 @@
 // fetched from the game's own feed and refreshed every ten minutes, with last time's copy shown while the first
 // fetch runs. Clicking an item opens it in the browser.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, m } from "framer-motion";
+import { m } from "framer-motion";
 import { Newspaper } from "lucide-react";
 import { fadeVariants, useReducedMotionSafe } from "../../lib/motion";
 import { gameSwitchWave } from "../layout/WallpaperLayer";
@@ -13,7 +13,6 @@ import { gameById, type GameId } from "../../data/games";
 import { useRendererSuspended } from "../../lib/launcherHooks";
 import { getNewsData, getSavedNewsData, type NewsData, type NewsEntry, type NewsSlide } from "../../lib/ipc";
 import { openExternal } from "../../lib/tauri";
-import { Hint } from "../ui/Tooltip";
 import { CrossfadeMedia } from "../ui/CrossfadeMedia";
 import { formatLocale } from "../../lib/i18n";
 import { useT } from "../../lib/useT";
@@ -148,6 +147,13 @@ export function NewsPanel() {
     };
   }, [activeGameId, attempt]);
 
+  const isOnline = useUiStore((s) => s.isOnline);
+  const wasOnline = useRef(isOnline);
+  useEffect(() => {
+    if (isOnline && !wasOnline.current) setAttempt((n) => n + 1);
+    wasOnline.current = isOnline;
+  }, [isOnline]);
+
   const railGames = useLibraryStore((s) => s.visible);
   useEffect(() => {
     if (loading || suspended) return;
@@ -246,65 +252,64 @@ export function NewsPanel() {
         )}
       </div>
 
-      <div className="flex items-center gap-[8px] border-b border-white/[0.07] px-[15px] py-[10px]">
+      <div className="flex items-center gap-[8px] px-[15px] py-[10px]">
         <Newspaper size={14} className="shrink-0 text-white/45" />
         <h3 className="text-[12.5px] font-semibold text-white/85">{t("home.news.title")}</h3>
       </div>
 
       <div className="px-[9px] pb-[10px] pt-[4px]">
         <div className="h-[132px] overflow-y-auto">
-          <AnimatePresence mode="wait" initial={false}>
-            <m.div key={`${activeGameId}:${loading}:${failed}`} variants={fadeVariants} initial="initial" animate="animate" exit="exit">
-              {loading ? (
-                <div role="status" className="animate-pulse px-[7px] py-[10px]">
-                  <span className="sr-only">{t("home.news.loading")}</span>
-                  {[0, 1, 2].map((i) => (
-                    <div key={i} aria-hidden className="mb-[10px] h-[13px] rounded-[4px] bg-white/[0.07] last:mb-0" style={{ width: `${88 - i * 14}%` }} />
-                  ))}
-                </div>
-              ) : items.length === 0 && failed ? (
-                <div className="flex flex-col items-center gap-[8px] px-[7px] py-[12px]">
-                  <p className="text-center text-[12px] text-white/40">{t("home.news.failed")}</p>
-                  <button
-                    onClick={() => setAttempt((n) => n + 1)}
-                    className="rounded-[6px] border border-white/[0.12] px-[10px] py-[3px] text-[11.5px] font-medium text-white/75 transition-colors hover:bg-white/[0.08]"
-                  >
-                    {t("common.retry")}
-                  </button>
-                </div>
-              ) : items.length === 0 ? (
-                <p className="px-[7px] py-[16px] text-center text-[12px] text-white/40">{t("home.news.empty")}</p>
-              ) : (
-                items.map(({ item }, idx) => {
-                  const date = fmtNewsDate(item.time, today);
-                  const key = `${entryKey(item)}|${idx}`;
-                  const body = (
-                    <>
-                      <span className="min-w-0 truncate text-[12.5px] font-medium leading-[1.3]">{item.content}</span>
-                      <span className="shrink-0 text-[10.5px] text-white/[0.42]">{date}</span>
-                    </>
-                  );
-                  const rowClass =
-                    "flex h-[33px] w-full items-center justify-between gap-3 rounded-[7px] border-b border-white/[0.06] px-[7px] text-left last:border-b-0";
-                  const url = item.jumpUrl;
-                  return (
-                    <Hint key={key} tip={item.content} className="block w-full">
-                      {url ? (
-                        <button
-                          onClick={() => void openExternal(url)}
-                          className={`${rowClass} transition-colors hover:bg-white/[0.05]`}
-                        >
-                          {body}
-                        </button>
-                      ) : (
-                        <div className={rowClass}>{body}</div>
-                      )}
-                    </Hint>
-                  );
-                })
-              )}
-            </m.div>
-          </AnimatePresence>
+          <m.div key={`${activeGameId}:${loading}:${failed}`} variants={fadeVariants} initial="initial" animate="animate">
+            {loading ? (
+              <div role="status" className="animate-pulse px-[7px] py-[10px]">
+                <span className="sr-only">{t("home.news.loading")}</span>
+                {[0, 1, 2].map((i) => (
+                  <div key={i} aria-hidden className="mb-[10px] h-[13px] rounded-[4px] bg-white/[0.07] last:mb-0" style={{ width: `${88 - i * 14}%` }} />
+                ))}
+              </div>
+            ) : items.length === 0 && failed ? (
+              <div className="flex flex-col items-center gap-[8px] px-[7px] py-[12px]">
+                <p className="text-center text-[12px] text-white/40">{t("home.news.failed")}</p>
+                <button
+                  onClick={() => setAttempt((n) => n + 1)}
+                  className="rounded-[6px] border border-white/[0.12] px-[10px] py-[3px] text-[11.5px] font-medium text-white/75 transition-colors hover:bg-white/[0.08]"
+                >
+                  {t("common.retry")}
+                </button>
+              </div>
+            ) : items.length === 0 ? (
+              <p className="px-[7px] py-[16px] text-center text-[12px] text-white/40">{t("home.news.empty")}</p>
+            ) : (
+              items.map(({ item }, idx) => {
+                const date = fmtNewsDate(item.time, today);
+                const key = `${entryKey(item)}|${idx}`;
+                const body = (
+                  <>
+                    <span className="min-w-0 truncate text-[12.5px] font-medium leading-[1.3]">{item.content}</span>
+                    <span className="shrink-0 text-[10.5px] text-white/[0.42]">{date}</span>
+                  </>
+                );
+                const rowClass =
+                  "flex h-[33px] w-full items-center justify-between gap-3 rounded-[7px] px-[7px] text-left";
+                const url = item.jumpUrl;
+                return (
+                  url ? (
+                    <button
+                      key={key}
+                      onClick={() => void openExternal(url)}
+                      className={`${rowClass} transition-colors hover:bg-white/[0.05]`}
+                    >
+                      {body}
+                    </button>
+                  ) : (
+                    <div key={key} className={rowClass}>
+                      {body}
+                    </div>
+                  )
+                );
+              })
+            )}
+          </m.div>
         </div>
       </div>
     </div>

@@ -385,6 +385,9 @@ pub(crate) mod net {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Networking::WinHttp::*;
+
     use crate::ilog::ilog;
 
     const ATTEMPTS: u32 = 3;
@@ -393,17 +396,150 @@ pub(crate) mod net {
     const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
     struct Agent {
-        inner: ureq::Agent,
+        connect: Duration,
         read_idle: Duration,
     }
 
     fn agent(connect: Duration, read_idle: Duration) -> Agent {
-        let inner = ureq::Agent::config_builder()
-            .timeout_connect(Some(connect))
-            .timeout_recv_response(Some(read_idle))
-            .build()
-            .into();
-        Agent { inner, read_idle }
+        Agent { connect, read_idle }
+    }
+
+    // ------------ WinHTTP ------------
+    // Downloads go through Windows' own HTTP stack, so they use the system proxy, TLS and certificate store.
+    struct Handle(*mut core::ffi::c_void);
+
+    unsafe impl Send for Handle {}
+
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    let _ = WinHttpCloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    struct Response {
+        request: Handle,
+        _connection: Handle,
+        _session: Handle,
+        total: Option<u64>,
+    }
+
+    fn os_error(what: &str) -> String {
+        format!("{what}: {}", std::io::Error::last_os_error())
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(Some(0)).collect()
+    }
+
+    fn url_part(ptr: windows::core::PWSTR, len: u32) -> String {
+        if ptr.is_null() {
+            return String::new();
+        }
+        String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(ptr.0, len as usize) })
+    }
+
+    fn get(agent: &Agent, url: &str) -> Result<Response, String> {
+        let ms = |d: Duration| d.as_millis().min(i32::MAX as u128) as i32;
+        let url_w: Vec<u16> = url.encode_utf16().collect();
+        let mut parts = URL_COMPONENTS {
+            dwStructSize: std::mem::size_of::<URL_COMPONENTS>() as u32,
+            dwSchemeLength: u32::MAX,
+            dwHostNameLength: u32::MAX,
+            dwUrlPathLength: u32::MAX,
+            dwExtraInfoLength: u32::MAX,
+            ..Default::default()
+        };
+        unsafe {
+            WinHttpCrackUrl(&url_w, 0, &mut parts).map_err(|e| format!("bad url {url}: {e}"))?;
+            let host = wide(&url_part(parts.lpszHostName, parts.dwHostNameLength));
+            let path = url_part(parts.lpszUrlPath, parts.dwUrlPathLength)
+                + &url_part(parts.lpszExtraInfo, parts.dwExtraInfoLength);
+            let path = wide(&path);
+
+            let session = Handle(WinHttpOpen(
+                w!("Peebify Setup"),
+                WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                PCWSTR::null(),
+                PCWSTR::null(),
+                0,
+            ));
+            if session.0.is_null() {
+                return Err(os_error("WinHttpOpen"));
+            }
+            let (connect, idle) = (ms(agent.connect), ms(agent.read_idle));
+            WinHttpSetTimeouts(session.0, connect, connect, idle, idle).map_err(|e| e.to_string())?;
+            let connection = Handle(WinHttpConnect(session.0, PCWSTR(host.as_ptr()), parts.nPort, 0));
+            if connection.0.is_null() {
+                return Err(os_error("connect"));
+            }
+            let flags = if parts.nScheme == WINHTTP_INTERNET_SCHEME_HTTPS {
+                WINHTTP_FLAG_SECURE
+            } else {
+                WINHTTP_OPEN_REQUEST_FLAGS(0)
+            };
+            let request = Handle(WinHttpOpenRequest(
+                connection.0,
+                w!("GET"),
+                PCWSTR(path.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                std::ptr::null(),
+                flags,
+            ));
+            if request.0.is_null() {
+                return Err(os_error("open request"));
+            }
+            WinHttpSendRequest(request.0, None, None, 0, 0, 0).map_err(|e| e.to_string())?;
+            WinHttpReceiveResponse(request.0, std::ptr::null_mut()).map_err(|e| e.to_string())?;
+
+            let mut status = 0u32;
+            let mut len = std::mem::size_of::<u32>() as u32;
+            WinHttpQueryHeaders(
+                request.0,
+                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                PCWSTR::null(),
+                Some(&mut status as *mut u32 as *mut _),
+                &mut len,
+                std::ptr::null_mut(),
+            )
+            .map_err(|e| e.to_string())?;
+            if !(200..300).contains(&status) {
+                return Err(format!("{url}: status code {status}"));
+            }
+            let mut total = 0u64;
+            let mut len = std::mem::size_of::<u64>() as u32;
+            let total = WinHttpQueryHeaders(
+                request.0,
+                WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER64,
+                PCWSTR::null(),
+                Some(&mut total as *mut u64 as *mut _),
+                &mut len,
+                std::ptr::null_mut(),
+            )
+            .ok()
+            .map(|_| total)
+            .filter(|n| *n > 0);
+            Ok(Response { request, _connection: connection, _session: session, total })
+        }
+    }
+
+    impl Read for Response {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let mut ready = 0u32;
+            unsafe { WinHttpQueryDataAvailable(self.request.0, &mut ready) }.map_err(std::io::Error::other)?;
+            if ready == 0 {
+                return Ok(0);
+            }
+            let mut got = 0u32;
+            let want = buf.len().min(ready as usize) as u32;
+            unsafe { WinHttpReadData(self.request.0, buf.as_mut_ptr().cast(), want, &mut got) }
+                .map_err(std::io::Error::other)?;
+            Ok(got as usize)
+        }
     }
 
     fn mb(bytes: u64) -> String {
@@ -471,16 +607,8 @@ pub(crate) mod net {
         dest: &Path,
         progress: &mut impl FnMut(u64, Option<u64>),
     ) -> Result<(), String> {
-        let resp = agent.inner.get(url).call().map_err(|e| e.to_string())?;
-
-        let total = resp
-            .headers()
-            .get("Content-Length")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())
-            .filter(|n| *n > 0);
-
-        let mut reader = resp.into_body().into_reader();
+        let mut reader = get(agent, url)?;
+        let total = reader.total;
         let (tx, rx) = std::sync::mpsc::sync_channel::<std::io::Result<Vec<u8>>>(4);
         std::thread::spawn(move || {
             let mut buf = vec![0u8; BUF_BYTES];

@@ -110,6 +110,7 @@ export interface Events {
   "network-status-changed": { isOnline?: boolean } | null;
   "renderer-power-save": boolean;
   "window-restored": unknown;
+  "window-covered": boolean;
   "main-window-revealed": unknown;
   "window:maximized-changed": { maximized?: boolean } | null;
   "ui-scale-transition": { phase: "pin" | "start" | "end" | "fade-out" | "fade-in"; ratio: number; ms: number };

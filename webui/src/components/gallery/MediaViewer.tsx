@@ -212,7 +212,7 @@ export function MediaViewer({
       style={{ background: "#07070b" }}
     >
       <header
-        className={`flex shrink-0 items-center border-b border-white/[0.08] px-5 py-3 ${
+        className={`flex shrink-0 items-center px-5 py-3 ${
           overlay ? "gap-3" : "drag-region gap-2"
         }`}
       >
@@ -329,7 +329,7 @@ export function MediaViewer({
         </div>
 
         {!overlay && (
-          <aside className="w-[264px] shrink-0 overflow-y-auto border-l border-white/[0.08] px-5 py-5">
+          <aside className="w-[264px] shrink-0 overflow-y-auto px-5 py-5">
             <dl className="flex flex-col gap-3">
               <div className="flex items-center gap-2">
                 {game.icon && current.gameId && (

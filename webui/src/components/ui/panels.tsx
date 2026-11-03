@@ -124,13 +124,11 @@ export function SettingCard({
 export function GroupBox({
   children,
   danger = false,
-  divided = false,
   compact = false,
   className = "",
 }: {
   children: ReactNode;
   danger?: boolean;
-  divided?: boolean;
   compact?: boolean;
   className?: string;
 }) {
@@ -139,10 +137,9 @@ export function GroupBox({
     : compact
       ? "border-white/[0.08] bg-white/[0.045]"
       : "border-white/[0.08] bg-white/[0.05]";
-  const lines = compact ? "divide-y divide-white/[0.055] " : "divide-y divide-white/[0.06] ";
   return (
     <div
-      className={`overflow-hidden border ${compact ? "rounded-[10px]" : "rounded-ui"} ${divided ? lines : ""}${tone} ${className}`}
+      className={`overflow-hidden border ${compact ? "rounded-[10px]" : "rounded-ui"} ${tone} ${className}`}
     >
       {children}
     </div>

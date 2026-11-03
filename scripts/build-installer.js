@@ -265,6 +265,101 @@ function checkDistBudget() {
     console.warn(`[build-installer] warning: ${message}`);
 }
 
+const PAYLOAD_FORMAT_VERSION = 2;
+const FOOTER_MAGIC = 'PBFYINST';
+const FOOTER_LEN = 80;
+const SEVEN_ZIP = path.join(REPO_ROOT, 'src-tauri', 'resources', '7z.exe');
+
+function tarHeader(name, size, mtime) {
+    const header = Buffer.alloc(512);
+    const octal = (value, width) => value.toString(8).padStart(width - 1, '0') + '\0';
+    if (Buffer.byteLength(name) > 100) fail(`payload path too long for the tar header: ${name}`);
+    header.write(name, 0, 'utf-8');
+    header.write(octal(0o644, 8), 100);
+    header.write(octal(0, 8), 108);
+    header.write(octal(0, 8), 116);
+    header.write(octal(size, 12), 124);
+    header.write(octal(mtime, 12), 136);
+    header.fill(' ', 148, 156);
+    header.write('0', 156);
+    header.write('ustar\0' + '00', 257, 'latin1');
+    const sum = header.reduce((total, byte) => total + byte, 0);
+    header.write(octal(sum, 7) + ' ', 148);
+    return header;
+}
+
+function writePayloadTar(dir, files, tarFile) {
+    const fd = fs.openSync(tarFile, 'w');
+    try {
+        for (const { file, size } of files) {
+            const rel = path.relative(dir, file).replace(/\\/g, '/');
+            const mtime = Math.floor(fs.statSync(file).mtimeMs / 1000);
+            fs.writeSync(fd, tarHeader(rel, size, mtime));
+            fs.writeSync(fd, fs.readFileSync(file));
+            const pad = (512 - (size % 512)) % 512;
+            if (pad) fs.writeSync(fd, Buffer.alloc(pad));
+        }
+        fs.writeSync(fd, Buffer.alloc(1024));
+    } finally {
+        fs.closeSync(fd);
+    }
+}
+
+function packInstaller(stub, dir, outExe, mainBinary) {
+    const files = listFiles(dir).sort((a, b) => {
+        const x = path.relative(dir, a.file).split(path.sep);
+        const y = path.relative(dir, b.file).split(path.sep);
+        for (let i = 0; i < Math.min(x.length, y.length); i++) {
+            if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1;
+        }
+        return x.length - y.length;
+    });
+    if (!files.some((f) => path.relative(dir, f.file) === mainBinary)) {
+        fail(`main binary '${mainBinary}' not found in the payload root`);
+    }
+    const stubBytes = fs.readFileSync(stub);
+    if (stubBytes.subarray(-FOOTER_LEN).subarray(0, 8).toString('latin1') === FOOTER_MAGIC) {
+        fail('the installer stub already has a payload appended');
+    }
+
+    const work = path.join(REPO_ROOT, 'dist', 'pack');
+    fs.rmSync(work, { recursive: true, force: true });
+    fs.mkdirSync(work, { recursive: true });
+    const tarFile = path.join(work, 'payload.tar');
+    const xzFile = path.join(work, 'payload.tar.xz');
+    writePayloadTar(dir, files, tarFile);
+    run(SEVEN_ZIP, ['a', '-txz', '-mx=9', '-mf=BCJ', '-mmt=1', '-bso0', '-bsp0', xzFile, tarFile], { shell: false });
+    const compressed = fs.readFileSync(xzFile);
+    fs.rmSync(work, { recursive: true, force: true });
+
+    const manifest = Buffer.from(JSON.stringify({
+        formatVersion: PAYLOAD_FORMAT_VERSION,
+        version: VERSION,
+        mainBinary,
+        estimatedSizeKb: Math.floor((files.reduce((sum, f) => sum + f.size, 0) + stubBytes.length) / 1024),
+        fileCount: files.length,
+        createdAt: new Date().toISOString(),
+    }));
+    const sha256 = crypto.createHash('sha256').update(compressed).update(manifest).digest();
+
+    const footer = Buffer.alloc(FOOTER_LEN);
+    const payloadOffset = BigInt(stubBytes.length);
+    const manifestOffset = payloadOffset + BigInt(compressed.length);
+    footer.write(FOOTER_MAGIC, 0, 'latin1');
+    footer.writeUInt32LE(PAYLOAD_FORMAT_VERSION, 8);
+    footer.writeBigUInt64LE(payloadOffset, 16);
+    footer.writeBigUInt64LE(BigInt(compressed.length), 24);
+    footer.writeBigUInt64LE(manifestOffset, 32);
+    footer.writeBigUInt64LE(BigInt(manifest.length), 40);
+    sha256.copy(footer, 48);
+
+    fs.writeFileSync(outExe, Buffer.concat([stubBytes, compressed, manifest, footer]));
+    console.log(
+        `[build-installer] packed ${files.length} files: stub ${formatSize(stubBytes.length)}, ` +
+        `payload ${formatSize(compressed.length)}`
+    );
+}
+
 function printPayloadTable(dir) {
     const files = listFiles(dir).sort((a, b) => b.size - a.size);
     const total = files.reduce((sum, f) => sum + f.size, 0);
@@ -399,10 +494,10 @@ const expectedPayload = [
 failOnProblems('the installer payload', payloadProblems(payloadDir, expectedPayload));
 console.log(`[build-installer] payload check OK: ${expectedPayload.length} expected entries, nothing else`);
 
-run('cargo', ['build', '-p', 'peebify-installer', '--release'], {
+run('cargo', ['build', '-p', 'peebify-installer', '--profile', 'installer'], {
     env: rustEnv({ ...process.env, PEEBIFY_VERSION: VERSION }),
 });
-const stub = path.join(TARGET_RELEASE, 'peebify-installer.exe');
+const stub = path.join(REPO_ROOT, 'target', 'installer', 'peebify-installer.exe');
 if (!fs.existsSync(stub)) fail(`installer stub not found at ${stub}`);
 assertNoRedistImports(stub);
 assertShippable(stub);
@@ -411,14 +506,7 @@ const outDir = path.join(REPO_ROOT, 'dist', 'installer');
 fs.mkdirSync(outDir, { recursive: true });
 const outExe = path.join(outDir, `Peebify-Launcher-Lite-Setup-${VERSION}.exe`);
 printPayloadTable(payloadDir);
-run(stub, [
-    'pack',
-    '--stub', stub,
-    '--payload-dir', payloadDir,
-    '--out', outExe,
-    '--version', VERSION,
-    '--main-binary', MAIN_BINARY,
-], { shell: false });
+packInstaller(stub, payloadDir, outExe, MAIN_BINARY);
 
 run(stub, ['inspect', '--file', outExe], { shell: false });
 assertNoRedistImports(outExe);

@@ -576,32 +576,24 @@ export default function App() {
                   key="glass-sheet"
                   className="glass-strong pointer-events-none absolute inset-0"
                   initial={{ opacity: 0 }}
-                  animate={{ opacity: 1, transition: { duration: 0.2 } }}
-                  exit={{ opacity: 0, transition: { duration: 0.15 } }}
+                  animate={{ opacity: 1, transition: { duration: 0.14 } }}
+                  exit={{ opacity: 0, transition: { duration: 0.1 } }}
                 />
               )}
             </AnimatePresence>
 
-            <AnimatePresence initial={false}>
-              <m.div
+            <div className="absolute inset-0">
+              <ErrorBoundary
                 key={view}
-                className="absolute inset-0"
-                initial="initial"
-                animate="animate"
-                exit="exit"
+                scope={`page ${view}`}
+                context={pageCrashContext}
+                fallback={(reset) => <PageError view={view} onRetry={reset} />}
               >
-                <ErrorBoundary
-                  key={view}
-                  scope={`page ${view}`}
-                  context={pageCrashContext}
-                  fallback={(reset) => <PageError view={view} onRetry={reset} />}
-                >
-                  <Suspense fallback={null}>
-                    <Page />
-                  </Suspense>
-                </ErrorBoundary>
-              </m.div>
-            </AnimatePresence>
+                <Suspense fallback={null}>
+                  <Page />
+                </Suspense>
+              </ErrorBoundary>
+            </div>
           </main>
         </div>
 

@@ -203,7 +203,7 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
 
   const setLaunchViaSteam = (on: boolean) => {
     if (steam) setSteam({ ...steam, launchViaSteam: on });
-    void setConfigValue(`games.${activeId}.launchViaSteam`, on);
+    void setConfigValue(`games.${activeId}.launchViaSteam`, on).then(resourceQuality.refresh);
   };
 
   const saveLaunchArgs = () => {
@@ -473,6 +473,14 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
             description={
               customLauncher
                 ? t("maintenance.customLauncherOverrides")
+                : resourceQuality.steamLocked
+                  ? t("maintenance.resourceQuality.steamLocked", {
+                      game: game.name,
+                      quality: qualityLabel(resourceQuality.quality),
+                    }) +
+                    (resourceQuality.pending
+                      ? " " + t("maintenance.resourceQuality.steamMissing", { quality: qualityLabel(resourceQuality.quality) })
+                      : "")
                 : resourceQuality.pending
                   ? t("maintenance.resourceQuality.pending", {
                       installed: resourceQuality.installedLabel,
@@ -505,6 +513,7 @@ export function GameMaintenance({ gameId: activeId }: { gameId: GameId }) {
                   ariaLabel={t("maintenance.resourceQuality.title")}
                   options={RESOURCE_QUALITY_OPTIONS}
                   value={resourceQuality.quality}
+                  disabled={resourceQuality.steamLocked}
                   onChange={(v) => resourceQuality.setQuality(v as ResourceQuality)}
                 />
               </div>

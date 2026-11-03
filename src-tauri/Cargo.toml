@@ -16,7 +16,9 @@ tauri-build = { version = "2", features = [] }
 serde_json = "1"
 
 [dependencies]
-tauri = { version = "2", features = [
+tauri = { version = "2", default-features = false, features = [
+    "common-controls-v6",
+    "compression",
     "tray-icon",
     "image-png",
     "wry",
@@ -38,7 +40,7 @@ tokio = { version = "1", features = [
     "process",
     "net"
 ] }
-parking_lot = "0.12"
+parking_lot = "0.13"
 futures = "0.3"
 log = "0.4"
 chrono = "0.4"
@@ -49,8 +51,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 bytes = "1"
 flate2 = "1"
 deflate64 = "0.1"
-zstd = "0.14"
-regex = "1"
+zstd = { version = "0.14", default-features = false }
+regex-lite = "0.1"
 uuid = { version = "1", features = ["v4"] }
 md-5 = "0.11"
 aes = "0.9"
@@ -111,7 +113,7 @@ windows = { version = "0.62", features = [
 ] }
 tauri-winrt-notification = "0.8"
 winreg = "0.56"
-rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
 
 [dev-dependencies]
 crc32fast = "1"

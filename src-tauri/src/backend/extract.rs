@@ -75,7 +75,7 @@ pub async fn run_7z_extract(
         String::from_utf8_lossy(&buf).into_owned()
     });
 
-    let percent_re = regex::Regex::new(r"(\d{1,3})%").expect("static regex");
+    let percent_re = regex_lite::Regex::new(r"(\d{1,3})%").expect("static regex");
     let mut tail = String::new();
     let mut buf = vec![0u8; 4096];
     loop {

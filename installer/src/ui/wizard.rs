@@ -473,8 +473,7 @@ impl eframe::App for WizardApp {
             },
         };
         let mood = match screen {
-            Screen::Welcome | Screen::Options | Screen::Warnings => ui::Mood::CALM,
-            Screen::Progress => ui::Mood::INSTALLING,
+            Screen::Welcome | Screen::Options | Screen::Warnings | Screen::Progress => ui::Mood::CALM,
             Screen::Done => ui::Mood::DONE,
             Screen::Failed => ui::Mood::FAILED,
         };

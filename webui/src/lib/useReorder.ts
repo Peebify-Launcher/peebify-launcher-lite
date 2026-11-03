@@ -337,7 +337,7 @@ export function useReorder<T extends string>(
     (id: T): ReorderItemProps => {
       const state = drag;
       const held = !!state && state.id === id && state.phase !== "land";
-      const style: React.CSSProperties = { touchAction: "none" };
+      const style: React.CSSProperties = { touchAction: "none", willChange: "transform" };
 
       if (state?.phase === "land") {
         style.transform = "none";
@@ -350,12 +350,10 @@ export function useReorder<T extends string>(
         style.position = "relative";
         style.zIndex = 30;
         style.cursor = "grabbing";
-        style.willChange = "transform";
       } else if (state) {
         style.transform = `translate3d(0, ${shiftFor(state, latestIds.current.indexOf(id))}px, 0)`;
         style.transition = `transform ${SHIFT_MS}ms ${EASE}`;
         style.pointerEvents = "none";
-        style.willChange = "transform";
       }
 
       return {

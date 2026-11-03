@@ -69,7 +69,7 @@ function payloadProblems(payloadDir, expected) {
 }
 
 const FRONTEND_EXTENSIONS = new Set([
-    '.html', '.js', '.css', '.png', '.webp', '.jpg', '.jpeg', '.svg', '.ico', '.woff', '.woff2',
+    '.html', '.js', '.css', '.png', '.webp', '.avif', '.jpg', '.jpeg', '.svg', '.ico', '.woff', '.woff2',
 ]);
 
 function frontendProblems(distDir) {

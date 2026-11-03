@@ -285,7 +285,7 @@ impl UninstallApp {
 
     fn game_list(&mut self, ui_: &mut egui::Ui) {
         let ctx = ui_.ctx().clone();
-        let id = egui::Id::new("uninstall-games");
+        let id = egui::Id::unique("uninstall-games");
         let open = ui::motion::tween(
             &ctx,
             id.with("open"),

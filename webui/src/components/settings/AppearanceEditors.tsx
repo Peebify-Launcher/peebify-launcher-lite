@@ -70,7 +70,7 @@ export function HomeScreenGroup({ settings }: { settings: Setting[] }) {
         <div className="flex flex-none flex-col gap-[10px] p-5">
           <HomePreview gameId={gameId} />
         </div>
-        <div className="min-w-0 flex-[1_1_420px] border-l border-white/[0.06]">
+        <div className="min-w-0 flex-[1_1_420px]">
           {settings.map((s) => (
             <SettingRow key={s.id} setting={s} />
           ))}
@@ -243,7 +243,7 @@ function IconCard({ gameId }: { gameId: GameId }) {
         </div>
         <div
           aria-hidden="true"
-          className="relative flex w-[52px] flex-none flex-col items-center justify-center gap-1 overflow-hidden border-r border-white/[0.07] bg-[rgba(14,14,18,0.7)] py-3"
+          className="relative flex w-[52px] flex-none flex-col items-center justify-center gap-1 overflow-hidden bg-[rgba(14,14,18,0.7)] py-3"
         >
           {rail.map((g) => (
             <span

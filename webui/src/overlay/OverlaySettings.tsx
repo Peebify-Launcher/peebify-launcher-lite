@@ -218,7 +218,7 @@ export function OverlaySettings({ gameId, modsUsable }: PanelProps) {
 
       <section className="flex flex-col gap-2">
         <GroupLabel compact label={t("common.general")} />
-        <GroupBox compact divided>
+        <GroupBox compact>
           <SettingCard
             compact
             title={t("overlay.settings.modSupport")}
@@ -282,7 +282,7 @@ export function OverlaySettings({ gameId, modsUsable }: PanelProps) {
 
       <section className="flex flex-col gap-2">
         <GroupLabel compact label={t("overlay.settings.overlayShortcuts")} />
-        <GroupBox compact divided>
+        <GroupBox compact>
           {hotkeys.map((hotkey) =>
             shortcutRow(
               hotkey,
@@ -297,7 +297,7 @@ export function OverlaySettings({ gameId, modsUsable }: PanelProps) {
       {modsUsable && loaderKeys.length > 0 && (
         <section className="flex flex-col gap-2">
           <GroupLabel compact label={t("overlay.settings.loaderShortcuts")} />
-          <GroupBox compact divided>
+          <GroupBox compact>
             {loaderKeys.map((row) =>
               shortcutRow(
                 {

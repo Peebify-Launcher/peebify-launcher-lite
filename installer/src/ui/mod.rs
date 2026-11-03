@@ -9,10 +9,7 @@ use eframe::egui::{self, Color32, CornerRadius, RichText};
 
 use motion::{Curve, Spec};
 
-pub const LOGO_PNG: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../webui/public/icons/app.png"
-));
+const APP_ICON_ID: u16 = 32512;
 
 const WALLPAPER_JPG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/wall.jpg"));
 const WALLPAPER_BLUR_JPG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/wall-blur.jpg"));
@@ -240,7 +237,6 @@ impl Mood {
     }
 
     pub const CALM: Mood = Mood::new(1.0, 1.0, 0.0);
-    pub const INSTALLING: Mood = Mood::new(0.88, 0.95, 0.08);
     pub const DONE: Mood = Mood::new(1.06, 1.1, 0.0);
     pub const FAILED: Mood = Mood::new(0.8, 0.35, 0.12);
     pub const UNINSTALL: Mood = Mood::new(0.9, 0.6, 0.06);
@@ -249,7 +245,7 @@ impl Mood {
 
     fn eased(self, ctx: &egui::Context) -> Self {
         let filter = Spec::new(1000, Curve::Out);
-        let id = egui::Id::new("peebify-mood");
+        let id = egui::Id::unique("peebify-mood");
         Self {
             brightness: motion::tween(ctx, id.with("b"), self.brightness, filter),
             saturation: motion::tween(ctx, id.with("s"), self.saturation, filter),
@@ -318,14 +314,57 @@ impl Chrome {
 
 fn logo_rgba() -> &'static (Vec<u8>, u32, u32) {
     static LOGO: std::sync::OnceLock<(Vec<u8>, u32, u32)> = std::sync::OnceLock::new();
-    LOGO.get_or_init(|| match image::load_from_memory(LOGO_PNG) {
-        Ok(img) => {
-            let img = img.into_rgba8();
-            let (w, h) = img.dimensions();
-            (img.into_raw(), w, h)
-        }
-        Err(_) => (Vec::new(), 0, 0),
+    LOGO.get_or_init(|| {
+        icon_png()
+            .and_then(decode_rgba)
+            .unwrap_or((Vec::new(), 0, 0))
     })
+}
+
+fn icon_png() -> Option<&'static [u8]> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::LibraryLoader::{
+        FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        LookupIconIdFromDirectoryEx, LR_DEFAULTCOLOR, RT_GROUP_ICON, RT_ICON,
+    };
+    unsafe {
+        let module = GetModuleHandleW(None).ok()?;
+        let resource = |id: u16, kind: PCWSTR| -> Option<&'static [u8]> {
+            let info = FindResourceW(Some(module), PCWSTR(id as usize as *const u16), kind);
+            if info.is_invalid() {
+                return None;
+            }
+            let data = LockResource(LoadResource(Some(module), info).ok()?);
+            let len = SizeofResource(Some(module), info) as usize;
+            (!data.is_null() && len > 0).then(|| std::slice::from_raw_parts(data.cast::<u8>(), len))
+        };
+        let group = resource(APP_ICON_ID, RT_GROUP_ICON)?;
+        let id = LookupIconIdFromDirectoryEx(group.as_ptr(), true, 256, 256, LR_DEFAULTCOLOR);
+        u16::try_from(id).ok().filter(|id| *id != 0).and_then(|id| resource(id, RT_ICON))
+    }
+}
+
+fn decode_rgba(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    use windows::Win32::Graphics::Imaging::*;
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let stream = windows::Win32::UI::Shell::SHCreateMemStream(Some(bytes))?;
+        let decoder = factory
+            .CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)
+            .ok()?;
+        let frame = decoder.GetFrame(0).ok()?;
+        let rgba = WICConvertBitmapSource(&GUID_WICPixelFormat32bppRGBA, &frame).ok()?;
+        let (mut w, mut h) = (0u32, 0u32);
+        rgba.GetSize(&mut w, &mut h).ok()?;
+        let mut buf = vec![0u8; w as usize * h as usize * 4];
+        rgba.CopyPixels(std::ptr::null(), w * 4, &mut buf).ok()?;
+        Some((buf, w, h))
+    }
 }
 
 fn load_icon() -> Option<egui::IconData> {
@@ -344,6 +383,7 @@ fn load_icon() -> Option<egui::IconData> {
 // Reading the two fonts and decoding the wallpapers takes a noticeable moment, so a thread starts on it before the
 // window is created and the first frame takes the results. Anything it did not get is loaded the usual way.
 const FONT_FILES: [&str; 2] = ["segoeui.ttf", "seguisb.ttf"];
+const FALLBACK_FONT: &str = "arial.ttf";
 const WALLS: [(&str, &[u8]); 2] = [("wall", WALLPAPER_JPG), ("wall-blur", WALLPAPER_BLUR_JPG)];
 
 #[derive(Default)]
@@ -413,17 +453,17 @@ fn install_fonts(ctx: &egui::Context) {
 
     let regular = load("peebify-ui", FONT_FILES[0]);
     let semibold = load(SEMIBOLD, FONT_FILES[1]);
+    let fallback = !regular && load("peebify-fallback", FALLBACK_FONT);
 
+    let mut chain = Vec::new();
     if regular {
-        if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-            list.insert(0, "peebify-ui".to_owned());
-        }
+        chain.push("peebify-ui".to_owned());
     }
-    let mut chain = fonts
-        .families
-        .get(&egui::FontFamily::Proportional)
-        .cloned()
-        .unwrap_or_default();
+    if fallback {
+        chain.push("peebify-fallback".to_owned());
+    }
+    fonts.families.insert(egui::FontFamily::Proportional, chain.clone());
+    fonts.families.insert(egui::FontFamily::Monospace, chain.clone());
     if semibold {
         chain.insert(0, SEMIBOLD.to_owned());
     }
@@ -510,7 +550,7 @@ fn grayscale(rgba: &[u8]) -> Vec<u8> {
 }
 
 fn gray_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    let id = egui::Id::new("peebify-logo-gray");
+    let id = egui::Id::unique("peebify-logo-gray");
     if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
         return Some(tex);
     }
@@ -532,16 +572,15 @@ pub struct Wall {
 }
 
 fn decode_wall(bytes: &[u8]) -> Option<(egui::ColorImage, egui::ColorImage)> {
-    let rgba = image::load_from_memory(bytes).ok()?.into_rgba8();
-    let size = [rgba.width() as usize, rgba.height() as usize];
-    let raw = rgba.into_raw();
+    let (raw, w, h) = decode_rgba(bytes)?;
+    let size = [w as usize, h as usize];
     let gray = egui::ColorImage::from_rgba_unmultiplied(size, &grayscale(&raw));
     let color = egui::ColorImage::from_rgba_unmultiplied(size, &raw);
     Some((color, gray))
 }
 
 fn wall_textures(ctx: &egui::Context, key: &'static str, bytes: &[u8]) -> Option<Wall> {
-    let id = egui::Id::new(key);
+    let id = egui::Id::unique(key);
     if let Some(wall) = ctx.data(|d| d.get_temp::<Wall>(id)) {
         return Some(wall);
     }
@@ -685,7 +724,7 @@ fn paint_backdrop(ui: &egui::Ui, window: egui::Rect, panel: egui::Rect, mood: Mo
 }
 
 pub fn drag_strip(ui: &mut egui::Ui, ctx: &egui::Context, rect: egui::Rect, id: &'static str) {
-    let response = ui.interact(rect, egui::Id::new(id), egui::Sense::DRAG);
+    let response = ui.interact(rect, egui::Id::unique(id), egui::Sense::DRAG);
     if response.drag_started() {
         ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
     }
@@ -710,17 +749,17 @@ fn titlebar_button(
     let id = format!("titlebar-{}", label.to_lowercase());
     let response = ui.interact(
         slot_rect,
-        egui::Id::new(&id),
+        egui::Id::unique(&id),
         if enabled {
             egui::Sense::click()
         } else {
             egui::Sense::hover()
         },
     );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
     let presence = motion::tween(
         ctx,
-        egui::Id::new(id + "-presence"),
+        egui::Id::unique(id + "-presence"),
         if enabled { 1.0 } else { 0.3 },
         Spec::new(300, Curve::Ease),
     );
@@ -762,12 +801,12 @@ pub fn close_button(ui: &mut egui::Ui, ctx: &egui::Context, window: egui::Rect, 
 const CLOSE_NOW: &str = "peebify-close-now";
 
 pub fn close(ctx: &egui::Context) {
-    ctx.data_mut(|d| d.insert_temp(egui::Id::new(CLOSE_NOW), true));
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(CLOSE_NOW), true));
     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
 }
 
 fn hold_close(ctx: &egui::Context, closable: bool) {
-    let release = ctx.data(|d| d.get_temp::<bool>(egui::Id::new(CLOSE_NOW))) == Some(true);
+    let release = ctx.data(|d| d.get_temp::<bool>(egui::Id::unique(CLOSE_NOW))) == Some(true);
     if ctx.input(|i| i.viewport().close_requested()) && !release && !closable {
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
     }
@@ -808,7 +847,7 @@ fn paint_label(painter: &egui::Painter, pos: egui::Pos2, label: &str, color: Col
 
 fn paint_stepper(painter: &egui::Painter, x: f32, y: f32, step: Step, progress: f32) {
     let ctx = painter.ctx().clone();
-    let id = egui::Id::new("peebify-stepper");
+    let id = egui::Id::unique("peebify-stepper");
     let dot_fade = Spec::new(260, Curve::Ease).after(120);
     let dot_pop = Spec::new(520, Curve::Spring).after(120);
     let grow = Spec::new(420, Curve::Out);
@@ -903,7 +942,7 @@ fn partial_path(points: &[egui::Pos2], fraction: f32) -> Vec<egui::Pos2> {
 
 fn paint_badge(painter: &egui::Painter, center: egui::Pos2, badge: Badge) {
     let ctx = painter.ctx().clone();
-    let id = egui::Id::new("peebify-badge");
+    let id = egui::Id::unique("peebify-badge");
     let ring = Color32::from_rgb(14, 15, 24);
     let icon = |x: f32, y: f32, scale: f32| center + egui::vec2(x - 12.0, y - 12.0) * (10.0 / 24.0) * scale;
 
@@ -955,7 +994,7 @@ fn paint_rail(ui: &egui::Ui, rail_rect: egui::Rect, rail: &Rail) {
     if let Some(logo) = rail.logo {
         let muted = motion::tween(
             &ctx,
-            egui::Id::new("peebify-logo-muted"),
+            egui::Id::unique("peebify-logo-muted"),
             motion::flag(rail.muted),
             Spec::new(700, Curve::Out),
         );
@@ -1191,7 +1230,7 @@ pub fn text_field(ui: &mut egui::Ui, value: &mut String, size: egui::Vec2) -> eg
             .frame(egui::Frame::NONE)
             .text_color(tx(0.85))
             .font(egui::FontId::new(text::MD, egui::FontFamily::Proportional))
-            .vertical_align(egui::Align::Center)
+            .align(egui::Align2::LEFT_CENTER)
             .margin(egui::Margin::ZERO),
     )
 }
@@ -1209,7 +1248,7 @@ pub fn checkbox(ui: &mut egui::Ui, checked: &mut bool, label: &str) -> egui::Res
         response.mark_changed();
     }
     response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, *checked, label)
+        egui::WidgetInfo::selected(egui::Role::CheckBox, true, *checked, label)
     });
     let ctx = ui.ctx().clone();
     let on = motion::flag(*checked);
@@ -1302,7 +1341,7 @@ fn pill_button(ui: &mut egui::Ui, label: &str, pill: Pill) -> egui::Response {
     );
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
 
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
 
     let t = ui
         .ctx()
@@ -1421,7 +1460,7 @@ pub fn link(ui: &mut egui::Ui, label: &str) -> egui::Response {
     let galley = ui.fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font, color));
     let (rect, response) =
         ui.allocate_exact_size(galley.size() + egui::vec2(0.0, 4.0), egui::Sense::click());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Link, true, label));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Link, true, label));
     let hovered = response.hovered();
     let color = if hovered { tx(0.85) } else { color };
     let painter = ui.painter();
@@ -1613,7 +1652,7 @@ pub fn progress_block(ui: &mut egui::Ui, id: &'static str, label: &str, percent:
         g.add_space(26.0);
         progress_readout(g, label, percent, text::BASE, 12.0);
         g.add_space(10.0);
-        progress_bar(g, egui::Id::new(id), bar_fraction(percent), BAR_STEADY);
+        progress_bar(g, egui::Id::unique(id), bar_fraction(percent), BAR_STEADY);
     });
 }
 

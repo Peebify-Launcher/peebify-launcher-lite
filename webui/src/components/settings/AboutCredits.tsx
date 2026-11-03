@@ -122,7 +122,7 @@ export function AboutHero() {
         style={{ maskImage: ART_MASK, WebkitMaskImage: ART_MASK }}
       >
         <img
-          src="/icons/about-banner.jpg"
+          src="/icons/about-banner.avif"
           alt=""
           draggable={false}
           className="h-full w-full -scale-x-100 object-cover object-[40%_62%]"

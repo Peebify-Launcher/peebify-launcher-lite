@@ -1,9 +1,9 @@
 [package]
 name = "peebify-installer"
 version = "0.1.0"
-description = "Peebify Launcher Setup (installer / uninstaller)"
+description = "Peebify Launcher Setup (installer / updater / uninstaller)"
 authors = ["Peebify"]
-license = "GPL-3.0-only"
+license = "Proprietary"
 edition = "2021"
 publish = false
 
@@ -12,19 +12,16 @@ name = "peebify-installer"
 path = "src/main.rs"
 
 [dependencies]
-eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "glow"] }
 rfd = "0.17"
 
 tar = "0.4"
-zstd = "0.14"
+lzma-rust2 = { version = "0.24", default-features = false, features = ["std", "xz"] }
 sha2 = "0.11"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = "0.4"
-
-ureq = "3"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
@@ -32,6 +29,8 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
+    "Win32_Networking_WinHttp",
     "Win32_Security",
     "Win32_Security_Cryptography",
     "Win32_Security_Cryptography_Catalog",
@@ -48,6 +47,7 @@ windows = { version = "0.62", features = [
     "Win32_Storage_EnhancedStorage",
     "Win32_Storage_FileSystem",
     "Win32_UI_Shell",
+    "Win32_UI_HiDpi",
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }

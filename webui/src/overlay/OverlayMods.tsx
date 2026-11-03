@@ -116,7 +116,7 @@ function InstalledRow({
         </button>
       </div>
       {open && (
-        <div className="flex flex-wrap items-center gap-2 border-t border-white/[0.055] bg-black/20 px-4 py-2">
+        <div className="flex flex-wrap items-center gap-2 bg-black/20 px-4 py-2">
           {asking ? (
             <>
               <span className="min-w-0 flex-1 text-[12px] text-white/70">{asking.confirm}</span>
@@ -615,7 +615,7 @@ export function OverlayMods({ gameId, modsUsable, mods: status }: PanelProps) {
         ) : shownMembers.length === 0 ? (
           <Empty compact>{t("overlay.mods.noMatch")}</Empty>
         ) : (
-          <GroupBox compact divided>
+          <GroupBox compact>
             {shownMembers.map((mod) => (
               <ProfileRow
                 key={mod.modId}
@@ -645,7 +645,7 @@ export function OverlayMods({ gameId, modsUsable, mods: status }: PanelProps) {
         ) : visible.length === 0 ? (
           <Empty compact>{t("overlay.mods.noMatch")}</Empty>
         ) : (
-          <GroupBox compact divided>
+          <GroupBox compact>
             {visible.map((mod) => (
               <InstalledRow
                 key={mod.modId}

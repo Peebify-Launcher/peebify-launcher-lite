@@ -1,6 +1,7 @@
 // ------------ Launcher Hooks ------------
-// Hooks only the launcher window uses: window focus, renderer suspended, async loading and the remembered reads
-// pages open with. Kept apart from hooks.ts, which the overlay loads up front, so the overlay does not load these too.
+// Hooks only the launcher window uses: window focus, window covered, renderer suspended, async loading and the
+// remembered reads pages open with. Kept apart from hooks.ts, which the overlay loads up front, so the overlay does not
+// load these too.
 import { useEffect, useState, useSyncExternalStore, type DependencyList } from "react";
 import { isTauri } from "./tauri";
 import { useTauriEvent } from "./hooks";
@@ -18,6 +19,7 @@ import {
   getResourceQuality,
   getSteamInstall,
   onRendererPowerSave,
+  onWindowCovered,
   onWindowRestored,
 } from "./ipc";
 import { subscriptions } from "./rpc";
@@ -35,6 +37,14 @@ export function useWindowFocused(): boolean {
   const [focused, setFocused] = useState(() => typeof document === "undefined" || document.hasFocus());
   useTauriEvent(onFocusChanged, setFocused);
   return focused;
+}
+
+// ------------ Window Covered ------------
+// A hook that says whether other windows fully cover the launcher window, so nothing on it can be seen.
+export function useWindowCovered(): boolean {
+  const [covered, setCovered] = useState(false);
+  useTauriEvent(onWindowCovered, setCovered);
+  return covered;
 }
 
 // ------------ Renderer Suspended ------------

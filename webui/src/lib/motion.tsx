@@ -1,5 +1,5 @@
 // ------------ Motion Presets ------------
-// Shared animation timings and page, fade, list and collapse transitions, so everything moves the same way.
+// Shared animation timings and fade, list and collapse transitions, so everything moves the same way.
 // Respects the reduced motion setting.
 import type { ReactNode } from "react";
 import { AnimatePresence, m, useReducedMotion, type Transition, type Variants } from "framer-motion";
@@ -21,21 +21,6 @@ export const springJelly: Transition = { type: "spring", stiffness: 600, damping
 
 export const springDrip: Transition = { type: "spring", stiffness: 380, damping: 22 };
 
-export const pageVariants: Variants = {
-  initial: { opacity: 0, y: 8 },
-  animate: { opacity: 1, y: 0, transition: { duration: 0.2, ease: EASE_OUT_SOFT } },
-  exit: { opacity: 0, transition: { duration: 0.2 } },
-};
-
-export const pageVariantsSolid: Variants = {
-  initial: { opacity: 0, y: 8 },
-  animate: {
-    opacity: 1,
-    y: 0,
-    transition: { opacity: { duration: 0.05 }, y: { duration: 0.2, ease: EASE_OUT_SOFT } },
-  },
-  exit: { opacity: 0, transition: { duration: 0.2 } },
-};
 
 export const fadeVariants: Variants = {
   initial: { opacity: 0 },

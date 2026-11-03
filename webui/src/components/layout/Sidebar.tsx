@@ -69,7 +69,6 @@ export const RAIL_STYLE: CSSProperties = {
   background: "rgba(14,14,18,0.7)",
   backdropFilter: "blur(24px) saturate(180%)",
   WebkitBackdropFilter: "blur(24px) saturate(180%)",
-  borderRight: "1px solid rgba(255,255,255,0.07)",
 };
 
 const HIDE_KEY: Partial<Record<View, string>> = {

@@ -2,8 +2,8 @@
 
 // ------------ Installer Entry Point ------------
 // One exe does all the setup jobs. No arguments opens the install window, /S installs silently, /uninstall removes
-// the launcher (from a temp copy of itself so it can delete its own folder), and pack and inspect are the build
-// tools that scripts/build-installer.js uses to attach and check the payload.
+// the launcher (from a temp copy of itself so it can delete its own folder), and inspect is the build check that
+// scripts/build-installer.js runs on the packed setup.
 
 mod consts;
 mod ilog;
@@ -50,11 +50,6 @@ const KNOWN_FLAGS: &[&str] = &[
 const KNOWN_OPTIONS: &[&str] = &[
     "install-dir",
     "dir",
-    "stub",
-    "payload-dir",
-    "out",
-    "version",
-    "main-binary",
     "file",
 ];
 
@@ -118,7 +113,7 @@ fn main() {
     let dll_search_restricted = win::restrict_dll_search();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let subcommand = args.first().map(String::as_str);
-    let is_tool = subcommand == Some("pack") || subcommand == Some("inspect");
+    let is_tool = subcommand == Some("inspect");
     if !is_tool {
         ilog::init();
     }
@@ -147,8 +142,6 @@ fn main() {
             win::message_box_info("Peebify Launcher Setup", &usage(false));
         }
         exit::OK
-    } else if subcommand == Some("pack") {
-        pack_main(&args)
     } else if subcommand == Some("inspect") {
         inspect_main(&args)
     } else if flag(&args, "second-stage") {
@@ -182,10 +175,7 @@ fn exit_with(code: i32) -> ! {
 
 fn validate_args(args: &[String]) -> Result<(), String> {
     let mut i = 0;
-    if matches!(
-        args.first().map(String::as_str),
-        Some("pack") | Some("inspect")
-    ) {
+    if args.first().map(String::as_str) == Some("inspect") {
         i = 1;
     }
     while i < args.len() {
@@ -537,32 +527,6 @@ fn tool_exit(result: Result<(), String>) -> i32 {
     }
 }
 
-fn pack_main(args: &[String]) -> i32 {
-    let required = |name: &str| -> Result<String, String> {
-        value_of(args, name).ok_or_else(|| format!("pack: missing --{name}"))
-    };
-    tool_exit((|| -> Result<(), String> {
-        let stub = PathBuf::from(required("stub")?);
-        let payload_dir = PathBuf::from(required("payload-dir")?);
-        let out = PathBuf::from(required("out")?);
-        let version = required("version")?;
-        let main_binary =
-            value_of(args, "main-binary").unwrap_or_else(|| consts::MAIN_BINARY.to_string());
-        let manifest = payload::pack(&stub, &payload_dir, &out, &version, &main_binary)?;
-        println!(
-            "{}",
-            serde_json::json!({
-                "ok": true,
-                "out": out.display().to_string(),
-                "version": manifest.version,
-                "files": manifest.file_count,
-                "estimatedSizeKb": manifest.estimated_size_kb,
-            })
-        );
-        Ok(())
-    })())
-}
-
 fn inspect_main(args: &[String]) -> i32 {
     tool_exit((|| -> Result<(), String> {
         let file = PathBuf::from(
@@ -571,6 +535,17 @@ fn inspect_main(args: &[String]) -> i32 {
         let payload = Payload::open(&file)?
             .ok_or_else(|| "no payload footer found (plain stub?)".to_string())?;
         payload.verify()?;
+        let files = payload.list()?;
+        if files.len() as u64 != payload.manifest.file_count {
+            return Err(format!(
+                "the payload holds {} files but its manifest lists {}",
+                files.len(),
+                payload.manifest.file_count
+            ));
+        }
+        if !files.contains(&payload.manifest.main_binary) {
+            return Err(format!("the payload has no {}", payload.manifest.main_binary));
+        }
         println!(
             "{}",
             serde_json::json!({
@@ -578,6 +553,7 @@ fn inspect_main(args: &[String]) -> i32 {
                 "verified": true,
                 "manifest": serde_json::to_value(&payload.manifest).map_err(|e| e.to_string())?,
                 "payloadBytes": payload.footer.payload_len,
+                "files": files,
             })
         );
         Ok(())
@@ -599,7 +575,7 @@ mod tests {
     #[test]
     fn options_need_a_value() {
         assert!(validate_args(&args(&["/S", "--install-dir", r"D:\Peebify"])).is_ok());
-        assert!(validate_args(&args(&["pack", "--version", "1.2.3"])).is_ok());
+        assert!(validate_args(&args(&["inspect", "--file", "setup.exe"])).is_ok());
         let missing = validate_args(&args(&["/S", "--install-dir"])).unwrap_err();
         assert!(missing.contains("--install-dir"));
         assert!(validate_args(&args(&["--install-dir", "--launch"])).is_err());

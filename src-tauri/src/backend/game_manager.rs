@@ -457,6 +457,18 @@ impl GameManager {
             Some(_) => None,
             None => self.steam_launch_target(&profile_id, &install_root, profile),
         };
+        if via_steam.is_some() {
+            if let Some(quality) = super::kuro::steam_quality(&self.app, profile) {
+                if !super::kuro::qualities_on_disk(profile, &install_root).contains(&quality) {
+                    let label = super::kuro::bundle_name(&quality);
+                    log::warn!("{profile_id}: Steam starts it at {label} quality, but the {label} files aren't on disk");
+                    return err_response(format!(
+                        "Steam always starts {display_name} at {label} quality, but the {label} files aren't installed. \
+                         Apply {label} under Resource quality to download them, or turn off Launch through Steam."
+                    ));
+                }
+            }
+        }
         let steam_launch = via_steam.is_some();
         let loader_wait = if custom_launcher.is_some() {
             CUSTOM_LAUNCH_CONFIRM_TIMEOUT
@@ -1018,6 +1030,7 @@ impl GameManager {
         state.overlay.on_game_started(game_id, pid);
         state.window.update_tray_menu();
         state.window.perform_launch_action();
+        super::window_manager::suspend_while_playing(&self.app);
     }
 
     async fn handle_game_stopped(
@@ -1040,6 +1053,7 @@ impl GameManager {
 
         fps_unlock::end_session(&self.app, game_id);
         self.close_exit_companions(game_id).await;
+        super::window_manager::wake_webview(&self.app);
         self.emit_game_event("game-stopped", json!({ "gameId": game_id }))
             .await;
         self.clear_update_cache(game_id);
@@ -1071,6 +1085,8 @@ impl GameManager {
                 .state::<BackendState>()
                 .window
                 .exit_if_closed_for_game();
+        } else {
+            super::window_manager::suspend_while_playing(&self.app);
         }
     }
 
@@ -1146,6 +1162,7 @@ impl GameManager {
             self.emit_game_event("game-started", json!({ "gameId": game_id, "pid": pid }))
                 .await;
         }
+        super::window_manager::suspend_while_playing(&self.app);
         let state = self.app.state::<BackendState>();
         if state.overlay.owner().is_none() {
             if let Some((id, _)) = self.latest_started_game() {

@@ -103,24 +103,23 @@ function CommunityToolsMenu() {
           {tools.map((tool) => {
             const { label, icon: Icon } = toolMeta(tool.name, game, t("home.communityTools.officialSite"));
             return (
-              <Hint key={tool.name} tip={tool.name} placement="left" className="block w-full">
-                <button
-                  onClick={() => {
-                    close();
-                    void openExternal(tool.url);
-                  }}
-                  className="group flex w-full items-center gap-[10px] px-[12px] py-[7px] text-left text-[13px] text-white/85 transition-colors hover:bg-white/[0.06]"
-                >
-                  <span className="grid h-[28px] w-[28px] shrink-0 place-items-center rounded-[8px] bg-white/[0.06] text-white/65 transition-colors group-hover:bg-white/[0.09] group-hover:text-white/90">
-                    <Icon size={14} />
-                  </span>
-                  <span className="flex-1 truncate">{label}</span>
-                  <ExternalLink
-                    size={12}
-                    className="shrink-0 opacity-0 transition-opacity group-hover:opacity-50"
-                  />
-                </button>
-              </Hint>
+              <button
+                key={tool.name}
+                onClick={() => {
+                  close();
+                  void openExternal(tool.url);
+                }}
+                className="menu-row group flex w-full items-center gap-[10px] px-[12px] py-[7px] text-left text-[13px] text-white/85 transition-colors"
+              >
+                <span className="grid h-[28px] w-[28px] shrink-0 place-items-center rounded-[8px] bg-white/[0.06] text-white/65 transition-colors group-hover:bg-white/[0.09] group-hover:text-white/90">
+                  <Icon size={14} />
+                </span>
+                <span className="flex-1 truncate">{label}</span>
+                <ExternalLink
+                  size={12}
+                  className="shrink-0 opacity-0 transition-opacity group-hover:opacity-50"
+                />
+              </button>
             );
           })}
         </div>
@@ -242,7 +241,7 @@ function ResourceQualityRow({
   jobActive,
   running,
   customLauncher,
-  resourceQuality: { quality, setQuality, installedLabel, pending, apply },
+  resourceQuality: { quality, setQuality, steamLocked, installedLabel, pending, apply },
 }: {
   installed: boolean;
   jobActive: boolean;
@@ -251,10 +250,12 @@ function ResourceQualityRow({
   resourceQuality: ReturnType<typeof useResourceQuality>;
 }) {
   const t = useT();
-  const locked = customLauncher;
+  const locked = customLauncher || steamLocked;
   const hint = customLauncher
     ? t("home.quickSettings.notUsedWithCustomLauncher")
-    : t("home.quickSettings.qualityPending", { installed: installedLabel, quality: qualityLabel(quality) });
+    : steamLocked
+      ? t("home.quickSettings.qualitySteam", { quality: qualityLabel(quality) })
+      : t("home.quickSettings.qualityPending", { installed: installedLabel, quality: qualityLabel(quality) });
 
   return (
     <Hint
@@ -279,10 +280,10 @@ function ResourceQualityRow({
             onChange={setQuality}
           />
         </div>
-        {(customLauncher || pending) && (
+        {(locked || pending) && (
           <div className="mt-[6px] flex items-center gap-[8px] pl-[38px]">
             <span className="min-w-0 flex-1 text-[11px] leading-snug text-white/45">{hint}</span>
-            {pending && !locked && (
+            {pending && !customLauncher && (
               <button
                 onClick={apply}
                 disabled={jobActive || running}
@@ -327,7 +328,7 @@ function QuickSettingsMenu() {
     hint?: string;
     danger?: boolean;
     disabled?: boolean;
-    dividerBefore?: boolean;
+    gapBefore?: boolean;
     onClick: () => void;
   };
 
@@ -360,7 +361,7 @@ function QuickSettingsMenu() {
     {
       icon: FolderOpen,
       label: t("home.quickSettings.gameFolder"),
-      dividerBefore: true,
+      gapBefore: true,
       disabled: !installed,
       onClick: () => void openGameFolder(activeId),
     },
@@ -372,7 +373,7 @@ function QuickSettingsMenu() {
     {
       icon: FolderSearch,
       label: t("home.quickSettings.locateInstall"),
-      dividerBefore: true,
+      gapBefore: true,
       onClick: () => void locate(),
     },
     {
@@ -396,9 +397,9 @@ function QuickSettingsMenu() {
     <ExpandUp className={MENU_WIDTH} icon={Settings} label={t("home.quickSettings.title")}>
       {(close) => (
         <div className="max-h-[calc(100vh-124px)] overflow-y-auto overscroll-contain py-[6px]">
-          {options.map(({ icon: Icon, label, hint, danger, disabled, dividerBefore, onClick }) => (
+          {options.map(({ icon: Icon, label, hint, danger, disabled, gapBefore, onClick }) => (
             <Fragment key={label}>
-              {dividerBefore && <div className="mx-[12px] my-[5px] h-px bg-white/[0.07]" />}
+              {gapBefore && <div className="h-[10px]" />}
               <button
                 onClick={
                   disabled
@@ -409,10 +410,12 @@ function QuickSettingsMenu() {
                       }
                 }
                 disabled={disabled}
-                className={`group flex w-full items-center gap-[10px] px-[12px] py-[7px] text-left text-[13px] transition-colors ${
+                className={`menu-row group flex w-full items-center gap-[10px] px-[12px] py-[7px] text-left text-[13px] transition-colors ${
                   disabled
                     ? "cursor-not-allowed text-white/30"
-                    : `${danger ? "text-red-300" : "text-white/85"} hover:bg-white/[0.06]`
+                    : danger
+                      ? "text-red-300"
+                      : "text-white/85"
                 }`}
               >
                 <span
@@ -438,7 +441,7 @@ function QuickSettingsMenu() {
             </Fragment>
           ))}
           {(game.graphicsApiChoice || game.resourceQualityChoice) && (
-            <div className="mx-[12px] my-[5px] h-px bg-white/[0.07]" />
+            <div className="h-[10px]" />
           )}
           {game.graphicsApiChoice && (
             <DirectXRow
@@ -509,7 +512,6 @@ export function ExpandUp({
       <div className="glass absolute bottom-0 left-0 right-0 flex flex-col overflow-hidden rounded-ui shadow-2xl">
         <Collapse open={open} id={contentId}>
           {typeof children === "function" ? children(() => setOpen(false)) : children}
-          <div className="mx-[12px] h-px bg-white/[0.08]" />
         </Collapse>
         <button
           ref={btnRef}

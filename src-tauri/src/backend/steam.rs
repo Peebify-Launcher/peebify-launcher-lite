@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
 
-use regex::Regex;
+use regex_lite::Regex;
 
 use serde_json::Value;
 use tokio::process::{Child, Command};

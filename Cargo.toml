@@ -6,11 +6,15 @@ members = ["src-tauri", "installer", "helpers", "src-tauri/src/transfer"]
 panic = "abort"
 codegen-units = 1
 lto = true
-opt-level = "s"
+opt-level = "z"
 strip = true
 
+[profile.installer]
+inherits = "release"
+opt-level = "s"
+
 [profile.release.package.peebify-helpers]
-opt-level = 3
+opt-level = "s"
 
 [profile.release.package.image]
 opt-level = 3
@@ -55,45 +59,6 @@ opt-level = 3
 opt-level = 3
 
 [profile.release.package.peebify-transfer]
-opt-level = 3
-
-[profile.release.package.tokio]
-opt-level = 3
-
-[profile.release.package.hyper]
-opt-level = 3
-
-[profile.release.package.hyper-util]
-opt-level = 3
-
-[profile.release.package.h2]
-opt-level = 3
-
-[profile.release.package.http]
-opt-level = 3
-
-[profile.release.package.httparse]
-opt-level = 3
-
-[profile.release.package.reqwest]
-opt-level = 3
-
-[profile.release.package.rustls]
-opt-level = 3
-
-[profile.release.package.tokio-rustls]
-opt-level = 3
-
-[profile.release.package.hyper-rustls]
-opt-level = 3
-
-[profile.release.package.ring]
-opt-level = 3
-
-[profile.release.package.bytes]
-opt-level = 3
-
-[profile.release.package.futures-util]
 opt-level = 3
 
 [profile.release.package.crc]

@@ -2,9 +2,9 @@
 // The panel that slides in from the right edge under the bell in the title bar, listing recent notifications with
 // relative times. Individual ones can be dismissed or all of them cleared.
 import { useRef, useState } from "react";
-import { m } from "framer-motion";
+import { m, type Transition } from "framer-motion";
 import { Trash2, X } from "lucide-react";
-import { springPour, useReducedMotionSafe } from "../../lib/motion";
+import { useReducedMotionSafe } from "../../lib/motion";
 import { useNotificationStore, NOTIF_ICONS, NOTIF_ICON_COLORS } from "../../store/notifications";
 import { useNow, useClickOutside, useEscapeKey } from "../../lib/hooks";
 import { fmtRelTime } from "../../lib/format";
@@ -13,6 +13,8 @@ import { IconButton } from "../ui/Tooltip";
 import { useT } from "../../lib/useT";
 
 const CLOSED_X = 376;
+
+const SLIDE: Transition = { type: "spring", stiffness: 420, damping: 41 };
 
 function RelTime({ ts }: { ts: number }) {
   const now = useNow();
@@ -47,7 +49,7 @@ export function NotificationPanel() {
       className="glass absolute bottom-[8px] right-[8px] top-[52px] z-(--z-panel) flex w-[360px] flex-col rounded-ui shadow-2xl"
       initial={false}
       animate={{ x: open ? 0 : CLOSED_X }}
-      transition={reduce ? { duration: 0 } : springPour}
+      transition={reduce ? { duration: 0 } : SLIDE}
       onAnimationComplete={() => {
         if (!useNotificationStore.getState().open) setListMounted(false);
       }}
@@ -55,7 +57,7 @@ export function NotificationPanel() {
       aria-hidden={!open}
       inert={!open}
     >
-      <header className="flex items-center justify-between gap-3 border-b border-white/[0.08] px-[18px] py-[14px]">
+      <header className="flex items-center justify-between gap-3 px-[18px] py-[14px]">
         <h3 className="text-[15px] font-semibold">{t("common.notifications")}</h3>
         <div className="flex items-center gap-1">
           <IconButton

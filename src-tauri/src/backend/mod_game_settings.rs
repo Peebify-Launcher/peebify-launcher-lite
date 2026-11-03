@@ -43,7 +43,7 @@ pub fn toggles(profile: &Value) -> Vec<Toggle> {
             Toggle {
                 key: WOUNDED_FX_KEY,
                 label: "Turn off the wounded effect",
-                description: "Most mods' textures break after a few hits while the wounded effect is on. Leave this off if you use a mod that removes the effect.",
+                description: "The textures of most mods break after a few hits while the wounded effect is on. Leave this off if you use a mod that removes the effect.",
             },
         ],
         _ => Vec::new(),
@@ -328,7 +328,7 @@ mod wuwa {
     }
 
     pub(super) fn set_rows(database: &Path, values: &[(&str, &str)]) -> Result<(), String> {
-        let failed = |e: rusqlite::Error| format!("Could not update Wuthering Waves' settings database ({e}).");
+        let failed = |e: rusqlite::Error| format!("Could not update the Wuthering Waves settings database ({e}).");
         let connection = rusqlite::Connection::open(database).map_err(failed)?;
         connection.busy_timeout(super::Duration::from_secs(3)).map_err(failed)?;
         let has_table: bool = connection

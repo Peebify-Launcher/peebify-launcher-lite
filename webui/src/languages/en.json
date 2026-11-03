@@ -553,6 +553,8 @@
       "pending": "{installed} is installed. Apply now downloads the {quality} files and removes the {installed} ones.",
       "description": "Higher quality looks sharper but takes more disk space.",
       "descriptionNotInstalled": "Higher quality looks sharper but takes more disk space. This is the quality that gets installed.",
+      "steamLocked": "Steam always starts {game} at {quality} quality, so Peebify keeps {quality} installed. Turn off Launch through Steam to pick another quality.",
+      "steamMissing": "The {quality} files aren't installed yet: Apply now downloads them.",
       "checkButton": "Check",
       "checkTip": "Compares the selected quality with the files on disk and with the quality the game launches at.",
       "check": {
@@ -1003,6 +1005,7 @@
       "quality": "Quality",
       "qualityHint": "The quality that gets installed.",
       "qualityPending": "{installed} is installed. Apply to switch to {quality}.",
+      "qualitySteam": "Steam always starts the game at {quality}.",
       "apply": "Apply"
     },
     "news": {

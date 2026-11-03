@@ -7,7 +7,7 @@ import { m } from "framer-motion";
 import { Check, ChevronDown } from "lucide-react";
 import { Collapse, springThumb, useReducedMotionSafe } from "../../lib/motion";
 import { useClickOutside, useDismissOnViewportChange, useEscapeKey } from "../../lib/hooks";
-import { MENU_DIVIDER, MENU_PANEL, popoutRoot } from "./PopoverMenu";
+import { MENU_SURFACE, popoutRoot } from "./PopoverMenu";
 
 const TYPEAHEAD_MS = 500;
 
@@ -29,12 +29,13 @@ export function Select({
   const [open, setOpen] = useState(false);
   const [closing, setClosing] = useState(false);
   const [active, setActive] = useState(0);
+  const [hot, setHot] = useState(false);
   const reduce = useReducedMotionSafe();
   const listId = useId();
   const [layout, setLayout] = useState<{
     style: React.CSSProperties;
     flipUp: boolean;
-    triggerH: number;
+    rowH: number;
     maxH: number;
   } | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -70,12 +71,12 @@ export function Select({
     if (!open) return;
     const el = btnRef.current!;
     const r = el.getBoundingClientRect();
-    const w = el.offsetWidth;
-    const h = el.offsetHeight;
-    const cx = r.left + r.width / 2;
-    const cy = r.top + r.height / 2;
-    const top = cy - h / 2;
-    const bottom = cy + h / 2;
+    const w = r.width;
+    const h = r.height;
+    const top = r.top;
+    const bottom = r.bottom;
+    const cs = getComputedStyle(el);
+    const rowH = h - parseFloat(cs.borderTopWidth) - parseFloat(cs.borderBottomWidth);
     const estimated = Math.min(options.length * 33, 320) + 12;
     const below = window.innerHeight - bottom;
     const fitsBelow = below >= estimated + 8;
@@ -84,11 +85,11 @@ export function Select({
     const available = flipUp ? top - 8 : below - 8;
     setLayout({
       flipUp,
-      triggerH: h,
+      rowH,
       maxH: Math.max(66, Math.min(320, available - 20)),
       style: {
         position: "fixed",
-        right: window.innerWidth - (cx + w / 2),
+        right: window.innerWidth - r.right,
         width: w,
         ...(flipUp
           ? { bottom: window.innerHeight - bottom }
@@ -176,8 +177,11 @@ export function Select({
       role="button"
       aria-hidden
       onClick={close}
+      onMouseEnter={() => setHot(true)}
+      onMouseLeave={() => setHot(false)}
+      data-hot={hot}
       className={`${BOX} cursor-pointer select-none`}
-      style={{ height: layout.triggerH - 2 }}
+      style={{ height: layout.rowH }}
     >
       <span className="min-w-0 flex-1 truncate">{selected?.label ?? value}</span>
       <m.span
@@ -207,8 +211,9 @@ export function Select({
           aria-selected={o.value === value}
           onMouseEnter={() => setActive(i)}
           onClick={() => pick(o.value)}
-          className={`flex w-full items-center justify-between gap-2 py-[7px] pl-[14px] pr-[11px] text-left text-[13px] transition-colors ${
-            i === active ? "bg-white/[0.06] text-white" : "text-white/85"
+          data-active={i === active}
+          className={`menu-row flex w-full items-center justify-between gap-2 py-[7px] pl-[14px] pr-[11px] text-left text-[13px] transition-colors ${
+            i === active ? "text-white" : "text-white/85"
           }`}
         >
           <span className="truncate">{o.label}</span>
@@ -219,7 +224,6 @@ export function Select({
   );
 
   const overlayVisible = (open || closing) && layout;
-  const divider = <div className={MENU_DIVIDER} />;
 
   return (
     <>
@@ -235,11 +239,14 @@ export function Select({
         aria-activedescendant={open ? `${listId}-${active}` : undefined}
         onClick={() => (open ? close() : openMenu())}
         onKeyDown={onKeyDown}
+        onMouseEnter={() => setHot(true)}
+        onMouseLeave={() => setHot(false)}
+        data-hot={hot}
         className={`glass ${BOX} rounded-ui py-[8px] disabled:cursor-not-allowed disabled:opacity-50 disabled:before:hidden ${
           overlayVisible ? "opacity-0" : ""
         }`}
       >
-        <span className="grid min-w-0 text-left">
+        <span className="grid min-w-0 pr-[4px] text-left">
           {options.map((o) => (
             <span key={o.value} aria-hidden className="invisible col-start-1 row-start-1 truncate">
               {o.label}
@@ -260,21 +267,13 @@ export function Select({
             role="listbox"
             aria-label={ariaLabel}
             style={layout.style}
-            className={`z-(--z-tooltip) flex flex-col ${MENU_PANEL}`}
+            className={`z-(--z-tooltip) flex flex-col transition-shadow duration-300 ${MENU_SURFACE} ${
+              open ? "shadow-2xl" : "shadow-none"
+            }`}
           >
             {!layout.flipUp && triggerRow}
             <Collapse open={open} initial onExitComplete={() => setClosing(false)}>
-              {layout.flipUp ? (
-                <>
-                  {optionsPanel}
-                  {divider}
-                </>
-              ) : (
-                <>
-                  {divider}
-                  {optionsPanel}
-                </>
-              )}
+              {optionsPanel}
             </Collapse>
             {layout.flipUp && triggerRow}
           </div>,

@@ -1524,14 +1524,14 @@ pub(super) async fn set_mod_ini_setting(app: &AppHandle, args: &[Value]) -> Resu
 // ------------ Mod Tools Updater ------------
 // Installs the XXMI mod loader packages for every supported game once mod support is on, and keeps them up to
 // date. It starts as soon as the launcher opens or mod support is switched on, then checks their GitHub
-// releases every five minutes, verifies each download's signature, and holds an install back while a modded
+// releases every 12 hours, verifies each download's signature, and holds an install back while a modded
 // game is running, applying it once the game closes.
 
 pub const STATE_FILE: &str = "update-state.json";
 pub const STAGING_DIR: &str = ".staging";
-const CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const CHECK_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
 const WATCH_TICK: Duration = Duration::from_secs(1);
-const RETRY_INTERVAL: Duration = Duration::from_secs(60);
+const RETRY_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const OFFLINE: &str = "offline";
 const RATE_LIMIT_FALLBACK_SECS: i64 = 30 * 60;
 
@@ -1632,9 +1632,9 @@ fn cached_release(state: &PackageState) -> Option<Release> {
 }
 
 pub fn parse_signature(body: &str) -> Option<String> {
-    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static PATTERN: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
     let pattern = PATTERN.get_or_init(|| {
-        regex::Regex::new(
+        regex_lite::Regex::new(
             r"(?m)^## Signature[\r\n]+- ((?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{4}|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==))\s*$",
         )
         .expect("signature pattern")

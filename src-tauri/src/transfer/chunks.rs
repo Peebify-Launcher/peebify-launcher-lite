@@ -22,7 +22,7 @@ const MAX_REFETCHES: u32 = 3;
 const IDLE_RECHECK: Duration = Duration::from_millis(200);
 
 pub struct ChunkSpec {
-    pub id: String,
+    pub id: Arc<str>,
     pub url: String,
     pub size_hint: u64,
 }

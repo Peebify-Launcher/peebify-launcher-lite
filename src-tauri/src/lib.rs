@@ -204,6 +204,7 @@ pub fn run() {
                 state.game_updater.start();
                 state.game.resume_open_sessions();
                 backend::http::start_monitoring(&app_handle);
+                backend::window_manager::start_cover_watch(&app_handle);
             }
 
             {

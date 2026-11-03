@@ -296,7 +296,7 @@ export function ModsHubList({
   };
 
   const rowsFor = (list: ModEntry[], from: "profile" | "installed") => (
-    <GroupBox divided>
+    <GroupBox>
       {list.map((mod) => (
         <ModRow
           key={mod.modId}

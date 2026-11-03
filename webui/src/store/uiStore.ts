@@ -1,6 +1,7 @@
 // ------------ UI Store ------------
 // The current page, active game, app version, online state and window state. The page and game are
-// remembered across restarts.
+// remembered across restarts, and a page switch runs as a view transition that dissolves the old page away.
+import { flushSync } from "react-dom";
 import { create } from "zustand";
 import { GAMES, type GameId } from "../data/games";
 import type { BuildType } from "../lib/ipc";
@@ -51,7 +52,7 @@ interface UiState {
   setMaximized: (maximized: boolean) => void;
 }
 
-export const useUiStore = create<UiState>((set) => ({
+export const useUiStore = create<UiState>((set, get) => ({
   activeGameId: loadGame(),
   activeView: loadView(),
   appVersion: "",
@@ -64,7 +65,16 @@ export const useUiStore = create<UiState>((set) => ({
   },
   setView: (view) => {
     remember(VIEW_KEY, view);
-    set({ activeView: view });
+    const show = () => set({ activeView: view });
+    if (
+      view === get().activeView ||
+      typeof document.startViewTransition !== "function" ||
+      matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      show();
+      return;
+    }
+    document.startViewTransition(() => flushSync(show));
   },
   setAppVersion: (version) => set({ appVersion: version }),
   setBuildType: (buildType) => set({ buildType }),

@@ -531,7 +531,7 @@ function PlaytimeTracker() {
             <div
               key={r.label}
               className={`flex items-center justify-between ${
-                i === 3 ? "border-t border-white/[0.07] pt-[9px]" : ""
+                i === 3 ? "pt-[9px]" : ""
               }`}
             >
               <span className="text-[12px] text-white/55">{r.label}</span>
@@ -571,40 +571,24 @@ export function StagedProgress({
   };
 
   return (
-    <div className={className}>
-      <div className="flex gap-[4px]">
-        {stages.map((stage, index) => {
-          const fill = fillFor(index);
-          return (
-            <div
-              key={stage.id}
-              style={{ flexGrow: stage.weight, flexBasis: 0 }}
-              className="h-[4px] overflow-hidden rounded-full bg-black/[0.38] shadow-[inset_0_1px_1px_rgba(0,0,0,0.3)]"
-            >
+    <div className={`flex gap-[4px] ${className}`}>
+      {stages.map((stage, index) => {
+        const fill = fillFor(index);
+        const done = index < active;
+        const current = index === active;
+        return (
+          <div key={stage.id} style={{ flexGrow: stage.weight, flexBasis: 0, minWidth: "max-content" }}>
+            <div className="h-[4px] overflow-hidden rounded-full bg-black/[0.38] shadow-[inset_0_1px_1px_rgba(0,0,0,0.3)]">
               <div
                 className={`relative h-full overflow-hidden rounded-full transition-[width] duration-300 ease-linear ${
                   idle ? "bg-white/35" : "bg-white"
                 }`}
                 style={{ width: `${fill}%` }}
               >
-                {index === active && !idle && fill > 0 && (
-                  <span className="progress-shimmer" />
-                )}
+                {current && !idle && fill > 0 && <span className="progress-shimmer" />}
               </div>
             </div>
-          );
-        })}
-      </div>
-      <div className="mt-[9px] flex gap-[4px]">
-        {stages.map((stage, index) => {
-          const done = index < active;
-          const current = index === active;
-          return (
-            <div
-              key={stage.id}
-              style={{ flexGrow: stage.weight, flexBasis: 0, minWidth: current ? "max-content" : 0 }}
-              className="flex items-center gap-[6px]"
-            >
+            <div className="mt-[9px] flex items-center gap-[6px] pr-[10px]">
               <span
                 className={`h-[6px] w-[6px] shrink-0 rounded-full ${
                   current
@@ -615,7 +599,7 @@ export function StagedProgress({
                 }`}
               />
               <span
-                className={`truncate text-[11.5px] tabular-nums ${
+                className={`whitespace-nowrap text-[11.5px] tabular-nums ${
                   current ? "text-white" : done ? "text-white/45" : "text-white/[0.28]"
                 }`}
               >
@@ -630,9 +614,9 @@ export function StagedProgress({
                         : t("downloads.stage.percent", { stage: stage.label, percent: Math.round(percent) })}
               </span>
             </div>
-          );
-        })}
-      </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

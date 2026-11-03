@@ -1,7 +1,6 @@
 // ------------ Playtime Page ------------
 // The Playtime tab and its two small charts.
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { m } from "framer-motion";
 import { ChevronDown, ChevronUp, Flame, Trash2, X } from "lucide-react";
 import {
   type GameTotal,
@@ -35,7 +34,6 @@ import {
   getOlderSessions,
   type SessionEntry,
 } from "../lib/ipc";
-import { pageVariants } from "../lib/motion";
 import { fmtClockTime, fmtHM } from "../lib/format";
 import { iconFallback, iconSrcFor } from "../lib/customMedia";
 import { useNow } from "../lib/hooks";
@@ -228,9 +226,9 @@ export function PlaytimePage() {
         : t("playtime.summaryLine.recorded", lineVars);
 
   return (
-    <m.div variants={pageVariants} className="@container absolute inset-0">
+    <div className="@container absolute inset-0">
       <div className="flex h-full flex-col overflow-y-auto @[820px]:flex-row @[820px]:overflow-hidden">
-        <aside className="shrink-0 border-b border-white/[0.08] px-8 pb-7 pt-8 @[820px]:w-[326px] @[820px]:overflow-y-auto @[820px]:border-b-0 @[820px]:border-r">
+        <aside className="shrink-0 px-8 pb-7 pt-8 @[820px]:w-[326px] @[820px]:overflow-y-auto">
           <div className="w-full max-w-[420px] @[820px]:max-w-none">
             {hydrated ? (
               <SummaryRail
@@ -296,7 +294,7 @@ export function PlaytimePage() {
           )}
         </section>
       </div>
-    </m.div>
+    </div>
   );
 }
 
@@ -447,7 +445,7 @@ function RailLabel({ children }: { children: React.ReactNode }) {
 }
 
 function RailDivider() {
-  return <div className="my-[20px] h-px bg-white/[0.07]" />;
+  return <div className="my-[20px] h-px bg-white/[0.08]" />;
 }
 
 function StatRow({ label, value }: { label: string; value: string }) {
@@ -511,7 +509,7 @@ function DaySection({
         <h2 className="shrink-0 text-[13.5px] font-semibold text-white/85">
           {fmtDayHeading(group.date)}
         </h2>
-        <div className="h-px min-w-[16px] flex-1 bg-white/[0.07]" />
+        <div className="h-px min-w-[16px] flex-1 bg-white/[0.08]" />
         <span className="shrink-0 text-[11.5px] text-white/55">
           {t("playtime.day.sessions", { count: group.items.length })}
         </span>

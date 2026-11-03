@@ -1,11 +1,11 @@
 // ------------ Toast Layer ------------
 // The small pop-up messages that appear for a few seconds when something happens. They pause while hovered or
 // focused, and errors stay a bit longer. Clicking one opens the notification panel. Each one buds out of the
-// notification bell and goes back into it, so you can see where it went.
+// notification bell and slides off to the right when it goes.
 import { useEffect, useRef, useState, type FocusEvent } from "react";
 import { AnimatePresence, m } from "framer-motion";
 import { X } from "lucide-react";
-import { springDrip, springPour, useReducedMotionSafe } from "../../lib/motion";
+import { springDrip, useReducedMotionSafe } from "../../lib/motion";
 import { notificationBellRef } from "./WindowControls";
 import {
   useNotificationStore,
@@ -37,6 +37,7 @@ function bellOffset(): { x: number; y: number; scale: number; opacity: number } 
 const COLUMN_RIGHT = 14;
 const COLUMN_TOP = 56;
 const SLIDE_IN = { opacity: 0, x: 24 };
+const SLIDE_OUT = { opacity: 0, x: 48 };
 
 function Toast({ n, onOpen }: { n: Notification; onOpen: OpenHandler }) {
   const t = useT();
@@ -101,12 +102,7 @@ function Toast({ n, onOpen }: { n: Notification; onOpen: OpenHandler }) {
           ? { default: springDrip, opacity: { duration: 0.14 } }
           : { duration: 0.2, ease: "easeOut" },
       }}
-      exit={{
-        ...(from ?? SLIDE_IN),
-        transition: from
-          ? { default: springPour, opacity: { duration: 0.18, delay: 0.16 } }
-          : { duration: 0.18 },
-      }}
+      exit={{ ...SLIDE_OUT, transition: { duration: 0.2, ease: "easeIn" } }}
       onMouseEnter={() => hold(hovered, true)}
       onMouseLeave={() => hold(hovered, false)}
       onFocus={() => hold(focused, true)}

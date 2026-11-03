@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { AnimatePresence, m } from "framer-motion";
 import { useSettingsStore } from "../../store/settingsStore";
-import { fadeVariants, useReducedMotionSafe, pageVariantsSolid, EASE_STANDARD } from "../../lib/motion";
+import { fadeVariants, useReducedMotionSafe, EASE_STANDARD } from "../../lib/motion";
 import { NewsPanel } from "./NewsPanel";
 import { StartBar } from "./StartBar";
 import { BottomRightActions } from "./BottomRightActions";
@@ -29,7 +29,7 @@ export function GameHome() {
   };
 
   return (
-    <m.div variants={pageVariantsSolid} className="absolute inset-0">
+    <div className="absolute inset-0">
       <AnimatePresence initial={false}>
         {!hideSocials && (
           <m.div key="socials" {...fade}>
@@ -57,7 +57,7 @@ export function GameHome() {
           <StartBar hidePlaytime={hidePlaytime} />
         </m.div>
       </div>
-    </m.div>
+    </div>
   );
 }
 

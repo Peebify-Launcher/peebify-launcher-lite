@@ -127,7 +127,7 @@ export function ModsHubProfiles({
   };
 
   return (
-    <GroupBox divided className="self-start">
+    <GroupBox className="self-start">
       <div className="flex items-center justify-between px-4 py-3">
         <span className="flex items-center gap-2 text-[12.5px] font-medium text-white/55">
           <Layers size={14} />

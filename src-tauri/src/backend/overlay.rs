@@ -35,7 +35,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::fs_util::dialog::Pick;
-use super::window_manager::WEBVIEW_BROWSER_ARGS;
+use super::window_manager::{set_webview_resting, WEBVIEW_BROWSER_ARGS};
 use super::{arg_str, err_response, now_ms, ok_with, BackendState};
 
 const HELPER_NAME: &str = "peebify-overlay-helper.exe";
@@ -1128,6 +1128,7 @@ impl OverlayManager {
         } else if !drawer_blocked_by_fullscreen(&self.app) {
             log::info!("overlay: opening the drawer");
             set_drawer_open(true);
+            set_webview_resting(&window, false);
             let _ = window.show();
             activate_drawer(&self.app);
             let _ = self.app.emit("overlay-opened", Value::Null);
@@ -1142,6 +1143,7 @@ impl OverlayManager {
             .get_webview_window(DRAWER_LABEL)
         {
             let _ = window.hide();
+            set_webview_resting(&window, true);
         }
         if held_foreground {
             focus_game(&self.app);
@@ -1862,6 +1864,7 @@ fn ensure_window(
     };
     remember_hwnd(label, hwnd);
     apply_styles(hwnd, label);
+    set_webview_resting(&window, true);
     Ok(())
 }
 
@@ -2080,6 +2083,7 @@ fn track_loop(
     for label in [DRAWER_LABEL, HUD_LABEL] {
         if let Some(window) = app.get_webview_window(label) {
             let _ = window.hide();
+            set_webview_resting(&window, true);
         }
     }
 }
@@ -2172,7 +2176,13 @@ fn reconcile(
                 set_topmost(hwnd, wanted);
                 apply_styles(hwnd, label);
             });
-            let _ = if wanted { window.show() } else { window.hide() };
+            if wanted {
+                set_webview_resting(&window, false);
+                let _ = window.show();
+            } else {
+                let _ = window.hide();
+                set_webview_resting(&window, true);
+            }
         }
     }
 

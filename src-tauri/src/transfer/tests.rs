@@ -795,7 +795,7 @@ fn chunk_specs(server: &TestServer, count: u8, behavior: Behavior) -> (Vec<crate
         let body = pattern(64 << 10, i.wrapping_add(100));
         let url = server.add(&format!("/chunk/{i}"), body.clone(), behavior.clone());
         specs.push(crate::ChunkSpec {
-            id: format!("chunk-{i}"),
+            id: format!("chunk-{i}").into(),
             url,
             size_hint: body.len() as u64,
         });

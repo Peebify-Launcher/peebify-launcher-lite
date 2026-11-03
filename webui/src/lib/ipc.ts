@@ -730,13 +730,14 @@ export const RESOURCE_QUALITY_OPTIONS: { value: ResourceQuality; label: string }
 export interface ResourceQualityInfo {
   installed: ResourceQuality[];
   sizes: Partial<Record<ResourceQuality, { downloadBytes: number; installBytes: number }>> | null;
+  steamQuality: ResourceQuality | null;
 }
 
 const isQuality = (v: unknown): v is ResourceQuality =>
   typeof v === "string" && (RESOURCE_QUALITIES as readonly string[]).includes(v);
 
 export async function getResourceQuality(gameId: string, withSizes = false): Promise<ResourceQualityInfo> {
-  const r = await rpcRead<{ installed?: unknown; sizes?: unknown }>(
+  const r = await rpcRead<{ installed?: unknown; sizes?: unknown; steamQuality?: unknown }>(
     "get-resource-quality",
     gameId,
     withSizes,
@@ -751,7 +752,11 @@ export async function getResourceQuality(gameId: string, withSizes = false): Pro
       }
     }
   }
-  return { installed, sizes: Object.keys(sizes).length ? sizes : null };
+  return {
+    installed,
+    sizes: Object.keys(sizes).length ? sizes : null,
+    steamQuality: isQuality(r?.steamQuality) ? r.steamQuality : null,
+  };
 }
 
 export interface QualityCheck {
@@ -1436,6 +1441,8 @@ export const onRendererPowerSave = (cb: (suspended: boolean) => void) =>
   onEvent("renderer-power-save", (p) => cb(p !== false));
 
 export const onWindowRestored = (cb: () => void) => onEvent("window-restored", () => cb());
+
+export const onWindowCovered = (cb: (covered: boolean) => void) => onEvent("window-covered", (p) => cb(p === true));
 
 export const onWindowMaximizedChanged = (cb: (maximized: boolean) => void) =>
   onEvent("window:maximized-changed", (p) => cb(!!p?.maximized));

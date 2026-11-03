@@ -303,7 +303,7 @@ export default function OverlayApp() {
           >
             <nav
               aria-label={t("overlay.app.sections")}
-              className="ov-rail flex min-h-0 w-[268px] shrink-0 flex-col border-r border-white/[0.07] px-4 pb-[18px] pt-6"
+              className="ov-rail flex min-h-0 w-[268px] shrink-0 flex-col px-4 pb-[18px] pt-6"
             >
               <div className="flex items-center gap-[11px] px-2 pb-[18px]">
                 <img
@@ -345,7 +345,7 @@ export default function OverlayApp() {
                 })}
               </div>
 
-              <div className="mt-auto flex flex-col gap-[9px] border-t border-white/[0.07] px-2 pt-4">
+              <div className="mt-auto flex flex-col gap-[9px] px-2 pt-4">
                 <div className="flex items-center justify-between text-[11.5px] text-white/[0.42]">
                   <span>{t("overlay.app.openClose")}</span>
                   <span className="ov-mono rounded-[5px] bg-white/[0.08] px-[6px] py-[2px] text-white/70">
@@ -363,7 +363,7 @@ export default function OverlayApp() {
 
             <div className="ov-content relative flex min-w-0 flex-1 flex-col">
               <ToastLayer onOpen={(id) => useNotificationStore.getState().dismissToast(id)} />
-              <header className="flex shrink-0 items-center justify-between gap-4 border-b border-white/[0.07] px-[clamp(30px,1.6vw,44px)] pb-4 pt-[26px]">
+              <header className="flex shrink-0 items-center justify-between gap-4 px-[clamp(30px,1.6vw,44px)] pb-4 pt-[26px]">
                 <h3 className="font-display text-[21px] font-semibold">{title}</h3>
                 <IconButton
                   type="button"

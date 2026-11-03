@@ -9,6 +9,9 @@
   process whose manifest opts in. Game trees go deeper than 260 characters, and a
   download that lands a file we then cannot checksum or replace reads to the player as
   a repair that never finishes.
+
+  It also asks for the segment heap, which hands memory back to Windows sooner after a
+  big download or shader job than the classic heap does.
 -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <dependency>
@@ -24,8 +27,11 @@
     </dependentAssembly>
   </dependency>
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
-    <windowsSettings xmlns:ws2016="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+    <windowsSettings
+      xmlns:ws2016="http://schemas.microsoft.com/SMI/2016/WindowsSettings"
+      xmlns:ws2020="http://schemas.microsoft.com/SMI/2020/WindowsSettings">
       <ws2016:longPathAware>true</ws2016:longPathAware>
+      <ws2020:heapType>SegmentHeap</ws2020:heapType>
     </windowsSettings>
   </application>
 </assembly>

@@ -1504,19 +1504,26 @@ fn fit_to_work_area(win: &WebviewWindow, zoom: f64) {
 }
 
 fn set_memory_low(win: &WebviewWindow, low: bool) {
+    WEBVIEW_HIDDEN.store(low, Ordering::SeqCst);
+    set_webview_resting(win, low);
+    if low {
+        suspend_while_playing(win.app_handle());
+    }
+}
+
+pub(crate) fn set_webview_resting(win: &WebviewWindow, resting: bool) {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
         COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
     };
     use windows_core::Interface;
 
-    WEBVIEW_HIDDEN.store(low, Ordering::SeqCst);
     let _ = win.with_webview(move |webview| unsafe {
         let controller = webview.controller();
-        let _ = controller.SetIsVisible(!low);
+        let _ = controller.SetIsVisible(!resting);
         if let Ok(core) = controller.CoreWebView2() {
             if let Ok(core19) = core.cast::<ICoreWebView2_19>() {
-                let level = if low {
+                let level = if resting {
                     COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
                 } else {
                     COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
@@ -1525,6 +1532,185 @@ fn set_memory_low(win: &WebviewWindow, low: bool) {
             }
         }
     });
+}
+
+// ------------ Suspend While Playing ------------
+// While a game runs and the launcher is hidden, its page is put to sleep a few seconds later so the game gets its
+// memory back. Showing the window wakes it on its own; a game stopping wakes it too, so the page can react.
+const SUSPEND_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+pub fn suspend_while_playing(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(SUSPEND_AFTER).await;
+        let playing = app
+            .try_state::<BackendState>()
+            .is_some_and(|state| state.game.is_any_game_active());
+        if !playing || !WEBVIEW_HIDDEN.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(win) = main_window(&app) else {
+            return;
+        };
+        let _ = win.with_webview(|webview| unsafe {
+            use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_3;
+            use webview2_com::TrySuspendCompletedHandler;
+            use windows_core::Interface;
+
+            let Ok(core) = webview.controller().CoreWebView2() else {
+                return;
+            };
+            let Ok(core3) = core.cast::<ICoreWebView2_3>() else {
+                return;
+            };
+            let handler = TrySuspendCompletedHandler::create(Box::new(|result, suspended| {
+                if suspended {
+                    log::info!("The launcher page is asleep while the game runs.");
+                } else {
+                    log::debug!("The launcher page could not be put to sleep ({result:?}).");
+                }
+                Ok(())
+            }));
+            if let Err(e) = core3.TrySuspend(&handler) {
+                log::debug!("The launcher page could not be put to sleep: {e}");
+            }
+        });
+    });
+}
+
+pub fn wake_webview(app: &AppHandle) {
+    let Some(win) = main_window(app) else {
+        return;
+    };
+    let _ = win.with_webview(|webview| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_3;
+        use windows_core::Interface;
+
+        if let Ok(core3) = webview
+            .controller()
+            .CoreWebView2()
+            .and_then(|core| core.cast::<ICoreWebView2_3>())
+        {
+            let _ = core3.Resume();
+        }
+    });
+}
+
+// ------------ Cover Watch ------------
+// Every second, while the launcher is shown but not in front, checks whether one other window covers it whole or it
+// sits on another desktop, and tells the page, so the wallpaper video can pause while nobody can see it.
+const COVER_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
+static COVERED: AtomicBool = AtomicBool::new(false);
+
+pub fn start_cover_watch(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(COVER_CHECK).await;
+            let covered = main_window(&app).is_some_and(|win| window_covered(&win));
+            if COVERED.swap(covered, Ordering::SeqCst) != covered {
+                let _ = app.emit("window-covered", covered);
+            }
+        }
+    });
+}
+
+fn window_covered(win: &WebviewWindow) -> bool {
+    if WEBVIEW_HIDDEN.load(Ordering::SeqCst)
+        || !win.is_visible().unwrap_or(false)
+        || win.is_minimized().unwrap_or(true)
+    {
+        return false;
+    }
+    let Ok(hwnd) = win.hwnd() else {
+        return false;
+    };
+    covered_by_another(hwnd.0 as windows_sys::Win32::Foundation::HWND)
+}
+
+fn covered_by_another(ours: windows_sys::Win32::Foundation::HWND) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindow, GW_HWNDPREV};
+
+    if unsafe { GetForegroundWindow() } == ours {
+        return false;
+    }
+    if is_cloaked(ours) {
+        return true;
+    }
+    let Some(mine) = frame_rect(ours) else {
+        return false;
+    };
+    let own_pid = std::process::id();
+    let mut above = unsafe { GetWindow(ours, GW_HWNDPREV) };
+    while !above.is_null() {
+        if covers(above, &mine, own_pid) {
+            return true;
+        }
+        above = unsafe { GetWindow(above, GW_HWNDPREV) };
+    }
+    false
+}
+
+fn covers(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    mine: &windows_sys::Win32::Foundation::RECT,
+    own_pid: u32,
+) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_EXSTYLE, WS_EX_LAYERED,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    };
+
+    if unsafe { IsWindowVisible(hwnd) } == 0 || unsafe { IsIconic(hwnd) } != 0 || is_cloaked(hwnd) {
+        return false;
+    }
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+    if style & (WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) != 0 {
+        return false;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    if pid == own_pid {
+        return false;
+    }
+    frame_rect(hwnd).is_some_and(|r| {
+        r.left <= mine.left && r.top <= mine.top && r.right >= mine.right && r.bottom >= mine.bottom
+    })
+}
+
+fn is_cloaked(hwnd: windows_sys::Win32::Foundation::HWND) -> bool {
+    use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+
+    let mut cloaked = 0u32;
+    let read = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED as u32,
+            (&mut cloaked as *mut u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    read == 0 && cloaked != 0
+}
+
+fn frame_rect(hwnd: windows_sys::Win32::Foundation::HWND) -> Option<windows_sys::Win32::Foundation::RECT> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    let read = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+            (&mut rect as *mut RECT).cast(),
+            std::mem::size_of::<RECT>() as u32,
+        )
+    };
+    if read != 0 && unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
+        return None;
+    }
+    (rect.right > rect.left && rect.bottom > rect.top).then_some(rect)
 }
 
 // ------------ Window Manager Tests ------------
