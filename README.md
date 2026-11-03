@@ -1,6 +1,6 @@
 <div align="center">
 
-<img width="960" height="534" alt="image" src="https://github.com/user-attachments/assets/1fa95629-86ee-4ff2-866c-b024b2980115" />
+<img width="960" height="527" alt="home" src="https://github.com/user-attachments/assets/eef59ba7-de06-49a1-9311-eca6d25e483e" />
 
 # Peebify Launcher Lite
 
